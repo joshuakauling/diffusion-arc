@@ -10,6 +10,14 @@
 - Keep this root guidance concise. Add nested `AGENTS.md` files only when a
   subtree develops genuinely different commands or constraints.
 
+## Research documentation
+
+- Store sourced research notes and benchmark context in `docs/`.
+- Treat documents in `docs/` as supporting context; `README.md` remains the
+  authoritative source for project scope and milestones.
+- Keep factual claims traceable to primary sources and document leakage,
+  evaluation limitations, and unresolved evidence gaps explicitly.
+
 ## Mandatory gated workflow
 
 For every request that could modify the repository or external state:
