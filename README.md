@@ -9,7 +9,10 @@ The system combines two complementary components:
 1. **NVARC/Qwen3-4B**, a language model specialized in serialized ARC tasks, provides task-level reasoning representations.
 2. **FLUX.2-klein-base-4B**, a pretrained flow transformer, processes the task conditioning and generates a spatial representation of the target grid.
 
-NVARC remains frozen, while the complete FLUX transformer is fine-tuned using full-parameter distributed training. A discrete color-classification head is added alongside the original flow-matching output head to produce exact ARC grids.
+NVARC remains frozen, while the complete FLUX transformer is fine-tuned using
+full-parameter distributed training. The initial architecture uses only FLUX's
+original velocity head and flow-matching objective. It adds no conditioning
+adapter, color head, or shape head.
 
 The project has two goals:
 
@@ -25,7 +28,10 @@ The primary research question is:
 Supporting questions include:
 
 - Does NVARC conditioning outperform the native FLUX text encoder?
-- Does the flow-matching objective improve exact grid prediction beyond a discrete color loss?
+- Can the original flow-matching objective recover exact discrete grids without
+  a task-specific prediction head?
+- Can output dimensions be recovered from a generated padded canvas without a
+  separate shape predictor?
 - Does FLUX provide value beyond a substantially smaller 2D transformer decoder?
 - What are the memory, throughput, and numerical trade-offs of DDP and FSDP2 for full-parameter FLUX fine-tuning?
 
@@ -39,65 +45,112 @@ Serialized ARC demonstrations and test input
                     │
        Hidden states from selected layers
                     │
-        Trainable residual adapter
+       concatenate directly to width 7680
+                    │
+                    ▼
+        existing FLUX text projection
+                 7680 → 3072
                     │
                     ▼
         FLUX.2-klein-base-4B
           full-parameter training
                     │
-        Internal target-token features
+          Original Flow Head
+                 3072 → 128
                     │
-          ┌─────────┴─────────┐
-          ▼                   ▼
-   Original Flow Head    ARC Color Head
-          │                   │
-      Velocity          10 colors + PAD
+                    ▼
+          Packed-latent velocity
+                    │
+             ODE integration
+                    │
+                    ▼
+          Frozen FLUX.2 VAE decoder
+                    │
+                    ▼
+      Deterministic palette and PAD decoding
 ```
 
-The FLUX VAE and NVARC model remain frozen. The following components are trained:
+The FLUX VAE and NVARC model remain frozen. The complete FLUX transformer,
+including its existing input projections and final velocity head, is trained.
+No newly initialized trainable module is required.
 
-- the complete FLUX transformer,
-- the NVARC-to-FLUX conditioning adapter,
-- the ARC color head,
-- and, in a later stage, an output-shape head.
+The initial implementation uses the NVARC hidden states corresponding to
+FLUX's standard Qwen conditioning layers, subject to checkpoint and tensor
+compatibility verification. Three width-2,560 hidden states are expected to
+concatenate to FLUX's native context width of 7,680 and are passed directly to
+the existing `txt_in` projection. The expected ARC serialization may require
+roughly 8,000 context tokens rather than the 512-token reference path.
 
-The initial implementation uses the NVARC hidden states corresponding to FLUX’s standard Qwen conditioning layers, subject to checkpoint compatibility verification.
+The detailed initial design is specified in
+[`docs/initial-flow-only-architecture.md`](docs/initial-flow-only-architecture.md).
 
 ## Grid Representation
 
-ARC grids are represented on a fixed 30×30 canvas, corresponding to the maximum ARC grid dimensions.
+ARC grids are represented on a fixed 30×30 canvas, corresponding to the maximum
+ARC grid dimensions. The actual output is aligned to the top-left. Every
+remaining cell is filled with RGB white `(255, 255, 255)`, an eleventh visual
+sentinel outside the ten ARC colors.
 
-Each position is assigned one of eleven classes:
+Each cell is rendered as a solid 16×16 pixel block, producing a 480×480 image.
+The frozen VAE and its 2×2 latent packing transform this into a 30×30 grid of
+128-dimensional tokens:
 
-- the ten ARC colors,
-- one additional padding/outside class.
+\[
+[B,3,480,480]
+\rightarrow
+[B,128,30,30]
+\rightarrow
+[B,900,128].
+\]
 
-Initially, the correct output dimensions are provided to the model. Shape prediction is intentionally postponed until the transformation itself works reliably.
-
-The target canvas is also rendered as an image and encoded into FLUX latent space for flow-matching training.
+This gives one FLUX image token per ARC cell. Output dimensions are not supplied
+to the model. They are represented by the generated PAD boundary and recovered
+deterministically after VAE decoding.
 
 ## Training Objective
 
-The initial loss is:
+For the clean packed target latent `z_0`, sample Gaussian noise `epsilon` and a
+flow time `t`, then construct:
 
 \[
-L = L_{\text{flow}} + \lambda_{\text{color}} L_{\text{color}}
+z_t=(1-t)z_0+t\epsilon.
 \]
 
-where:
-
-- `L_flow` is the original FLUX flow-matching loss,
-- `L_color` is cross-entropy over the discrete ARC color classes.
-
-A later version may add:
+The straight-path velocity target is:
 
 \[
-\lambda_{\text{shape}} L_{\text{shape}}
+u_t=\epsilon-z_0.
 \]
 
-for height and width prediction.
+The initial and only loss is:
 
-An important ablation removes `L_flow` to determine whether the iterative flow process contributes to solving the task or whether the discrete head is doing all meaningful work.
+\[
+\mathcal{L}_{\text{flow}}
+=
+\mathbb{E}
+\left[
+\left\|
+v_\theta(z_t,t,c)-(\epsilon-z_0)
+\right\|_2^2
+\right].
+\]
+
+There is no color cross-entropy, auxiliary decoder, adapter loss, or shape
+loss in the initial architecture.
+
+## Inference and Grid Decoding
+
+Inference starts from a Gaussian packed latent of shape `[B,900,128]` and
+integrates the learned velocity field backward from noise to data. The frozen
+VAE decodes the final latent once into a 480×480 RGB image.
+
+The image is divided into 30×30 cells. Each cell's mean RGB value is assigned
+to the nearest prototype among the ten ARC colors plus white PAD. The last row
+and column containing any non-PAD cell determine the predicted output extent,
+and the top-left rectangle is returned as the ARC answer.
+
+An all-PAD canvas or PAD inside the inferred output rectangle is an invalid
+prediction. Ground-truth output dimensions must not be used as a fallback.
 
 ## Distributed Training
 
@@ -129,7 +182,8 @@ Model quality is evaluated using:
 - exact grid accuracy,
 - per-cell accuracy,
 - pass@1 and pass@2 accuracy,
-- flow and color loss,
+- output-height and output-width accuracy,
+- flow loss,
 - performance by grid size and transformation category,
 - and sensitivity to the number of denoising steps.
 
@@ -142,11 +196,16 @@ The project should include at least:
 1. the original autoregressive NVARC solver,
 2. native FLUX-Qwen conditioning versus NVARC conditioning,
 3. NVARC conditioning with a small task-specific 2D decoder,
-4. FLUX with color loss only,
-5. FLUX with combined flow and color loss,
-6. LoRA versus full-parameter FLUX fine-tuning.
+4. pretrained FLUX versus a capacity-controlled non-pretrained spatial model,
+5. LoRA versus full-parameter FLUX fine-tuning.
 
-These baselines are necessary to determine whether improvements come from visual pretraining, the flow objective, the NVARC encoder, or simply additional model capacity.
+These baselines are necessary to determine whether improvements come from
+visual pretraining, the flow objective, the NVARC encoder, or simply additional
+model capacity.
+
+Color heads, combined flow-and-color heads, explicit shape heads, and
+conditioning adapters are optional later architecture experiments. They are
+not required for the initial implementation or its first evaluation.
 
 ## Milestones
 
@@ -155,12 +214,14 @@ These baselines are necessary to determine whether improvements come from visual
 - Load and freeze NVARC.
 - Verify tokenizer and checkpoint compatibility.
 - Extract the required hidden states.
+- Pass the concatenated hidden states directly through FLUX's existing text
+  projection.
 - Pass one ARC example through the complete pipeline.
-- Compute both losses and backpropagate through FLUX only.
+- Compute flow loss and backpropagate through FLUX only.
 
 ### Milestone 2 — Single-GPU Correctness
 
-- Implement the fixed canvas and discrete color head.
+- Implement the top-left-aligned padded canvas and deterministic grid decoder.
 - Overfit a tiny set of ARC examples.
 - Add deterministic tests, gradient checks, and NaN detection.
 - Confirm that NVARC and VAE remain frozen.
@@ -177,7 +238,7 @@ This is the first application-ready public milestone.
 ### Milestone 4 — Research Evaluation
 
 - Run the first meaningful training experiments.
-- Evaluate exact grid accuracy.
+- Evaluate exact grid and output-shape accuracy.
 - Compare against the required baselines.
 - Determine whether flow matching and visual pretraining provide measurable value.
 
@@ -185,7 +246,10 @@ This is the first application-ready public milestone.
 
 Only after the core hypothesis is validated:
 
-- output-shape prediction,
+- conditioning adapters,
+- discrete color heads,
+- combined flow and color heads,
+- explicit output-shape heads,
 - compact visual reference canvases,
 - test-time adaptation,
 - FP8 experiments,
@@ -197,8 +261,10 @@ Only after the core hypothesis is validated:
 The first version will not:
 
 - fine-tune NVARC,
-- use multiple full-resolution reference images,
-- predict output dimensions,
+- add a NVARC-to-FLUX adapter,
+- add a color, shape, or other task-specific learned output head,
+- use visual reference-image tokens,
+- receive ground-truth output dimensions,
 - target state-of-the-art ARC performance,
 - use FP8 or custom kernels,
 - or claim large-scale/multi-node training.

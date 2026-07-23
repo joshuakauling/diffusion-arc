@@ -77,10 +77,14 @@ Unless the user explicitly approves a scope change:
 - Keep the FLUX VAE frozen.
 - Train the complete FLUX transformer for the primary approach; LoRA is a
   required baseline, not the default training method.
-- Train the NVARC-to-FLUX adapter and ARC color head.
-- Postpone the output-shape head until the corresponding milestone.
-- Use a fixed 30x30 canvas with ten ARC colors plus one padding/outside class.
-- Provide the correct output dimensions during the initial implementation.
+- Pass compatible concatenated NVARC hidden states directly to FLUX's existing
+  text projection; do not add a conditioning adapter in the initial approach.
+- Use only the original FLUX velocity head and flow-matching loss in the initial
+  approach; color, shape, and combined heads are optional later experiments.
+- Use a fixed 30x30 canvas with the true grid aligned to the top-left and RGB
+  white as the padding/outside sentinel.
+- Infer output dimensions from the generated padding boundary; do not provide
+  ground-truth dimensions or silently use them as a fallback.
 - Verify tokenizer, checkpoint, hidden-layer, tensor-shape, and dtype
   compatibility rather than assuming it.
 - Split training and validation at the ARC task level.
