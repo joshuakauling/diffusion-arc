@@ -121,7 +121,7 @@ Create the local FLUX.2 VAE smoke-test environment with:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install --no-cache-dir -r requirements/vae-smoke.txt
+.venv/bin/python -m pip install --no-cache-dir -r requirements.txt
 ```
 
 Run the VAE smoke test on Apple Silicon with:

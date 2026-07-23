@@ -30,7 +30,7 @@ Create the environment and run the test:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install --no-cache-dir -r requirements/vae-smoke.txt
+.venv/bin/python -m pip install --no-cache-dir -r requirements.txt
 .venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16
 ```
 
