@@ -113,11 +113,28 @@ Unless the user explicitly approves a scope change:
 
 ## Validation commands
 
-No canonical environment, lint, test, or training commands exist yet.
+Create the local FLUX.2 VAE smoke-test environment with:
 
-When the project scaffold is approved and introduced, add the actual commands
-here in the same change. Do not invent commands that the repository does not
-support.
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-cache-dir -r requirements/vae-smoke.txt
+```
+
+Run the VAE smoke test on Apple Silicon with:
+
+```bash
+.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16
+```
+
+After the model is cached, run the approved resolution comparison offline with:
+
+```bash
+.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
+.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
+.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
+```
+
+No canonical lint or training commands exist yet.
 
 ## Communication
 

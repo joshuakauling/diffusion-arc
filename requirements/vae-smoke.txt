@@ -1,0 +1,4 @@
+# Minimal, pinned environment for the local FLUX.2 VAE smoke test on macOS.
+diffusers==0.39.0
+Pillow==11.3.0
+torch==2.13.0

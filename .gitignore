@@ -1,3 +1,8 @@
 /data/benchmarks/
 /data/evaluation_runs/
+.venv/
+.cache/
+/artifacts/
+__pycache__/
+*.py[cod]
 .DS_Store
