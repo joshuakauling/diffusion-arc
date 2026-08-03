@@ -84,6 +84,87 @@ roughly 8,000 context tokens rather than the 512-token reference path.
 The detailed initial design is specified in
 [`docs/initial-flow-only-architecture.md`](docs/initial-flow-only-architecture.md).
 
+## Initial Implementation
+
+The first implementation now represents the complete runtime as one
+`torch.nn.Module`, while retaining explicit placement for its three large
+components:
+
+```text
+src/diffusion_arc/
+├── _vendor/bfl_flux2/   pinned, byte-identical BFL model and autoencoder
+├── nvarc_conditioning.py  frozen NVARC hidden-state extraction
+├── model.py            composed DiffusionARCModel
+├── loading.py          strict local-only checkpoint loaders
+├── serialization.py    NVARC-compatible ARC prompts
+├── grid_codec.py       fixed canvas and strict output decoding
+├── flow.py             flow corruption and loss
+├── positions.py        FLUX four-axis position IDs
+└── sampling.py         BFL schedule and Euler integration
+```
+
+The vendored sources come from BFL commit
+`50fe5162777813d869182b139e83b10743caef15`; their hashes and license are
+recorded in
+[`src/diffusion_arc/_vendor/bfl_flux2/UPSTREAM.md`](src/diffusion_arc/_vendor/bfl_flux2/UPSTREAM.md).
+Project-specific behavior stays outside that directory.
+
+Run the local contract suite without model weights:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+```
+
+The real Milestone-1 validation is designed for an offline Kaggle session with
+the repository, NVARC checkpoint, BFL Klein Base 4B checkpoint, BFL
+autoencoder, challenge JSON, and solution JSON attached as inputs. Run the
+following command from the repository root after replacing the placeholder
+paths and `TASK_ID`:
+
+```bash
+python scripts/milestone1_smoke_test.py \
+  --nvarc-path /kaggle/input/.../nvarc \
+  --flux-path /kaggle/input/.../flux-2-klein-base-4b.safetensors \
+  --vae-path /kaggle/input/.../ae.safetensors \
+  --task-json /kaggle/input/.../arc-agi_training_challenges.json \
+  --solution-json /kaggle/input/.../arc-agi_training_solutions.json \
+  --task-id TASK_ID \
+  --nvarc-device cuda:0 \
+  --flux-device cuda:1 \
+  --vae-device cuda:0 \
+  --report-path /kaggle/working/milestone1-smoke.json
+```
+
+Use BFL's standalone `ae.safetensors`, not the Diffusers-format
+`vae/diffusion_pytorch_model.safetensors`; the strict vendored autoencoder
+expects the original BFL state-dict names.
+
+The runner adds `src/` to its import path and performs no downloads. Do not
+install `requirements-model.txt` over Kaggle's CUDA environment; that file is a
+pinned local development environment. If an editable package install is useful
+on Kaggle, use `pip install -e . --no-deps` only after confirming the preinstalled
+package versions. By default the runner hashes all checkpoint files and records
+package versions, devices, dtypes, tensor shapes, peak CUDA memory, the FP32
+flow loss, gradient boundaries, and a real one-step Euler/VAE/decode pass. The
+one-step generation is an interface check, not a meaningful Base-model sample;
+use 50 steps only when generation quality is actually being evaluated.
+
+The first run may omit `--expected-nvarc-manifest-sha256` to discover the
+checkpoint's aggregate manifest hash. Such a report is explicitly marked
+`passed_with_unverified_checkpoint_identity`; rerun with the recorded value for
+final Milestone-1 evidence by adding:
+
+```bash
+--expected-nvarc-manifest-sha256 NVARC_MANIFEST_SHA256
+```
+
+The official BFL Base 4B and standalone VAE hashes are pinned and verified by
+default.
+
+This implementation and its fake/tiny tests do not complete Milestone 1. That
+milestone requires a passing report from the real attached checkpoints on
+Kaggle; tiny-set overfitting remains Milestone 2.
+
 ## Grid Representation
 
 ARC grids are represented on a fixed 30×30 canvas, corresponding to the maximum

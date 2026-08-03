@@ -1,0 +1,9 @@
+# Pinned local development environment. Do not install this over Kaggle's
+# prebuilt CUDA/PyTorch runtime; run the source-only smoke script there.
+-r requirements.txt
+
+# Additional runtime dependencies for the composed NVARC + FLUX model.
+accelerate==1.12.0
+einops==0.8.1
+safetensors==0.8.0
+transformers==4.56.1
