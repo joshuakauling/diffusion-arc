@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "name": "arc_agi_2_initial",
+  "benchmark": "arc-agi-2",
+  "source_split": "training",
+  "source": {
+    "challenges_file": "arc-agi_training_challenges.json",
+    "challenges_sha256": "779eaba89790ebad9af02514a7efc0aefaf2cf8236f046a31bbf8b9ec48f20f5",
+    "solutions_file": "arc-agi_training_solutions.json",
+    "solutions_sha256": "9f07a38bd25af5e83aa5bf85c5cb1a1fefdb30f6a755256fa65429e697ca97f9"
+  },
+  "samples": [
+    {
+      "task_id": "3c9b0459",
+      "test_index": 0,
+      "label": "rotate_180"
+    },
+    {
+      "task_id": "0d3d703e",
+      "test_index": 0,
+      "label": "fixed_color_mapping"
+    },
+    {
+      "task_id": "8be77c9e",
+      "test_index": 0,
+      "label": "vertical_mirror"
+    },
+    {
+      "task_id": "c9e6f938",
+      "test_index": 0,
+      "label": "horizontal_mirror"
+    },
+    {
+      "task_id": "00576224",
+      "test_index": 0,
+      "label": "periodic_pattern_expansion"
+    },
+    {
+      "task_id": "0520fde7",
+      "test_index": 0,
+      "label": "panel_intersection"
+    },
+    {
+      "task_id": "88a62173",
+      "test_index": 0,
+      "label": "unique_quadrant_selection"
+    },
+    {
+      "task_id": "d631b094",
+      "test_index": 0,
+      "label": "count_nonzero_cells"
+    }
+  ],
+  "subset_prefix_lengths": {
+    "smoke_1": 1,
+    "tiny_4": 4,
+    "tiny_8": 8
+  },
+  "selection_constraints": {
+    "test_examples_per_task": 1,
+    "min_train_examples": 2,
+    "max_train_examples": 4,
+    "max_prompt_characters": 384,
+    "max_grid_dimension": 7
+  }
+}
