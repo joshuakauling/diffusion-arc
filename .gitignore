@@ -1,4 +1,5 @@
 /data/benchmarks/
+/data/raw/
 /data/evaluation_runs/
 .venv/
 .cache/

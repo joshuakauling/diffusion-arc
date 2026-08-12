@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.print_arc_prompt import load_arc_task, main
+from scripts.print_arc_prompt import DEFAULT_DATA_ROOT, load_arc_task, main
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,12 @@ def _write_task(data_root: Path, split: str, task_id: str) -> None:
 
 
 class PrintArcPromptTests(unittest.TestCase):
+    def test_default_data_root_uses_raw_arc_agi_2_directory(self) -> None:
+        self.assertEqual(
+            DEFAULT_DATA_ROOT,
+            REPOSITORY_ROOT / "data/raw/arc-agi-2",
+        )
+
     def test_loads_ids_from_both_splits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             data_root = Path(temporary_directory)

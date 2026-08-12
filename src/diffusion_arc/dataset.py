@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .arc_data import Grid
 from .serialization import serialize_arc_task, serialize_grid
 
 
@@ -23,9 +24,6 @@ _SELECTION_CONSTRAINTS = {
     "max_prompt_characters",
     "max_grid_dimension",
 }
-
-Grid = tuple[tuple[int, ...], ...]
-
 
 @dataclass(frozen=True)
 class ArcDatasetSource:

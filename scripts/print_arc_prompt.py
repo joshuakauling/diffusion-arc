@@ -20,7 +20,7 @@ if str(SOURCE_ROOT) not in sys.path:
 from diffusion_arc.serialization import serialize_arc_task_for_llm  # noqa: E402
 
 
-DEFAULT_DATA_ROOT = REPOSITORY_ROOT / "data/benchmarks/arc-agi-2"
+DEFAULT_DATA_ROOT = REPOSITORY_ROOT / "data/raw/arc-agi-2"
 SPLITS = ("training", "evaluation")
 TASK_ID_PATTERN = re.compile(r"[0-9a-f]{8}")
 
