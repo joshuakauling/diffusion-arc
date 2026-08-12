@@ -3,7 +3,7 @@
 ## Repository source of truth
 
 - Read `README.md` before planning work.
-- Treat its project scope, research questions, milestones, required baselines,
+- Treat its project scope, research questions, milestones, evaluation protocol,
   and non-goals as authoritative.
 - Do not change the research hypothesis, milestone order, or initial non-goals
   without explicit user approval.
@@ -75,8 +75,7 @@ Unless the user explicitly approves a scope change:
 
 - Keep NVARC/Qwen3-4B frozen.
 - Keep the FLUX VAE frozen.
-- Train the complete FLUX transformer for the primary approach; LoRA is a
-  required baseline, not the default training method.
+- Train the complete FLUX transformer for the primary approach.
 - Pass compatible concatenated NVARC hidden states directly to FLUX's existing
   text projection; do not add a conditioning adapter in the initial approach.
 - Use only the original FLUX velocity head and flow-matching loss in the initial
@@ -89,11 +88,15 @@ Unless the user explicitly approves a scope change:
   compatibility rather than assuming it.
 - Split training and validation at the ARC task level.
 - Never allow augmented variants of held-out tasks into training data.
-- Treat exact-grid accuracy as the primary quality result.
-- Preserve the required baselines before attributing gains to FLUX pretraining,
-  flow matching, NVARC conditioning, or model capacity.
-- Do not introduce milestone-5 extensions before the core hypothesis has been
-  validated.
+- Treat exact-grid pass@1 and pass@2 as the primary quality results.
+- Use NVARC's original autoregressive decoding through direct sampling as the
+  required evaluation baseline.
+- Exclude test-time training, test-time augmentation, voting, and task-specific
+  parameter updates from the primary evaluation.
+- Treat FP8 and Triton work as optional stretch experiments after the nine core
+  milestones.
+- Keep distributed training within a single node; multi-node training is
+  outside the project scope.
 
 ## Engineering and research standards
 

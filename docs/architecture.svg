@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1240" viewBox="0 0 1500 1240" role="img" aria-labelledby="title desc">
+  <title id="title">Diffusion-ARC architecture</title>
+  <desc id="desc">Frozen NVARC conditioning and a frozen VAE latent path feed a fully trainable FLUX transformer. The predicted velocity is used for flow-matching training and iterative ODE sampling before VAE and ARC grid decoding.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #1f2328;
+      }
+      .title { font-size: 30px; font-weight: 700; }
+      .section-title { font-size: 18px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 600; }
+      .body { font-size: 15px; }
+      .small { font-size: 13px; fill: #57606a; }
+      .frozen-area { fill: #f2f7ff; stroke: #4c82c3; stroke-width: 2; }
+      .trainable-area { fill: #faf7ff; stroke: #8250df; stroke-width: 2.5; }
+      .node { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
+      .trainable-node { fill: #f1eaff; stroke: #8250df; stroke-width: 2; }
+      .training-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; }
+      .inference-node { fill: #edfaef; stroke: #2d7d46; stroke-width: 2; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2; marker-end: url(#arrow); }
+      .loop { fill: none; stroke: #2d7d46; stroke-width: 2.5; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="1240" fill="#ffffff"/>
+  <text x="750" y="48" text-anchor="middle" class="title">Diffusion-ARC architecture</text>
+
+  <!-- Frozen NVARC path -->
+  <rect x="55" y="82" width="650" height="285" rx="16" class="frozen-area"/>
+  <text x="380" y="118" text-anchor="middle" class="section-title">Frozen NVARC conditioning</text>
+
+  <text x="380" y="158" text-anchor="middle" class="label">Serialized ARC demonstrations and test input</text>
+  <text x="380" y="180" text-anchor="middle" class="small">N_context up to 8,192 tokens</text>
+  <path d="M 380 193 L 380 218" class="arrow"/>
+
+  <text x="380" y="246" text-anchor="middle" class="label">NVARC / Qwen3-4B</text>
+  <path d="M 380 260 L 380 282" class="arrow"/>
+
+  <text x="380" y="310" text-anchor="middle" class="body">Hidden states from layers 9, 18, and 27</text>
+  <text x="380" y="337" text-anchor="middle" class="label">Concatenate → [B, N_context, 7,680]</text>
+
+  <!-- Frozen VAE latent path -->
+  <rect x="795" y="82" width="650" height="285" rx="16" class="frozen-area"/>
+  <text x="1120" y="118" text-anchor="middle" class="section-title">Frozen VAE latent representation</text>
+
+  <text x="1120" y="156" text-anchor="middle" class="label">Target ARC grid → top-left 30×30 canvas</text>
+  <text x="1120" y="178" text-anchor="middle" class="small">16×16 pixels per cell → 480×480 RGB</text>
+  <path d="M 1120 191 L 1120 213" class="arrow"/>
+
+  <text x="1120" y="240" text-anchor="middle" class="label">Frozen FLUX.2 VAE encoder + 2×2 packing</text>
+  <text x="1120" y="264" text-anchor="middle" class="body">[B, 128, 30, 30]</text>
+  <path d="M 1120 276 L 1120 296" class="arrow"/>
+
+  <text x="1120" y="323" text-anchor="middle" class="label">Flatten → 900 image tokens</text>
+  <text x="1120" y="346" text-anchor="middle" class="body">clean target z_0: [B, 900, 128]</text>
+
+  <!-- Latent state preparation -->
+  <rect x="810" y="386" width="275" height="62" rx="10" class="training-node"/>
+  <text x="947" y="412" text-anchor="middle" class="label">Training</text>
+  <text x="947" y="434" text-anchor="middle" class="body">add noise → z_t [B, 900, 128]</text>
+
+  <rect x="1155" y="386" width="275" height="62" rx="10" class="inference-node"/>
+  <text x="1292" y="412" text-anchor="middle" class="label">Inference</text>
+  <text x="1292" y="434" text-anchor="middle" class="body">Gaussian state [B, 900, 128]</text>
+
+  <path d="M 1120 367 C 1120 378, 947 372, 947 386" class="arrow"/>
+
+  <!-- Trainable FLUX area -->
+  <rect x="125" y="462" width="1250" height="388" rx="18" class="trainable-area"/>
+  <text x="650" y="496" text-anchor="middle" class="section-title">FLUX.2-klein-base-4B — full transformer trainable</text>
+
+  <rect x="225" y="526" width="390" height="72" rx="12" class="trainable-node"/>
+  <text x="420" y="553" text-anchor="middle" class="label">Text projection · txt_in</text>
+  <text x="420" y="579" text-anchor="middle" class="body">7,680 → 3,072 · [B, N_context, 3,072]</text>
+
+  <rect x="885" y="526" width="390" height="72" rx="12" class="trainable-node"/>
+  <text x="1080" y="553" text-anchor="middle" class="label">Image projection · img_in</text>
+  <text x="1080" y="579" text-anchor="middle" class="body">128 → 3,072 · [B, 900, 3,072]</text>
+
+  <path d="M 380 367 L 380 526" class="arrow"/>
+  <path d="M 947 448 L 947 474 L 1040 474 L 1040 526" class="arrow"/>
+  <path d="M 1292 448 L 1292 488 L 1120 488 L 1120 526" class="arrow"/>
+
+  <rect x="430" y="640" width="640" height="86" rx="12" class="trainable-node"/>
+  <text x="750" y="674" text-anchor="middle" class="label">FLUX transformer blocks</text>
+  <text x="750" y="701" text-anchor="middle" class="body">NVARC context and 900 spatial image tokens</text>
+
+  <path d="M 420 598 C 420 622, 620 615, 620 640" class="arrow"/>
+  <path d="M 1080 598 C 1080 622, 880 615, 880 640" class="arrow"/>
+
+  <rect x="520" y="764" width="460" height="62" rx="12" class="trainable-node"/>
+  <text x="750" y="790" text-anchor="middle" class="label">Original velocity head · 3,072 → 128</text>
+  <text x="750" y="813" text-anchor="middle" class="body">velocity prediction [B, 900, 128]</text>
+  <path d="M 750 726 L 750 764" class="arrow"/>
+
+  <!-- Training branch -->
+  <rect x="145" y="910" width="425" height="104" rx="14" class="training-node"/>
+  <text x="357" y="943" text-anchor="middle" class="section-title">Training · flow-matching loss</text>
+  <text x="357" y="971" text-anchor="middle" class="body">prediction versus ε − z_0</text>
+  <text x="357" y="995" text-anchor="middle" class="small">backpropagation through FLUX only</text>
+  <path d="M 700 826 C 700 874, 357 863, 357 910" class="arrow"/>
+
+  <!-- Inference branch and loop -->
+  <rect x="930" y="910" width="330" height="82" rx="14" class="inference-node"/>
+  <text x="1095" y="942" text-anchor="middle" class="section-title">Inference · ODE integration</text>
+  <text x="1095" y="969" text-anchor="middle" class="body">update the packed latent state</text>
+  <path d="M 800 826 C 800 875, 1095 866, 1095 910" class="arrow"/>
+
+  <path d="M 1260 951 L 1415 951 L 1415 560 L 1275 560" class="loop"/>
+  <text x="1428" y="750" transform="rotate(90 1428 750)" text-anchor="middle" class="small">next latent state</text>
+
+  <!-- Final decoding -->
+  <path d="M 1095 992 L 1095 1030" class="arrow"/>
+  <text x="1095" y="1055" text-anchor="middle" class="label">final packed latent [B, 900, 128]</text>
+  <path d="M 1095 1067 L 1095 1088" class="arrow"/>
+
+  <rect x="840" y="1088" width="510" height="66" rx="12" class="frozen-area"/>
+  <text x="1095" y="1115" text-anchor="middle" class="label">Unflatten [B, 128, 30, 30] → frozen VAE decoder</text>
+  <text x="1095" y="1139" text-anchor="middle" class="body">480×480 RGB output image</text>
+
+  <path d="M 840 1121 L 640 1121" class="arrow"/>
+  <rect x="190" y="1088" width="450" height="66" rx="12" class="node"/>
+  <text x="415" y="1115" text-anchor="middle" class="label">30×30 palette and PAD cell decoding</text>
+  <text x="415" y="1139" text-anchor="middle" class="body">infer the boundary → predicted ARC output grid</text>
+
+  <text x="750" y="1204" text-anchor="middle" class="small">The internal canvas is always 30×30 cells; PAD determines the variable output size.</text>
+</svg>
