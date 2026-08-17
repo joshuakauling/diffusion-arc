@@ -193,38 +193,18 @@ def sample_training_augmentation(
 ) -> ArcAugmentationSpec:
     """Sample one bounded, reproducible augmentation of a training task."""
 
-    if not isinstance(task, ArcTrainingTask):
-        raise TypeError("task must be an ArcTrainingTask")
+    _validate_training_sampling_limits(task, max_pairs=max_pairs, max_cells=max_cells)
     if augmentation_index < 0:
         raise ValueError("augmentation_index must be non-negative")
-    if max_pairs < 2:
-        raise ValueError("max_pairs must allow at least two pairs")
-    if max_cells <= 0:
-        raise ValueError("max_cells must be positive")
 
     candidate_indices = list(range(len(task.pairs)))
     rng.shuffle(candidate_indices)
-
-    selected_indices: list[int] = []
-    selected_cells = 0
-    for pair_index in candidate_indices:
-        if len(selected_indices) == max_pairs:
-            break
-
-        pair = task.pairs[pair_index]
-        pair_cells = _grid_cell_count(pair.input_grid) + _grid_cell_count(
-            pair.output_grid
-        )
-        if selected_cells + pair_cells > max_cells:
-            continue
-
-        selected_indices.append(pair_index)
-        selected_cells += pair_cells
-
-    if len(selected_indices) < 2:
-        raise ValueError(
-            "fewer than two task pairs fit within the configured sampling limits"
-        )
+    selected_indices = _select_pair_indices(
+        task,
+        candidate_indices=candidate_indices,
+        max_pairs=max_pairs,
+        max_cells=max_cells,
+    )
 
     color_mapping = list(range(10))
     rng.shuffle(color_mapping)
@@ -233,6 +213,28 @@ def sample_training_augmentation(
     return ArcAugmentationSpec(
         geometry=geometries[augmentation_index % len(geometries)],
         color_mapping=tuple(color_mapping),
+        pair_indices=tuple(selected_indices),
+    )
+
+
+def make_identity_training_augmentation(
+    task: ArcTrainingTask,
+    *,
+    max_pairs: int,
+    max_cells: int,
+) -> ArcAugmentationSpec:
+    """Build the untransformed, original-order view that fits the limits."""
+
+    _validate_training_sampling_limits(task, max_pairs=max_pairs, max_cells=max_cells)
+    selected_indices = _select_pair_indices(
+        task,
+        candidate_indices=range(len(task.pairs)),
+        max_pairs=max_pairs,
+        max_cells=max_cells,
+    )
+    return ArcAugmentationSpec(
+        geometry=ArcGeometry.IDENTITY,
+        color_mapping=tuple(range(10)),
         pair_indices=tuple(selected_indices),
     )
 
@@ -304,6 +306,50 @@ def _grid_cell_count(grid: Grid) -> int:
     return sum(len(row) for row in grid)
 
 
+def _validate_training_sampling_limits(
+    task: ArcTrainingTask,
+    *,
+    max_pairs: int,
+    max_cells: int,
+) -> None:
+    if not isinstance(task, ArcTrainingTask):
+        raise TypeError("task must be an ArcTrainingTask")
+    if max_pairs < 2:
+        raise ValueError("max_pairs must allow at least two pairs")
+    if max_cells <= 0:
+        raise ValueError("max_cells must be positive")
+
+
+def _select_pair_indices(
+    task: ArcTrainingTask,
+    *,
+    candidate_indices: range | list[int],
+    max_pairs: int,
+    max_cells: int,
+) -> list[int]:
+    selected_indices: list[int] = []
+    selected_cells = 0
+    for pair_index in candidate_indices:
+        if len(selected_indices) == max_pairs:
+            break
+
+        pair = task.pairs[pair_index]
+        pair_cells = _grid_cell_count(pair.input_grid) + _grid_cell_count(
+            pair.output_grid
+        )
+        if selected_cells + pair_cells > max_cells:
+            continue
+
+        selected_indices.append(pair_index)
+        selected_cells += pair_cells
+
+    if len(selected_indices) < 2:
+        raise ValueError(
+            "fewer than two task pairs fit within the configured sampling limits"
+        )
+    return selected_indices
+
+
 def _validate_grid(grid: Grid) -> None:
     if not grid or any(not row for row in grid):
         raise ValueError("grid must contain at least one non-empty row")
@@ -338,6 +384,7 @@ __all__ = [
     "augment_grid",
     "format_augmentation_key",
     "make_augmentation_key",
+    "make_identity_training_augmentation",
     "parse_augmentation_key",
     "sample_training_augmentation",
     "validate_augmentation_for_task",

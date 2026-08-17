@@ -14,6 +14,7 @@ from diffusion_arc.arc_data import (
     apply_training_augmentation,
     augment_grid,
     make_augmentation_key,
+    make_identity_training_augmentation,
     parse_augmentation_key,
     sample_training_augmentation,
     validate_augmentation_for_task,
@@ -117,6 +118,26 @@ class ArcAugmentationTaskValidationTest(unittest.TestCase):
 
 
 class ArcAugmentationSamplingTest(unittest.TestCase):
+    def test_identity_keeps_original_order_within_limits(self) -> None:
+        large_pair = ArcPair(
+            input_grid=(tuple(range(20)),),
+            output_grid=(tuple(range(20)),),
+        )
+        task = ArcTrainingTask(
+            task_id="training-task",
+            pairs=(make_pair(0), large_pair, make_pair(2), make_pair(3)),
+        )
+
+        identity = make_identity_training_augmentation(
+            task,
+            max_pairs=2,
+            max_cells=4,
+        )
+
+        self.assertEqual(identity.geometry, ArcGeometry.IDENTITY)
+        self.assertEqual(identity.color_mapping, IDENTITY_COLOR_MAPPING)
+        self.assertEqual(identity.pair_indices, (0, 2))
+
     def test_sampling_is_reproducible_and_rotates_geometry(self) -> None:
         task = ArcTrainingTask(
             task_id="training-task",
