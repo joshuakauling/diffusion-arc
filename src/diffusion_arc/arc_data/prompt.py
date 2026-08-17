@@ -1,11 +1,11 @@
-"""NVARC prompt rendering for augmented ARC training samples."""
+"""NVARC prompt rendering for ARC training and evaluation samples."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from .augmentation import ArcAugmentationKey, ArcAugmentedTrainingSample
-from .types import Grid
+from .types import ArcEvaluationTask, Grid
 
 
 _IM_START = "<|im_start|>"
@@ -27,6 +27,15 @@ class ArcRenderedTrainingSample:
     key: ArcAugmentationKey
     prompt: str
     targets: tuple[ArcPromptTarget, ...]
+
+
+@dataclass(frozen=True)
+class ArcRenderedEvaluationSample:
+    """One target-free NVARC evaluation prompt for a single query."""
+
+    task_id: str
+    query_index: int
+    prompt: str
 
 
 def render_training_prompt(
@@ -70,12 +79,47 @@ def render_training_prompt(
     )
 
 
+def render_evaluation_prompts(
+    task: ArcEvaluationTask,
+) -> tuple[ArcRenderedEvaluationSample, ...]:
+    """Render one target-free prompt per query using every demonstration."""
+
+    if not isinstance(task, ArcEvaluationTask):
+        raise TypeError("task must be an ArcEvaluationTask")
+
+    demonstration_parts: list[str] = []
+    for pair in task.demonstrations:
+        demonstration_parts.extend(
+            (
+                f"{_IM_START}user\n{_serialize_grid(pair.input_grid)}{_IM_END}",
+                f"{_IM_START}assistant\n"
+                f"{_serialize_grid(pair.output_grid)}{_IM_END}",
+            )
+        )
+    demonstration_prompt = "".join(demonstration_parts)
+
+    return tuple(
+        ArcRenderedEvaluationSample(
+            task_id=task.task_id,
+            query_index=query.query_index,
+            prompt=(
+                f"{demonstration_prompt}"
+                f"{_IM_START}user\n{_serialize_grid(query.input_grid)}{_IM_END}"
+                f"{_IM_START}assistant\n"
+            ),
+        )
+        for query in task.queries
+    )
+
+
 def _serialize_grid(grid: Grid) -> str:
     return "\n".join("".join(str(value) for value in row) for row in grid)
 
 
 __all__ = [
     "ArcPromptTarget",
+    "ArcRenderedEvaluationSample",
     "ArcRenderedTrainingSample",
+    "render_evaluation_prompts",
     "render_training_prompt",
 ]

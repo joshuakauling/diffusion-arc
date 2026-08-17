@@ -6,8 +6,11 @@ from diffusion_arc.arc_data import (
     ArcAugmentationKey,
     ArcAugmentationSpec,
     ArcAugmentedTrainingSample,
+    ArcEvaluationTask,
     ArcGeometry,
     ArcPair,
+    ArcQuery,
+    render_evaluation_prompts,
     render_training_prompt,
 )
 
@@ -55,6 +58,43 @@ class ArcTrainingPromptTest(unittest.TestCase):
                 for target in rendered.targets
             ),
             (first_target_prefix, second_target_prefix),
+        )
+
+
+class ArcEvaluationPromptTest(unittest.TestCase):
+    def test_rendering_creates_one_target_free_prompt_per_query(self) -> None:
+        task = ArcEvaluationTask(
+            task_id="evaluation-task",
+            demonstrations=(
+                ArcPair(input_grid=((1, 2),), output_grid=((3,),)),
+                ArcPair(input_grid=((4,),), output_grid=((5, 6),)),
+            ),
+            queries=(
+                ArcQuery(query_index=0, input_grid=((7,),)),
+                ArcQuery(query_index=1, input_grid=((8, 9),)),
+            ),
+        )
+
+        rendered = render_evaluation_prompts(task)
+
+        demonstration_prefix = (
+            "<|im_start|>user\n12<|im_end|>"
+            "<|im_start|>assistant\n3<|im_end|>"
+            "<|im_start|>user\n4<|im_end|>"
+            "<|im_start|>assistant\n56<|im_end|>"
+        )
+        self.assertEqual(
+            tuple((sample.task_id, sample.query_index) for sample in rendered),
+            (("evaluation-task", 0), ("evaluation-task", 1)),
+        )
+        self.assertEqual(
+            tuple(sample.prompt for sample in rendered),
+            (
+                f"{demonstration_prefix}<|im_start|>user\n7<|im_end|>"
+                "<|im_start|>assistant\n",
+                f"{demonstration_prefix}<|im_start|>user\n89<|im_end|>"
+                "<|im_start|>assistant\n",
+            ),
         )
 
 

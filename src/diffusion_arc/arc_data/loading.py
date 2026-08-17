@@ -71,6 +71,44 @@ def load_evaluation_targets(path: str | Path) -> ArcEvaluationTargets:
     return ArcEvaluationTargets(task_id=task_path.stem, targets=targets)
 
 
+def align_evaluation_targets(
+    task: ArcEvaluationTask,
+    targets: ArcEvaluationTargets,
+) -> tuple[ArcTarget, ...]:
+    """Validate and order held-out targets to match an evaluation task's queries."""
+
+    if not isinstance(task, ArcEvaluationTask):
+        raise TypeError("task must be an ArcEvaluationTask")
+    if not isinstance(targets, ArcEvaluationTargets):
+        raise TypeError("targets must be ArcEvaluationTargets")
+    if task.task_id != targets.task_id:
+        raise ValueError(
+            f"task IDs do not match: {task.task_id!r} != {targets.task_id!r}"
+        )
+
+    query_indices = tuple(query.query_index for query in task.queries)
+    target_indices = tuple(target.query_index for target in targets.targets)
+    if len(set(query_indices)) != len(query_indices):
+        raise ValueError("evaluation task contains duplicate query indices")
+    if len(set(target_indices)) != len(target_indices):
+        raise ValueError("evaluation targets contain duplicate query indices")
+
+    query_index_set = set(query_indices)
+    target_index_set = set(target_indices)
+    if query_index_set != target_index_set:
+        missing = sorted(query_index_set - target_index_set)
+        unexpected = sorted(target_index_set - query_index_set)
+        raise ValueError(
+            "evaluation target indices do not match queries: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    targets_by_index = {
+        target.query_index: target for target in targets.targets
+    }
+    return tuple(targets_by_index[index] for index in query_indices)
+
+
 def _load_task_file(path: str | Path) -> tuple[Path, Mapping[str, Any]]:
     task_path = Path(path)
     with task_path.open("r", encoding="utf-8") as handle:
@@ -131,6 +169,7 @@ def _load_grid(value: Any, *, name: str) -> Grid:
 
 
 __all__ = [
+    "align_evaluation_targets",
     "load_evaluation_targets",
     "load_evaluation_task",
     "load_training_task",

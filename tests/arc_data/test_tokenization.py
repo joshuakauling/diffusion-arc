@@ -11,9 +11,13 @@ from diffusion_arc.arc_data import (
     ArcAugmentationKey,
     ArcAugmentationSpec,
     ArcAugmentedTrainingSample,
+    ArcEvaluationTask,
     ArcGeometry,
     ArcPair,
+    ArcQuery,
+    render_evaluation_prompts,
     render_training_prompt,
+    tokenize_nvarc_evaluation_sample,
     tokenize_nvarc_training_sample,
 )
 
@@ -67,6 +71,33 @@ class ArcNvarcTokenizationTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             tokenize_nvarc_training_sample(rendered, tokenizer, max_tokens=29)
+
+    def test_tokenization_preserves_evaluation_identity_and_context_limit(self) -> None:
+        task = ArcEvaluationTask(
+            task_id="evaluation-task",
+            demonstrations=(
+                ArcPair(input_grid=((1,),), output_grid=((2,),)),
+            ),
+            queries=(ArcQuery(query_index=3, input_grid=((4,),)),),
+        )
+        rendered = render_evaluation_prompts(task)[0]
+        tokenizer = make_nvarc_tokenizer()
+
+        tokenized = tokenize_nvarc_evaluation_sample(rendered, tokenizer)
+
+        self.assertEqual(tokenized.task_id, "evaluation-task")
+        self.assertEqual(tokenized.query_index, 3)
+        self.assertEqual(
+            tokenized.input_ids,
+            tuple(tokenizer.encode(rendered.prompt, add_special_tokens=False)),
+        )
+
+        with self.assertRaises(ValueError):
+            tokenize_nvarc_evaluation_sample(
+                rendered,
+                tokenizer,
+                max_tokens=len(tokenized.input_ids) - 1,
+            )
 
 
 if __name__ == "__main__":

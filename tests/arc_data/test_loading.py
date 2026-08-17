@@ -6,7 +6,12 @@ import unittest
 from pathlib import Path
 
 from diffusion_arc.arc_data import (
+    ArcEvaluationTargets,
+    ArcEvaluationTask,
     ArcPair,
+    ArcQuery,
+    ArcTarget,
+    align_evaluation_targets,
     load_evaluation_targets,
     load_evaluation_task,
     load_training_task,
@@ -73,6 +78,47 @@ class ArcTaskLoadingTest(unittest.TestCase):
             path = write_task(Path(directory), "invalid-task", payload)
             with self.assertRaises(ValueError):
                 load_training_task(path)
+
+    def test_evaluation_targets_are_validated_and_ordered_by_query(self) -> None:
+        task = ArcEvaluationTask(
+            task_id="evaluation-task",
+            demonstrations=(),
+            queries=(
+                ArcQuery(query_index=0, input_grid=((1,),)),
+                ArcQuery(query_index=1, input_grid=((2,),)),
+            ),
+        )
+        targets = ArcEvaluationTargets(
+            task_id="evaluation-task",
+            targets=(
+                ArcTarget(query_index=1, output_grid=((4,),)),
+                ArcTarget(query_index=0, output_grid=((3,),)),
+            ),
+        )
+
+        aligned = align_evaluation_targets(task, targets)
+
+        self.assertEqual(
+            tuple(target.query_index for target in aligned),
+            (0, 1),
+        )
+
+        with self.assertRaises(ValueError):
+            align_evaluation_targets(
+                task,
+                ArcEvaluationTargets(
+                    task_id="evaluation-task",
+                    targets=(targets.targets[0],),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            align_evaluation_targets(
+                task,
+                ArcEvaluationTargets(
+                    task_id="different-task",
+                    targets=targets.targets,
+                ),
+            )
 
 
 if __name__ == "__main__":

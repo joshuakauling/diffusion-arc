@@ -23,13 +23,16 @@ from .canvas import (
     render_training_target_canvases,
 )
 from .loading import (
+    align_evaluation_targets,
     load_evaluation_targets,
     load_evaluation_task,
     load_training_task,
 )
 from .prompt import (
     ArcPromptTarget,
+    ArcRenderedEvaluationSample,
     ArcRenderedTrainingSample,
+    render_evaluation_prompts,
     render_training_prompt,
 )
 from .splits import (
@@ -44,7 +47,9 @@ from .splits import (
 )
 from .tokenization import (
     NVARC_MAX_TOKENS,
+    ArcTokenizedEvaluationSample,
     ArcTokenizedTrainingSample,
+    tokenize_nvarc_evaluation_sample,
     tokenize_nvarc_training_sample,
 )
 from .types import (
@@ -71,9 +76,11 @@ __all__ = [
     "ArcPair",
     "ArcPromptTarget",
     "ArcQuery",
+    "ArcRenderedEvaluationSample",
     "ArcRenderedTrainingSample",
     "ArcSplitConfig",
     "ArcTarget",
+    "ArcTokenizedEvaluationSample",
     "ArcTokenizedTrainingSample",
     "ArcTrainingTask",
     "ArcTrainingViewConfig",
@@ -83,6 +90,7 @@ __all__ = [
     "Grid",
     "NVARC_MAX_TOKENS",
     "PAD_CLASS",
+    "align_evaluation_targets",
     "apply_training_augmentation",
     "augment_grid",
     "format_augmentation_key",
@@ -95,9 +103,11 @@ __all__ = [
     "make_identity_training_augmentation",
     "parse_augmentation_key",
     "render_grid_canvas",
+    "render_evaluation_prompts",
     "render_training_prompt",
     "render_training_target_canvases",
     "sample_training_augmentation",
+    "tokenize_nvarc_evaluation_sample",
     "tokenize_nvarc_training_sample",
     "validate_augmentation_for_task",
 ]
