@@ -1,0 +1,855 @@
+{
+  "created_at_utc": "2026-08-13T12:53:04.389414+00:00",
+  "runtime": {
+    "gpu": "NVIDIA A100-SXM4-40GB",
+    "gpu_memory_GiB": 39.5,
+    "torch": "2.11.0+cu128",
+    "vae_path": "/content/flux2-klein-base-4b-vae",
+    "vae_sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+    "output_dir": "/content/drive/MyDrive/diffusion-arc/outputs/vae-palette-experiment"
+  },
+  "configuration": {
+    "seed": 20260813,
+    "grid_size": 30,
+    "cell_size": 16,
+    "image_size": 480,
+    "pad_class": 10,
+    "pad_rgb": [
+      255,
+      255,
+      255
+    ],
+    "candidate_levels": [
+      0,
+      85,
+      170,
+      255
+    ],
+    "search_context_mosaics": 4,
+    "evaluation_context_mosaics": 4,
+    "noise_sigmas": [
+      0.05,
+      0.1,
+      0.2,
+      0.35
+    ],
+    "posterior_statistic": "mode",
+    "transformer_latent_shape": [
+      128,
+      30,
+      30
+    ]
+  },
+  "palettes": {
+    "standard_arc": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        116,
+        217
+      ],
+      [
+        255,
+        65,
+        54
+      ],
+      [
+        46,
+        204,
+        64
+      ],
+      [
+        255,
+        220,
+        0
+      ],
+      [
+        170,
+        170,
+        170
+      ],
+      [
+        240,
+        18,
+        190
+      ],
+      [
+        255,
+        133,
+        27
+      ],
+      [
+        127,
+        219,
+        255
+      ],
+      [
+        135,
+        12,
+        37
+      ],
+      [
+        255,
+        255,
+        255
+      ]
+    ],
+    "rgb_maximin": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        85,
+        255
+      ],
+      [
+        85,
+        255,
+        0
+      ],
+      [
+        255,
+        0,
+        85
+      ],
+      [
+        0,
+        255,
+        170
+      ],
+      [
+        170,
+        0,
+        255
+      ],
+      [
+        255,
+        170,
+        0
+      ],
+      [
+        170,
+        170,
+        170
+      ],
+      [
+        85,
+        85,
+        85
+      ],
+      [
+        0,
+        0,
+        170
+      ],
+      [
+        255,
+        255,
+        255
+      ]
+    ],
+    "vae_latent_maximin": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        255,
+        0
+      ],
+      [
+        255,
+        0,
+        0
+      ],
+      [
+        85,
+        0,
+        255
+      ],
+      [
+        0,
+        255,
+        255
+      ],
+      [
+        255,
+        255,
+        0
+      ],
+      [
+        85,
+        85,
+        85
+      ],
+      [
+        255,
+        85,
+        170
+      ],
+      [
+        170,
+        255,
+        170
+      ],
+      [
+        85,
+        0,
+        0
+      ],
+      [
+        255,
+        255,
+        255
+      ]
+    ]
+  },
+  "selection": {
+    "rgb_candidate_indices": [
+      0,
+      7,
+      28,
+      49,
+      14,
+      35,
+      56,
+      42,
+      21,
+      2
+    ],
+    "vae_candidate_indices": [
+      0,
+      12,
+      48,
+      19,
+      15,
+      60,
+      21,
+      54,
+      46,
+      16
+    ]
+  },
+  "clean_roundtrip": {
+    "standard_arc": {
+      "cell_accuracy": 1.0,
+      "pad_precision": 1.0,
+      "pad_recall": 1.0,
+      "exact_grids": 6,
+      "total_grids": 6,
+      "mean_pixel_mae": 0.00954760774038732,
+      "confusion_matrix": [
+        [
+          326,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          327,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          323,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          303,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          332,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          333,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          339,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          307,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          342,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          341,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2127
+        ]
+      ]
+    },
+    "rgb_maximin": {
+      "cell_accuracy": 1.0,
+      "pad_precision": 1.0,
+      "pad_recall": 1.0,
+      "exact_grids": 6,
+      "total_grids": 6,
+      "mean_pixel_mae": 0.009742840814093748,
+      "confusion_matrix": [
+        [
+          326,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          327,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          323,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          303,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          332,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          333,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          339,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          307,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          342,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          341,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2127
+        ]
+      ]
+    },
+    "vae_latent_maximin": {
+      "cell_accuracy": 1.0,
+      "pad_precision": 1.0,
+      "pad_recall": 1.0,
+      "exact_grids": 6,
+      "total_grids": 6,
+      "mean_pixel_mae": 0.009179013393198451,
+      "confusion_matrix": [
+        [
+          326,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          327,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          323,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          303,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          332,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          333,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          339,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          307,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          342,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          341,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2127
+        ]
+      ]
+    }
+  },
+  "latent_separation": {
+    "standard_arc": {
+      "minimum_class_distance": 3.005383641284651,
+      "mean_class_distance": 8.41252667145845,
+      "minimum_pad_distance": 5.997185093348633,
+      "mean_within_class_spread": 3.6601266860961914,
+      "worst_margin_over_spread": 0.8211146495833797
+    },
+    "rgb_maximin": {
+      "minimum_class_distance": 3.933343270298298,
+      "mean_class_distance": 8.751287694332547,
+      "minimum_pad_distance": 5.962268638117179,
+      "mean_within_class_spread": 3.631182540546764,
+      "worst_margin_over_spread": 1.0832127623377579
+    },
+    "vae_latent_maximin": {
+      "minimum_class_distance": 5.120928661888809,
+      "mean_class_distance": 8.918489996536486,
+      "minimum_pad_distance": 5.403056228709542,
+      "mean_within_class_spread": 3.6290718642148105,
+      "worst_margin_over_spread": 1.4110849422368157
+    }
+  },
+  "latent_noise": {
+    "standard_arc": [
+      {
+        "sigma": 0.0,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.05,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.1,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.2,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.35,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      }
+    ],
+    "rgb_maximin": [
+      {
+        "sigma": 0.0,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.05,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.1,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.2,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.35,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      }
+    ],
+    "vae_latent_maximin": [
+      {
+        "sigma": 0.0,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.05,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.1,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.2,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      },
+      {
+        "sigma": 0.35,
+        "cell_accuracy": 1.0,
+        "exact_grids": 6,
+        "pad_precision": 1.0,
+        "pad_recall": 1.0
+      }
+    ]
+  },
+  "decision": {
+    "rgb_maximin": {
+      "clean_not_worse": true,
+      "latent_worst_case_better": true,
+      "mean_noise_accuracy": 1.0,
+      "mean_noise_accuracy_better": false,
+      "qualifies_for_flux_ab_test": false
+    },
+    "vae_latent_maximin": {
+      "clean_not_worse": true,
+      "latent_worst_case_better": true,
+      "mean_noise_accuracy": 1.0,
+      "mean_noise_accuracy_better": false,
+      "qualifies_for_flux_ab_test": false
+    }
+  }
+}
