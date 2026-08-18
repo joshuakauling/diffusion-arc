@@ -2,18 +2,18 @@
 
 ## Status
 
-This document defines the first architecture to implement and evaluate. It
-replaces the earlier adapter-plus-color-head proposal as the primary approach.
-Adapters, auxiliary prediction heads, and visual reference tokens remain
-optional later experiments rather than requirements.
+This document specifies the flow-only architecture used by the nine core
+project milestones. The project scope and milestone order are defined in the
+root [`README.md`](../README.md).
 
 ## Core hypothesis
 
 The smallest useful test of the project hypothesis is:
 
 > Can a fully fine-tuned pretrained FLUX.2 Klein Base 4B transformer, directly
-> conditioned on frozen NVARC hidden states, generate the exact latent image of
-> an ARC output grid using only its original flow-matching objective?
+> conditioned on frozen NVARC hidden states, generate a packed latent that
+> decodes to the exact ARC output grid using only its original flow-matching
+> objective?
 
 The first version changes the conditioning source and task representation, but
 does not change the internal FLUX transformer or add a task-specific learned
@@ -21,52 +21,7 @@ output head.
 
 ## End-to-end architecture
 
-```text
-Serialized ARC demonstrations and test input
-                        |
-                        v
-              Frozen NVARC / Qwen3-4B
-                        |
-          selected hidden states, concatenated
-                        |
-                        v
-              [B, N_context, 7680]
-                        |
-            existing FLUX txt_in: 7680 -> 3072
-                        |
-                        +------------------------------+
-                                                       |
-Gaussian target state                                 |
-[B, 900, 128]                                         |
-        |                                              |
-        +-------------------+--------------------------+
-                            |
-                            v
-                FLUX.2 Klein Base 4B
-                  full-parameter training
-                            |
-                  original velocity head
-                      3072 -> 128
-                            |
-                            v
-                 velocity [B, 900, 128]
-                            |
-                   backward ODE sampling
-                            |
-                            v
-                generated packed latent
-                     [B, 900, 128]
-                            |
-                   frozen VAE decoder
-                            |
-                            v
-                       480x480 RGB
-                            |
-            deterministic cell and shape decoding
-                            |
-                            v
-                       ARC output grid
-```
+![Diffusion-ARC architecture](architecture.svg)
 
 No visual reference images are used in the initial architecture. All
 demonstrations and the test input reach FLUX through NVARC conditioning.
@@ -98,8 +53,8 @@ followed by the trainable FLUX `7680 -> 3072` projection would be functionally
 redundant for the initial full-parameter fine-tuning experiment.
 
 The implementation must verify the actual NVARC checkpoint, hidden-layer
-indices, tensor width, tokenization, dtype, and sequence length. The expected
-ARC serialization may require roughly 8,000 context tokens, replacing the
+indices, tensor width, tokenization, dtype, and sequence length. ARC examples
+have variable context lengths and may require up to 8,192 tokens, replacing the
 512-token truncation in the reference FLUX text-preparation path. This changes
 the supported input length, not the transformer block design.
 
@@ -281,27 +236,32 @@ Trainable:
 No newly initialized trainable module is required for the initial
 architecture.
 
-## Required initial validation
+## Implementation and validation requirements
 
-Before distributed or large-scale training, the implementation must:
+### Milestone 1 interface validation
 
 - verify the exact NVARC tokenizer, checkpoint, selected layers, tensor width,
-  dtype, and maximum serialized context length;
+  dtype, and maximum context length;
 - prove that the test output is absent from NVARC conditioning;
 - verify the direct `[B,N_context,7680] -> [B,N_context,3072]` interface;
 - assert the VAE and NVARC frozen state;
 - assert all canvas, latent, token, position-ID, and velocity shapes;
 - reproduce deterministic top-left padding and grid decoding;
-- overfit a tiny set using flow loss alone;
-- evaluate exact grid accuracy including predicted dimensions;
+- compute the flow-matching loss and backpropagate through FLUX only.
+
+### Milestone 2 learning validation
+
+- overfit the predefined small ARC dataset;
+- evaluate the run against a predefined overfitting criterion;
+- report decoded-grid metrics including predicted output dimensions;
 - distinguish flow-model error from VAE and deterministic readout error.
 
 ## Primary risks
 
 - NVARC hidden states may have a different distribution from the native Qwen3
   states expected by pretrained FLUX, despite matching tensor width.
-- Contexts near 8,000 tokens are far longer than the native 512-token reference
-  path and may require substantial fine-tuning to use effectively.
+- Contexts up to 8,192 tokens are far longer than the native 512-token
+  reference path and may require substantial fine-tuning to use effectively.
 - Continuous latent MSE does not directly optimize discrete exact-grid
   accuracy.
 - A single incorrect non-PAD cell outside the true rectangle can change the
@@ -312,10 +272,9 @@ Before distributed or large-scale training, the implementation must:
 These are measurements to make, not reasons to add auxiliary components before
 the simplest hypothesis has been tested.
 
-## Optional later architecture variants
+## Out-of-scope architecture variants
 
-Only after the flow-only system is correct and measured, later experiments may
-test:
+Possible variants outside the current project scope include:
 
 - a residual or bottleneck NVARC-to-FLUX adapter;
 - a discrete ARC color head;
@@ -324,9 +283,14 @@ test:
 - alternative deterministic or learned latent readouts;
 - compact visual reference canvases.
 
-None of these variants is required for the initial implementation.
+These variants are not part of the nine core milestones. They may be revisited
+only through an explicit scope change after the flow-only architecture has been
+evaluated.
 
 ## Supporting documents
 
+- [Project scope and milestones](../README.md)
+- [Architecture diagram](architecture.svg)
 - [FLUX.2 Klein architecture and flow matching](flux2-klein-architecture.md)
 - [FLUX.2 VAE smoke test](flux2-vae-smoke-test.md)
+- [NVARC overview](nvarc-overview.md)
