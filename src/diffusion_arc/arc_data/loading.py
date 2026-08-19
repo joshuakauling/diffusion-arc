@@ -78,10 +78,6 @@ def align_evaluation_targets(
 ) -> tuple[ArcTarget, ...]:
     """Validate and order held-out targets to match an evaluation task's queries."""
 
-    if not isinstance(task, ArcEvaluationTask):
-        raise TypeError("task must be an ArcEvaluationTask")
-    if not isinstance(targets, ArcEvaluationTargets):
-        raise TypeError("targets must be ArcEvaluationTargets")
     if task.task_id != targets.task_id:
         raise ValueError(
             f"task IDs do not match: {task.task_id!r} != {targets.task_id!r}"

@@ -12,12 +12,18 @@ import unittest
 import torch
 
 from diffusion_arc.model import (
+    NVARC_CONTEXT_WIDTH,
+    NVARC_HIDDEN_SIZE,
+    NVARC_HIDDEN_STATE_INDICES,
     NVARC_MAX_TOKENS,
+    NVARC_PAD_TOKEN_ID,
     NVARC_VOCAB_SIZE,
     TARGET_IMAGE_HEIGHT,
     TARGET_IMAGE_SHAPE,
     TARGET_IMAGE_WIDTH,
+    PackedNvarcHiddenStates,
     PackedTrainingBatch,
+    validate_packed_source_sequences,
     validate_packed_training_batch,
 )
 
@@ -64,6 +70,32 @@ def _replace(batch: PackedTrainingBatch, **changes: torch.Tensor) -> PackedTrain
 
 
 class PackedContractTests(unittest.TestCase):
+    def test_nvarc_execution_constants_match_the_fixed_interface(self) -> None:
+        self.assertEqual(NVARC_PAD_TOKEN_ID, 13)
+        self.assertEqual(NVARC_HIDDEN_SIZE, 2560)
+        self.assertEqual(NVARC_HIDDEN_STATE_INDICES, (9, 18, 27))
+        self.assertEqual(NVARC_CONTEXT_WIDTH, 7680)
+
+    def test_packed_source_validation_returns_individual_lengths(self) -> None:
+        input_ids = torch.arange(9, dtype=torch.int64).remainder(NVARC_VOCAB_SIZE)
+        sequence_offsets = torch.tensor([0, 2, 7, 9], dtype=torch.int64)
+
+        source_lengths = validate_packed_source_sequences(
+            input_ids=input_ids,
+            sequence_offsets=sequence_offsets,
+        )
+
+        self.assertEqual(source_lengths, (2, 5, 2))
+
+    def test_packed_nvarc_hidden_state_contract_is_frozen(self) -> None:
+        packed = PackedNvarcHiddenStates(
+            hidden_states=torch.zeros((2, NVARC_CONTEXT_WIDTH)),
+            sequence_offsets=torch.tensor([0, 2], dtype=torch.int64),
+        )
+
+        with self.assertRaises(FrozenInstanceError):
+            packed.hidden_states = torch.ones(1)  # type: ignore[misc]
+
     def test_one_source_can_expose_multiple_targets(self) -> None:
         validate_packed_training_batch(_make_training_batch())
 

@@ -43,8 +43,6 @@ def render_training_prompt(
 ) -> ArcRenderedTrainingSample:
     """Render all pairs and record target boundaries after the first pair."""
 
-    if not isinstance(sample, ArcAugmentedTrainingSample):
-        raise TypeError("sample must be an ArcAugmentedTrainingSample")
     if len(sample.pairs) < 2:
         raise ValueError("a training prompt requires at least two pairs")
 
@@ -83,9 +81,6 @@ def render_evaluation_prompts(
     task: ArcEvaluationTask,
 ) -> tuple[ArcRenderedEvaluationSample, ...]:
     """Render one target-free prompt per query using every demonstration."""
-
-    if not isinstance(task, ArcEvaluationTask):
-        raise TypeError("task must be an ArcEvaluationTask")
 
     demonstration_parts: list[str] = []
     for pair in task.demonstrations:

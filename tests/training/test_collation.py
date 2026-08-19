@@ -156,94 +156,11 @@ class TrainingCollatorTests(unittest.TestCase):
                     max_targets_per_source=value
                 )
 
-    def test_rejects_empty_or_invalid_sample_collections(self) -> None:
+    def test_rejects_empty_sample_collection(self) -> None:
         collator = TrainingCollator(max_targets_per_source=2)
 
         with self.assertRaises(ValueError):
             collator([])
-        with self.assertRaises(TypeError):
-            collator(iter((_make_sample(),)))  # type: ignore[arg-type]
-        with self.assertRaises(TypeError):
-            collator([object()])  # type: ignore[list-item]
-
-    def test_rejects_empty_or_misaligned_target_candidates(self) -> None:
-        collator = TrainingCollator(max_targets_per_source=2)
-        no_targets = _make_sample(
-            prefix_token_ends=(),
-            pair_indices=(4,),
-            target_values=(),
-        )
-        mismatched_targets = ArcTokenizedTrainingSample(
-            key=_make_key("abc123ef", (4, 1, 3)),
-            input_ids=(14, 11, 10, 0, 15, 12),
-            prefix_token_ends=(2, 4),
-            target_grids=(((2,),),),
-        )
-
-        for sample in (no_targets, mismatched_targets):
-            with self.subTest(sample=sample), self.assertRaises(ValueError):
-                collator([sample])
-
-    def test_rejects_pair_metadata_not_aligned_with_all_candidates(self) -> None:
-        sample = _make_sample(pair_indices=(4, 1, 3))
-
-        with self.assertRaises(ValueError):
-            TrainingCollator(max_targets_per_source=2)([sample])
-
-    def test_rejects_values_that_would_be_silently_cast(self) -> None:
-        invalid_ids = _make_sample(
-            input_ids=(14, 11, 1.5, 15),  # type: ignore[arg-type]
-            prefix_token_ends=(1, 3),
-            pair_indices=(4, 1, 3),
-            target_values=(2, 7),
-        )
-        invalid_prefixes = _make_sample(
-            prefix_token_ends=(1, True),  # type: ignore[arg-type]
-            pair_indices=(4, 1, 3),
-            target_values=(2, 7),
-        )
-
-        for sample in (invalid_ids, invalid_prefixes):
-            with self.subTest(sample=sample), self.assertRaises(TypeError):
-                TrainingCollator(max_targets_per_source=2)([sample])
-
-    def test_rejects_invalid_token_ids_and_full_input_prefixes(self) -> None:
-        invalid_high_id = _make_sample(
-            input_ids=(14, 16, 10, 0, 15, 14, 12, 10, 7, 15),
-        )
-        invalid_negative_id = _make_sample(
-            input_ids=(14, -1, 10, 0, 15, 14, 12, 10, 7, 15),
-        )
-        prefix_at_full_end = _make_sample(
-            prefix_token_ends=(2, 10),
-            pair_indices=(4, 1, 3),
-            target_values=(2, 7),
-        )
-        unordered_prefixes = _make_sample(
-            prefix_token_ends=(5, 2),
-            pair_indices=(4, 1, 3),
-            target_values=(2, 7),
-        )
-
-        for sample in (
-            invalid_high_id,
-            invalid_negative_id,
-            prefix_at_full_end,
-            unordered_prefixes,
-        ):
-            with self.subTest(sample=sample), self.assertRaises(ValueError):
-                TrainingCollator(max_targets_per_source=2)([sample])
-
-    def test_rejects_selected_source_prefixes_beyond_nvarc_limit(self) -> None:
-        sample = _make_sample(
-            input_ids=(0,) * 8194,
-            prefix_token_ends=(8193,),
-            pair_indices=(0, 1),
-            target_values=(2,),
-        )
-
-        with self.assertRaisesRegex(ValueError, "exceeds 8192 tokens"):
-            TrainingCollator(max_targets_per_source=1)([sample])
 
 
 if __name__ == "__main__":

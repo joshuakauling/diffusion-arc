@@ -107,9 +107,6 @@ def make_augmentation_key(
 def format_augmentation_key(key: ArcAugmentationKey) -> str:
     """Serialize an augmentation key in its canonical, reversible form."""
 
-    if not isinstance(key, ArcAugmentationKey):
-        raise TypeError("key must be an ArcAugmentationKey")
-
     augmentation = key.augmentation
     color_mapping = "".join(str(color) for color in augmentation.color_mapping)
     pair_indices = ",".join(str(index) for index in augmentation.pair_indices)
@@ -161,10 +158,6 @@ def validate_augmentation_for_task(
 ) -> None:
     """Ensure that an augmentation references pairs available in its task."""
 
-    if not isinstance(key, ArcAugmentationKey):
-        raise TypeError("key must be an ArcAugmentationKey")
-    if not isinstance(task, (ArcTrainingTask, ArcEvaluationTask)):
-        raise TypeError("task must be an ArcTrainingTask or ArcEvaluationTask")
     if key.task_id != task.task_id:
         raise ValueError(
             f"augmentation task_id {key.task_id!r} does not match task {task.task_id!r}"
@@ -195,8 +188,6 @@ def sample_training_augmentation(
     """Sample one bounded, reproducible augmentation of a training task."""
 
     _validate_training_sampling_limits(task, max_pairs=max_pairs, max_cells=max_cells)
-    if not isinstance(augmentation_index, int) or isinstance(augmentation_index, bool):
-        raise TypeError("augmentation_index must be an integer")
     if augmentation_index < 0:
         raise ValueError("augmentation_index must be non-negative")
 
@@ -245,9 +236,12 @@ def make_identity_training_augmentation(
 def augment_grid(grid: Grid, augmentation: ArcAugmentationSpec) -> Grid:
     """Apply an augmentation's color mapping and geometry to one grid."""
 
-    if not isinstance(augmentation, ArcAugmentationSpec):
-        raise TypeError("augmentation must be an ArcAugmentationSpec")
     validate_arc_grid(grid)
+    return _augment_valid_grid(grid, augmentation)
+
+
+def _augment_valid_grid(grid: Grid, augmentation: ArcAugmentationSpec) -> Grid:
+    """Apply an augmentation to a grid validated at an earlier boundary."""
 
     transformed = tuple(
         tuple(augmentation.color_mapping[value] for value in row) for row in grid
@@ -283,9 +277,6 @@ def apply_training_augmentation(
 ) -> ArcAugmentedTrainingSample:
     """Select, order, and transform the pairs of one training augmentation."""
 
-    if not isinstance(task, ArcTrainingTask):
-        raise TypeError("task must be an ArcTrainingTask")
-
     key = ArcAugmentationKey(task_id=task.task_id, augmentation=augmentation)
     validate_augmentation_for_task(key, task)
     if len(augmentation.pair_indices) < 2:
@@ -293,8 +284,14 @@ def apply_training_augmentation(
 
     pairs = tuple(
         ArcPair(
-            input_grid=augment_grid(task.pairs[index].input_grid, augmentation),
-            output_grid=augment_grid(task.pairs[index].output_grid, augmentation),
+            input_grid=_augment_valid_grid(
+                task.pairs[index].input_grid,
+                augmentation,
+            ),
+            output_grid=_augment_valid_grid(
+                task.pairs[index].output_grid,
+                augmentation,
+            ),
         )
         for index in augmentation.pair_indices
     )
@@ -315,12 +312,6 @@ def _validate_training_sampling_limits(
     max_pairs: int,
     max_cells: int,
 ) -> None:
-    if not isinstance(task, ArcTrainingTask):
-        raise TypeError("task must be an ArcTrainingTask")
-    if not isinstance(max_pairs, int) or isinstance(max_pairs, bool):
-        raise TypeError("max_pairs must be an integer")
-    if not isinstance(max_cells, int) or isinstance(max_cells, bool):
-        raise TypeError("max_cells must be an integer")
     if max_pairs < 2:
         raise ValueError("max_pairs must allow at least two pairs")
     if max_cells <= 0:

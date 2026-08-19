@@ -37,10 +37,10 @@ contract lives in
 
 | Component | Responsible for | Not responsible for |
 | --- | --- | --- |
-| `ArcTrainingDataset` | Selecting a configured view, loading and validating keys and tasks, applying stored augmentations, rendering prompts, tokenizing complete samples | Shuffling, batching, target budgeting, canvas rendering, model execution |
+| `ArcTrainingDataset` | Selecting a configured view, validating split, key, and task boundaries, loading the referenced task for each item, applying stored augmentations, rendering prompts, tokenizing complete samples | Task caching, shuffling, batching, target budgeting, canvas rendering, model execution |
 | PyTorch `DataLoader` | Selecting dataset indices, source-level batch size, shuffle/sampler policy, workers, invoking the collator | ARC semantics, target selection, packed tensor meaning |
-| `TrainingCollator` | Selecting suffix targets, truncating sources, rendering target canvases, building the packed tensor contract and metadata sidecar | Sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
-| `NvarcBatchRunner` | Right-padding complete sources, constructing the NVARC attention mask, one frozen batch forward, selected hidden-state extraction, removal of padded positions | Targets, target-prefix derivation, target images, VAE or FLUX execution |
+| `TrainingCollator` | Assembling trusted tokenized samples by selecting suffix targets, truncating sources, rendering target canvases, and building the packed tensor contract and metadata sidecar | Validating alternate sample producers, sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
+| `NvarcBatchRunner` | Executing trusted packed sources by right-padding, constructing the attention mask, running one frozen batch forward, selecting hidden states, and removing padded positions | Revalidating stable checkpoint contracts, targets, target-prefix derivation, target images, VAE or FLUX execution |
 | Future training runner | Target-prefix derivation, VAE encoding, flow noise and timestep sampling, FLUX execution, loss normalization, optimizer steps | Reinterpreting or silently changing dataset and collator alignment |
 
 ## `ArcTrainingDataset`
@@ -97,13 +97,15 @@ During construction, the dataset:
 5. rejects malformed keys, duplicates, and task IDs outside the configured
    task split;
 6. derives the raw source directory and verifies every referenced task file;
-7. loads every referenced task once;
+7. loads every referenced task for validation;
 8. validates every key against its task and requires at least two selected
    pairs.
 
-The dataset retains the parsed keys and loaded referenced tasks. Its length is
-the number of keys, not the number of source ARC tasks. One task can therefore
-appear in multiple dataset items through different augmentation keys.
+The dataset retains the parsed keys and source location, but it does not cache
+parsed ARC tasks. Item materialization reloads the task referenced by the
+selected key. Its length is the number of keys, not the number of source ARC
+tasks. One task can therefore appear in multiple dataset items through
+different augmentation keys.
 
 ### Item materialization
 
@@ -111,6 +113,7 @@ For one index, the dataset performs a deterministic transformation:
 
 ```text
 stored augmentation key
+  -> load its referenced raw ARC task
   -> apply its geometry, color mapping, and pair order
   -> render the complete teacher-forced NVARC prompt
   -> tokenize without padding or truncation
@@ -176,8 +179,10 @@ and measured.
 
 ### Input and target selection
 
-The collator receives a non-empty sequence of
-`ArcTokenizedTrainingSample` objects. It accepts:
+The collator receives a non-empty sequence of trusted
+`ArcTokenizedTrainingSample` objects produced by `ArcTrainingDataset`. Another
+producer must establish the same sample contract before invoking the collator.
+It accepts:
 
 ```python
 TrainingCollator(max_targets_per_source=K)
@@ -216,13 +221,12 @@ only chooses which aligned target candidates produce training exposures.
 
 Sources and their selected targets retain DataLoader order. The collator:
 
-1. validates the externally supplied sample fields and their alignment;
-2. selects the target suffix for each source;
-3. truncates each source at its final selected prefix;
-4. appends the truncated token sequences into one flat tensor;
-5. renders selected target grids as fixed 480x480 canvases;
-6. records source and target lookup information;
-7. returns tensors and audit metadata together.
+1. selects the target suffix for each source;
+2. truncates each source at its final selected prefix;
+3. appends the truncated token sequences into one flat tensor;
+4. renders selected target grids as fixed 480x480 canvases;
+5. records source and target lookup information;
+6. returns tensors and audit metadata together.
 
 It does not add padding or an `attention_mask`. Flat concatenation is a compact
 host representation, not permission for attention to cross source boundaries.
@@ -297,29 +301,25 @@ are stored in one flat tensor.
 
 ## CPU boundary and validation
 
-The collator creates ordinary CPU tensors. It checks external sample properties
-that could otherwise be silently cast or break alignment, including:
+The collator creates ordinary CPU tensors. Split loading, raw-task parsing,
+augmentation construction, prompt rendering, and tokenization establish the
+sample invariants before this hot path. The collator therefore trusts its
+immutable input objects and the values it constructs; it does not repeat type,
+alignment, token-range, grid, or full-tensor scans for every batch.
 
-- sample and tuple types;
-- NVARC token ID range;
-- matching prefix, target-grid, and pair-index counts;
-- positive, strictly increasing prefix boundaries;
-- prefix boundaries inside the full teacher-forced source;
-- the 8192-token NVARC limit for the selected source prefix.
+`validate_packed_training_batch` remains the explicit full validator for
+diagnostics, tests, and alternate batch producers. Such producers must invoke
+it at their own ingestion or preflight boundary instead of relying on the
+collator to validate arbitrary objects.
 
-It then trusts properties guaranteed by its own construction, such as
-source-major indices, cumulative offsets, and palette-rendered target values.
-It does not automatically run the complete
-`validate_packed_training_batch` scan over every output tensor. That public
-validator remains available for diagnostics, tests, and batches constructed by
-other producers.
-
-`NvarcBatchRunner` interprets the flat representation explicitly. It validates
-the sources, right-pads them to their batch maximum, supplies a boolean
-attention mask, executes frozen NVARC once, and discards every padded hidden
-position before returning a compact result. Attention must never cross the
-boundaries in `sequence_offsets`. The runner's exact contract and outstanding
-real-checkpoint checks are documented in
+`NvarcBatchRunner` likewise trusts packed sources produced through this path.
+It right-pads them to their batch maximum, supplies a boolean attention mask,
+executes frozen NVARC once, and discards every padded hidden position before
+returning a compact result. Attention must never cross the boundaries in
+`sequence_offsets`. Stable checkpoint shapes, dtypes, hidden-state availability,
+and padding behavior belong to a separate explicit smoke or preflight
+experiment, not to every forward call. The runner's exact contract and
+outstanding real-checkpoint checks are documented in
 [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
 ## Where noise enters

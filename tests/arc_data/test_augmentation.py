@@ -205,35 +205,6 @@ class ArcAugmentationSamplingTest(unittest.TestCase):
                 rng=Random(42),
             )
 
-    def test_sampling_rejects_non_integer_limits_and_indices(self) -> None:
-        task = ArcTrainingTask(
-            task_id="training-task",
-            pairs=(make_pair(0), make_pair(1), make_pair(2)),
-        )
-
-        for max_pairs, max_cells in ((2.5, 6), (2, 6.5), (True, 6), (2, True)):
-            with self.subTest(
-                max_pairs=max_pairs,
-                max_cells=max_cells,
-            ), self.assertRaises(TypeError):
-                make_identity_training_augmentation(
-                    task,
-                    max_pairs=max_pairs,  # type: ignore[arg-type]
-                    max_cells=max_cells,  # type: ignore[arg-type]
-                )
-
-        for augmentation_index in (True, 1.5):
-            with self.subTest(
-                augmentation_index=augmentation_index
-            ), self.assertRaises(TypeError):
-                sample_training_augmentation(
-                    task,
-                    augmentation_index=augmentation_index,  # type: ignore[arg-type]
-                    max_pairs=2,
-                    max_cells=6,
-                    rng=Random(42),
-                )
-
 
 class ArcAugmentationApplicationTest(unittest.TestCase):
     def test_all_geometries_follow_the_axis_based_convention(self) -> None:

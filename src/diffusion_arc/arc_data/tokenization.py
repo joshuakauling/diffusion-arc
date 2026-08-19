@@ -6,12 +6,11 @@ from dataclasses import dataclass
 
 from transformers import PreTrainedTokenizerBase
 
+from diffusion_arc._constants import NVARC_MAX_TOKENS
+
 from .augmentation import ArcAugmentationKey
 from .prompt import ArcRenderedEvaluationSample, ArcRenderedTrainingSample
 from .types import Grid
-
-
-NVARC_MAX_TOKENS = 8192
 
 
 @dataclass(frozen=True)
@@ -41,12 +40,6 @@ def tokenize_nvarc_training_sample(
 ) -> ArcTokenizedTrainingSample:
     """Tokenize one full prompt and verify every end-exclusive prefix cut."""
 
-    if not isinstance(sample, ArcRenderedTrainingSample):
-        raise TypeError("sample must be an ArcRenderedTrainingSample")
-    if not isinstance(tokenizer, PreTrainedTokenizerBase):
-        raise TypeError("tokenizer must be a Hugging Face tokenizer")
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
-        raise TypeError("max_tokens must be an integer")
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
 
@@ -87,12 +80,6 @@ def tokenize_nvarc_evaluation_sample(
 ) -> ArcTokenizedEvaluationSample:
     """Tokenize one complete evaluation prompt without padding or truncation."""
 
-    if not isinstance(sample, ArcRenderedEvaluationSample):
-        raise TypeError("sample must be an ArcRenderedEvaluationSample")
-    if not isinstance(tokenizer, PreTrainedTokenizerBase):
-        raise TypeError("tokenizer must be a Hugging Face tokenizer")
-    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
-        raise TypeError("max_tokens must be an integer")
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
 

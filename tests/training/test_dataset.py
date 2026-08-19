@@ -151,6 +151,26 @@ class ArcTrainingDatasetTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exceeding 1"):
                 dataset[0]
 
+    def test_reloads_the_referenced_task_for_each_item(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            split_root, data_root = build_layout(Path(temporary_directory))
+            dataset = ArcTrainingDataset(
+                split_root,
+                "train",
+                make_nvarc_tokenizer(),
+            )
+            task_a_path = data_root / "raw/arc-agi-2/training/task-a.json"
+
+            original = dataset[1]
+            write_json(
+                task_a_path,
+                make_task_payload(((0, 1), (2, 9), (4, 8), (6, 7))),
+            )
+            reloaded = dataset[1]
+
+            self.assertEqual(original.target_grids, (((3,),), ((5,),), ((7,),)))
+            self.assertEqual(reloaded.target_grids, (((9,),), ((8,),), ((7,),)))
+
     def test_integrates_with_standard_dataloader_and_training_collator(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             split_root, data_root = build_layout(Path(temporary_directory))

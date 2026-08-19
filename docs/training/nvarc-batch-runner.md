@@ -9,7 +9,9 @@ state, and FLUX state are deliberately absent from its interface.
 
 The local tests use a deterministic fake NVARC module. They validate packing,
 padding, masking, layer selection, and frozen-module behavior without loading a
-checkpoint. Real-checkpoint numerical validation remains a required Colab step.
+checkpoint. Stable real-checkpoint shapes, dtypes, hidden-state availability,
+and numerical behavior remain a separate required smoke or preflight
+experiment.
 
 The runner lives in
 [`src/diffusion_arc/model/nvarc.py`](../../src/diffusion_arc/model/nvarc.py), and
@@ -32,7 +34,8 @@ packed_hidden_states = nvarc_runner(
 )
 ```
 
-Its forward method accepts exactly two tensors:
+Its forward method accepts exactly two trusted tensors produced by the
+collation path:
 
 | Field | Shape and dtype | Meaning |
 | --- | --- | --- |
@@ -68,8 +71,9 @@ The initial architecture fixes the following values:
 | Concatenated context width | 7680 |
 
 These values are not runtime tuning parameters. Changing them would alter the
-verified NVARC-to-FLUX interface and requires a separate checkpoint-contract
-decision.
+NVARC-to-FLUX interface and requires a separate checkpoint-contract decision
+and smoke experiment. The normal forward path assumes that this fixed contract
+has already been established for the selected checkpoint and environment.
 
 ## Execution layout
 
@@ -94,23 +98,24 @@ consumed by the trainable FLUX path.
 
 The packed token IDs are transferred internally to the device of NVARC's input
 embeddings. Padding and the attention mask are created directly on that device.
+If the module does not expose a tensor-backed input-embedding weight, runner
+execution fails with a clear interface error; it does not guess from another
+parameter or buffer and does not silently fall back to CPU.
 
 ## Frozen-state guarantee
 
 Construction applies `requires_grad_(False)` to the complete NVARC module and
 places both runner and model in evaluation mode. Calling `train(True)` on the
-runner still leaves both in evaluation mode. The forward method also restores
-the contained model to evaluation mode before every call in case it was changed
-directly.
+runner still leaves both in evaluation mode. Callers must not mutate the
+contained model directly between forwards.
 
-The runner rejects output that:
-
-- omits hidden states or does not reach index 27;
-- has a selected-state shape other than `[S, max_length, 2560]`;
-- mixes selected-state dtypes or devices;
-- is not floating point;
-- requires gradients after packing; or
-- contains non-finite values at real source positions.
+The forward hot path trusts both the packed-source contract and the stable
+checkpoint-output contract. It therefore does not repeat complete type, shape,
+dtype, device, gradient, or finite-value scans on every call. Failures that
+make the required layer selection or concatenation impossible still surface
+naturally. Full contract checks belong to the explicit checkpoint smoke or
+preflight experiment described below, while tensor validators remain available
+for diagnostics and tests.
 
 ## Target boundary
 
@@ -131,9 +136,9 @@ or FLUX execution policy.
 ## Remaining real-checkpoint validation
 
 Local fake-model tests cannot establish the numerical behavior of the released
-NVARC checkpoint or its CUDA attention backend. A later offline Colab test must
-record the checkpoint revision, Transformers version, precision, attention
-backend, and GPU, then compare:
+NVARC checkpoint or its CUDA attention backend. A separate offline Colab smoke
+or preflight experiment must record the checkpoint revision, Transformers
+version, precision, attention backend, and GPU, then compare:
 
 1. each sequence run alone versus the same sequence in a right-padded batch;
 2. real positions only, excluding every padded output;
@@ -141,4 +146,6 @@ backend, and GPU, then compare:
 4. full-sequence prefix states versus separately executed truncated prefixes.
 
 No prefix reuse should be connected to FLUX until those comparisons meet a
-predeclared numerical tolerance.
+predeclared numerical tolerance. This experiment is run explicitly for the
+checkpoint and execution environment; the runner neither detects a "first"
+forward nor caches a preflight result inside the training path.

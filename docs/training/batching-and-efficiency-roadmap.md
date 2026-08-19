@@ -110,13 +110,13 @@ The initial `TrainingCollator` is the CPU-side adapter that creates this
 contract and its `TrainingBatchMetadata` sidecar from tokenized ARC samples. It
 keeps training-view pair selection independent from target selection. It takes
 at most the configured number of suffix targets, renders only their canvases,
-and truncates each packed source at its final selected prefix. It validates the
-external sample fields that could otherwise be silently cast or violate NVARC
-token limits, then trusts the offsets, tensor layouts, and palette values it
-constructs itself. The complete public tensor validator remains available to
-diagnostics, tests, and other batch producers. The collator does not sample
-data, pad tokens, create an attention mask, move tensors to an accelerator, or
-draw flow noise or timesteps.
+and truncates each packed source at its final selected prefix. It trusts the
+immutable samples produced by the validated dataset and the offsets, tensor
+layouts, and palette values it constructs itself. The complete public tensor
+validator remains available to diagnostics, tests, and alternate batch
+producers, which must establish the contract before entering the hot path. The
+collator does not sample data, pad tokens, create an attention mask, move
+tensors to an accelerator, or draw flow noise or timesteps.
 
 ## Variable structure and cost signals
 
@@ -198,8 +198,11 @@ NVARC remains frozen and runs in evaluation mode. The intended reuse path is:
 batch. It right-pads complete sources, supplies the attention mask, performs one
 batch forward, and returns only real positions in packed source-major order.
 Step 4 remains outside the runner so target metadata cannot enter the NVARC
-abstraction. Length bucketing and real-checkpoint numerical comparisons remain
-later work.
+abstraction. It trusts the collator-produced source contract and a separately
+verified stable checkpoint-output contract rather than rescanning both on every
+forward. Length bucketing and explicit real-checkpoint numerical comparisons
+remain later work; they are not triggered or remembered by a first-forward
+branch in the runner.
 
 This reuse is valid only if a prefix computed as part of the full causal
 sequence agrees with the same prefix computed in isolation. The real
@@ -366,10 +369,10 @@ This document intentionally does not yet select:
 - a variable-length attention library or kernel;
 - a fixed analytical cost model;
 - non-unit target weighting;
-- an offline conditioning cache;
 - a final DDP or FSDP2 scheduling policy.
 
-Those decisions require measurements from the correct reference pipeline.
+Offline conditioning caches are outside the approved training path. The
+remaining decisions require measurements from the correct reference pipeline.
 This roadmap also does not authorize changes to the frozen/trainable component
 boundaries, the flow-only objective, the 30x30 target representation, the
 task-level split, or the primary evaluation protocol.

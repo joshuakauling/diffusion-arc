@@ -12,6 +12,14 @@ from random import Random
 from typing import Any
 
 from ._layout import resolve_split_layout
+from ._split_io import (
+    load_json,
+    load_task_splits,
+    require_path_component,
+    require_string_array,
+    resolve_inside,
+    validate_task_split_boundary,
+)
 from .augmentation import (
     make_augmentation_key,
     make_identity_training_augmentation,
@@ -64,7 +72,7 @@ def load_arc_split_config(path: str | Path) -> ArcSplitConfig:
     """Load and strictly validate one ``config.json`` split definition."""
 
     config_path = Path(path)
-    payload = _require_mapping(_load_json(config_path), name="config")
+    payload = _require_mapping(load_json(config_path), name="config")
     _require_exact_fields(
         payload,
         {
@@ -97,8 +105,8 @@ def load_arc_split_config(path: str | Path) -> ArcSplitConfig:
 
     source = _require_mapping(payload["source"], name="source")
     _require_exact_fields(source, {"dataset", "split"}, name="source")
-    dataset = _require_path_component(source["dataset"], name="source.dataset")
-    source_split = _require_path_component(source["split"], name="source.split")
+    dataset = require_path_component(source["dataset"], name="source.dataset")
+    source_split = require_path_component(source["split"], name="source.split")
 
     palette = _require_string(payload["palette"], name="palette")
     if palette != ARC_STANDARD_PALETTE_NAME:
@@ -168,8 +176,8 @@ def generate_augmented_key_files(
         dataset=config.dataset,
         source_split=config.source_split,
     )
-    task_ids_by_split = _load_task_splits(split_root, config)
-    _validate_task_split_boundary(task_ids_by_split)
+    task_ids_by_split = load_task_splits(split_root, config.task_split_files)
+    validate_task_split_boundary(task_ids_by_split)
 
     tasks = _load_source_tasks(source_root, task_ids_by_split)
 
@@ -206,7 +214,7 @@ def generate_augmented_key_files(
 
     serialized_outputs: dict[Path, str] = {}
     for view in config.views:
-        output_path = _resolve_inside(split_root, view.output, name=f"views.{view.name}.output")
+        output_path = resolve_inside(split_root, view.output, name=f"views.{view.name}.output")
         serialized_outputs[output_path] = json.dumps(
             list(generated[view.name]),
             indent=2,
@@ -255,7 +263,7 @@ def _load_view_config(
     if task_split != "train":
         raise ValueError(f"training view {view_name!r} must use the 'train' task split")
 
-    exclude = _require_string_array(
+    exclude = require_string_array(
         payload["exclude"],
         name=f"views.{view_name}.exclude",
         allow_empty=True,
@@ -292,44 +300,6 @@ def _load_view_config(
         seed=seed,
         augmentations_per_task=augmentations_per_task,
     )
-
-
-def _load_task_splits(
-    split_root: Path,
-    config: ArcSplitConfig,
-) -> dict[str, tuple[str, ...]]:
-    task_ids_by_split: dict[str, tuple[str, ...]] = {}
-    for split_name, relative_path in config.task_split_files:
-        path = _resolve_inside(
-            split_root,
-            relative_path,
-            name=f"task_splits.{split_name}",
-        )
-        task_ids_by_split[split_name] = _load_task_ids(
-            path,
-            allow_empty=split_name == "validation",
-        )
-    return task_ids_by_split
-
-
-def _load_task_ids(path: Path, *, allow_empty: bool) -> tuple[str, ...]:
-    payload = _load_json(path)
-    task_ids = _require_string_array(payload, name=str(path), allow_empty=allow_empty)
-    for task_id in task_ids:
-        if "_" in task_id:
-            raise ValueError(f"task ID must not contain '_': {task_id!r}")
-        _require_path_component(task_id, name=f"task ID in {path}")
-    return task_ids
-
-
-def _validate_task_split_boundary(
-    task_ids_by_split: Mapping[str, tuple[str, ...]],
-) -> None:
-    overlap = set(task_ids_by_split["train"]) & set(task_ids_by_split["validation"])
-    if overlap:
-        raise ValueError(
-            f"train and validation task splits overlap: {tuple(sorted(overlap))!r}"
-        )
 
 
 def _load_source_tasks(
@@ -422,11 +392,6 @@ def _candidate_seed(
     return int.from_bytes(hashlib.sha256(material).digest()[:16], byteorder="big")
 
 
-def _load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def _require_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a JSON object")
@@ -452,13 +417,6 @@ def _require_string(value: Any, *, name: str) -> str:
     return value
 
 
-def _require_path_component(value: Any, *, name: str) -> str:
-    component = _require_string(value, name=name)
-    if component in {".", ".."} or Path(component).name != component:
-        raise ValueError(f"{name} must be one path component")
-    return component
-
-
 def _require_relative_path(value: Any, *, name: str) -> Path:
     path = Path(_require_string(value, name=name))
     if path.is_absolute() or ".." in path.parts:
@@ -477,29 +435,6 @@ def _require_positive_int(value: Any, *, name: str) -> int:
     if integer <= 0:
         raise ValueError(f"{name} must be positive")
     return integer
-
-
-def _require_string_array(
-    value: Any,
-    *,
-    name: str,
-    allow_empty: bool,
-) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise TypeError(f"{name} must be a JSON array")
-    if not value and not allow_empty:
-        raise ValueError(f"{name} must not be empty")
-    strings = tuple(_require_string(item, name=f"{name} entry") for item in value)
-    if len(set(strings)) != len(strings):
-        raise ValueError(f"{name} must not contain duplicates")
-    return strings
-
-
-def _resolve_inside(root: Path, relative_path: Path, *, name: str) -> Path:
-    resolved = (root / relative_path).resolve()
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"{name} must resolve inside the split directory")
-    return resolved
 
 
 __all__ = [

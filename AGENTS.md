@@ -105,8 +105,19 @@ Unless the user explicitly approves a scope change:
 - Record relevant seeds, data split identifiers, model and package revisions,
   precision, hardware topology, distributed strategy, configuration, and command.
 - Make frozen/trainable parameter boundaries explicit and testable.
-- Add assertions or checks for tensor shapes, dtypes, non-finite values, and
-  distributed assumptions at critical interfaces.
+- Validate raw data, user configuration, and external checkpoint contracts at
+  ingestion or in an explicit smoke/preflight experiment.
+- Trust immutable internal objects produced by validated constructors and
+  loaders. Do not repeat their type, shape, range, or alignment checks in
+  per-item, per-batch, or per-forward hot paths.
+- Keep hot-path checks only for properties that can genuinely change between
+  calls or whose silent failure would corrupt the measured experiment.
+- Keep full tensor range and non-finite scans in tests, diagnostics, explicit
+  preflights, or justified periodic debug modes rather than every training step.
+- Run stable checkpoint preflights explicitly before training. Do not hide them
+  behind first-forward flags or cache preflight state inside training modules.
+- Place shape, dtype, finite-value, and distributed checks at the narrowest
+  critical interface that establishes each contract once.
 - Avoid silent fallbacks that can change the experiment being measured.
 - Validate single-process correctness before DDP or FSDP2.
 - Use tiny smoke tests and tiny-set overfitting before expensive training.
@@ -139,6 +150,12 @@ After the model is cached, run the approved resolution comparison offline with:
 .venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
 .venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
 .venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
+```
+
+Run the repository unit tests with:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src .venv/bin/python -B -m unittest discover -s tests
 ```
 
 No canonical lint or training commands exist yet.

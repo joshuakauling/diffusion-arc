@@ -17,9 +17,14 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-
-NVARC_VOCAB_SIZE = 16
-NVARC_MAX_TOKENS = 8192
+from diffusion_arc._constants import (
+    NVARC_CONTEXT_WIDTH,
+    NVARC_HIDDEN_SIZE,
+    NVARC_HIDDEN_STATE_INDICES,
+    NVARC_MAX_TOKENS,
+    NVARC_PAD_TOKEN_ID,
+    NVARC_VOCAB_SIZE,
+)
 
 TARGET_IMAGE_CHANNELS = 3
 TARGET_IMAGE_HEIGHT = 480
@@ -49,13 +54,23 @@ class PackedTrainingBatch:
     target_images: Tensor
 
 
+@dataclass(frozen=True)
+class PackedNvarcHiddenStates:
+    """Unpadded NVARC hidden states retaining their source boundaries.
+
+    ``hidden_states`` contains every real source position in source-major order.
+    ``sequence_offsets`` is the unchanged offset tensor supplied to the NVARC
+    runner and therefore delimits the same ``S`` complete source sequences.
+    """
+
+    hidden_states: Tensor
+    sequence_offsets: Tensor
+
+
 def validate_packed_training_batch(batch: PackedTrainingBatch) -> None:
     """Raise when a packed training batch violates the public tensor contract."""
 
-    if not isinstance(batch, PackedTrainingBatch):
-        raise TypeError("batch must be a PackedTrainingBatch")
-
-    source_lengths = _validate_packed_sequences(
+    source_lengths = validate_packed_source_sequences(
         input_ids=batch.input_ids,
         sequence_offsets=batch.sequence_offsets,
     )
@@ -112,11 +127,13 @@ def validate_packed_training_batch(batch: PackedTrainingBatch) -> None:
         raise ValueError("every source sequence must have at least one target exposure")
 
 
-def _validate_packed_sequences(
+def validate_packed_source_sequences(
     *,
     input_ids: Tensor,
     sequence_offsets: Tensor,
 ) -> tuple[int, ...]:
+    """Validate packed NVARC sources and return their individual lengths."""
+
     _validate_index_tensor(input_ids, name="input_ids")
     if input_ids.numel() == 0:
         raise ValueError("input_ids must contain at least one source sequence")
@@ -184,12 +201,18 @@ def _require_tensor(value: object, *, name: str) -> None:
 
 
 __all__ = [
+    "NVARC_CONTEXT_WIDTH",
+    "NVARC_HIDDEN_SIZE",
+    "NVARC_HIDDEN_STATE_INDICES",
     "NVARC_MAX_TOKENS",
+    "NVARC_PAD_TOKEN_ID",
     "NVARC_VOCAB_SIZE",
     "TARGET_IMAGE_CHANNELS",
     "TARGET_IMAGE_HEIGHT",
     "TARGET_IMAGE_SHAPE",
     "TARGET_IMAGE_WIDTH",
+    "PackedNvarcHiddenStates",
     "PackedTrainingBatch",
+    "validate_packed_source_sequences",
     "validate_packed_training_batch",
 ]

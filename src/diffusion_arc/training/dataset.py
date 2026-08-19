@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
@@ -23,6 +20,12 @@ from diffusion_arc.arc_data import (
     validate_augmentation_for_task,
 )
 from diffusion_arc.arc_data._layout import resolve_split_layout
+from diffusion_arc.arc_data._split_io import (
+    load_string_array,
+    load_task_splits,
+    resolve_inside,
+    validate_task_split_boundary,
+)
 
 
 class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
@@ -36,8 +39,6 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
     ) -> None:
         if not isinstance(view_name, str) or not view_name:
             raise TypeError("view_name must be a non-empty string")
-        if not isinstance(tokenizer, PreTrainedTokenizerBase):
-            raise TypeError("tokenizer must be a Hugging Face tokenizer")
 
         unresolved_split_root = Path(split_directory).resolve()
         config = load_arc_split_config(unresolved_split_root / "config.json")
@@ -47,15 +48,15 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
             source_split=config.source_split,
         )
         view = _select_view(config, view_name)
-        task_ids_by_split = _load_task_splits(split_root, config)
-        _validate_task_split_boundary(task_ids_by_split)
+        task_ids_by_split = load_task_splits(split_root, config.task_split_files)
+        validate_task_split_boundary(task_ids_by_split)
 
-        key_path = _resolve_inside(
+        key_path = resolve_inside(
             split_root,
             view.output,
             name=f"views.{view.name}.output",
         )
-        serialized_keys = _load_string_array(
+        serialized_keys = load_string_array(
             key_path,
             name=str(key_path),
             allow_empty=False,
@@ -104,14 +105,13 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
         self.max_tokens = config.max_tokens
         self.keys = keys
         self._tokenizer = tokenizer
-        self._tasks = tasks
 
     def __len__(self) -> int:
         return len(self.keys)
 
     def __getitem__(self, index: int) -> ArcTokenizedTrainingSample:
         key = self.keys[index]
-        task = self._tasks[key.task_id]
+        task = load_training_task(self.source_directory / f"{key.task_id}.json")
         augmented = apply_training_augmentation(task, key.augmentation)
         rendered = render_training_prompt(augmented)
         return tokenize_nvarc_training_sample(
@@ -130,81 +130,6 @@ def _select_view(config: ArcSplitConfig, view_name: str) -> ArcTrainingViewConfi
             f"unknown training view {view_name!r}; "
             f"available views: {tuple(views_by_name)!r}"
         ) from error
-
-
-def _load_task_splits(
-    split_root: Path,
-    config: ArcSplitConfig,
-) -> dict[str, tuple[str, ...]]:
-    task_ids_by_split: dict[str, tuple[str, ...]] = {}
-    for split_name, relative_path in config.task_split_files:
-        path = _resolve_inside(
-            split_root,
-            relative_path,
-            name=f"task_splits.{split_name}",
-        )
-        task_ids = _load_string_array(
-            path,
-            name=str(path),
-            allow_empty=split_name == "validation",
-        )
-        for task_id in task_ids:
-            if "_" in task_id:
-                raise ValueError(f"task ID must not contain '_': {task_id!r}")
-            _require_path_component(task_id, name=f"task ID in {path}")
-        task_ids_by_split[split_name] = task_ids
-    return task_ids_by_split
-
-
-def _validate_task_split_boundary(
-    task_ids_by_split: Mapping[str, tuple[str, ...]],
-) -> None:
-    overlap = set(task_ids_by_split["train"]) & set(
-        task_ids_by_split["validation"]
-    )
-    if overlap:
-        raise ValueError(
-            f"train and validation task splits overlap: {tuple(sorted(overlap))!r}"
-        )
-
-
-def _load_string_array(
-    path: Path,
-    *,
-    name: str,
-    allow_empty: bool,
-) -> tuple[str, ...]:
-    payload = _load_json(path)
-    if not isinstance(payload, list):
-        raise TypeError(f"{name} must be a JSON array")
-    if not payload and not allow_empty:
-        raise ValueError(f"{name} must not be empty")
-
-    strings: list[str] = []
-    for item in payload:
-        if not isinstance(item, str) or not item:
-            raise TypeError(f"{name} entries must be non-empty strings")
-        strings.append(item)
-    if len(set(strings)) != len(strings):
-        raise ValueError(f"{name} must not contain duplicates")
-    return tuple(strings)
-
-
-def _load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def _require_path_component(value: str, *, name: str) -> None:
-    if value in {".", ".."} or Path(value).name != value:
-        raise ValueError(f"{name} must be one path component")
-
-
-def _resolve_inside(root: Path, relative_path: Path, *, name: str) -> Path:
-    resolved = (root / relative_path).resolve()
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"{name} must resolve inside the split directory")
-    return resolved
 
 
 __all__ = ["ArcTrainingDataset"]

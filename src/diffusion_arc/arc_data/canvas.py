@@ -36,6 +36,12 @@ def render_grid_canvas(grid: Grid) -> Tensor:
     """Render one top-left-aligned ARC grid as ``[3, 480, 480]`` in ``[-1, 1]``."""
 
     validate_arc_grid(grid)
+    return _render_valid_grid_canvas(grid)
+
+
+def _render_valid_grid_canvas(grid: Grid) -> Tensor:
+    """Render a grid whose ARC shape and palette were validated at ingestion."""
+
     class_canvas = torch.full(
         (CANVAS_SIZE, CANVAS_SIZE),
         PAD_CLASS,
@@ -58,13 +64,11 @@ def render_training_target_canvases(
 ) -> Tensor:
     """Render the training targets in the same order as their prompt cuts."""
 
-    if not isinstance(sample, ArcRenderedTrainingSample):
-        raise TypeError("sample must be an ArcRenderedTrainingSample")
     if not sample.targets:
         raise ValueError("a rendered training sample must contain at least one target")
 
     return torch.stack(
-        tuple(render_grid_canvas(target.target_grid) for target in sample.targets)
+        tuple(_render_valid_grid_canvas(target.target_grid) for target in sample.targets)
     )
 
 
