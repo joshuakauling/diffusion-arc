@@ -22,7 +22,6 @@ def parse_args() -> argparse.Namespace:
         description="Generate reproducible augmented-key files for ARC training views."
     )
     parser.add_argument("split_directory", type=Path)
-    parser.add_argument("--data-root", type=Path, default=REPOSITORY_ROOT / "data")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -31,7 +30,6 @@ def main() -> int:
     args = parse_args()
     views = generate_augmented_key_files(
         args.split_directory,
-        data_root=args.data_root,
         overwrite=args.overwrite,
     )
     report = {

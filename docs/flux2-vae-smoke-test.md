@@ -31,15 +31,15 @@ Create the environment and run the test:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install --no-cache-dir -r requirements.txt
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 16
 ```
 
 After the first run, run the three-way comparison without network access:
 
 ```bash
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
 ```
 
 Generated metrics and PNG comparisons are written below

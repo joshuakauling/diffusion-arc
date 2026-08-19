@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ._grid import ARC_GRID_SIZE
 from .types import (
     ArcEvaluationTargets,
     ArcEvaluationTask,
@@ -147,14 +148,14 @@ def _load_grid_field(example: Any, field: str, *, name: str) -> Grid:
 def _load_grid(value: Any, *, name: str) -> Grid:
     if not isinstance(value, list) or not value:
         raise TypeError(f"{name} must be a non-empty list of rows")
-    if len(value) > 30:
-        raise ValueError(f"{name} height must not exceed 30")
+    if len(value) > ARC_GRID_SIZE:
+        raise ValueError(f"{name} height must not exceed {ARC_GRID_SIZE}")
     if any(not isinstance(row, list) or not row for row in value):
         raise TypeError(f"{name} rows must be non-empty lists")
 
     width = len(value[0])
-    if width > 30:
-        raise ValueError(f"{name} width must not exceed 30")
+    if width > ARC_GRID_SIZE:
+        raise ValueError(f"{name} width must not exceed {ARC_GRID_SIZE}")
     if any(len(row) != width for row in value):
         raise ValueError(f"{name} must be rectangular")
     if any(

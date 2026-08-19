@@ -5,11 +5,12 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+from ._grid import ARC_GRID_SIZE, validate_arc_grid
 from .prompt import ArcRenderedTrainingSample
 from .types import Grid
 
 
-CANVAS_SIZE = 30
+CANVAS_SIZE = ARC_GRID_SIZE
 CELL_SIZE = 16
 PAD_CLASS = 10
 
@@ -34,7 +35,7 @@ ARC_PALETTE_RGB = torch.tensor(
 def render_grid_canvas(grid: Grid) -> Tensor:
     """Render one top-left-aligned ARC grid as ``[3, 480, 480]`` in ``[-1, 1]``."""
 
-    _validate_grid(grid)
+    validate_arc_grid(grid)
     class_canvas = torch.full(
         (CANVAS_SIZE, CANVAS_SIZE),
         PAD_CLASS,
@@ -65,27 +66,6 @@ def render_training_target_canvases(
     return torch.stack(
         tuple(render_grid_canvas(target.target_grid) for target in sample.targets)
     )
-
-
-def _validate_grid(grid: Grid) -> None:
-    if not grid or any(not row for row in grid):
-        raise ValueError("grid must contain at least one non-empty row")
-    if len(grid) > CANVAS_SIZE:
-        raise ValueError(f"grid height must not exceed {CANVAS_SIZE}")
-
-    width = len(grid[0])
-    if width > CANVAS_SIZE:
-        raise ValueError(f"grid width must not exceed {CANVAS_SIZE}")
-    if any(len(row) != width for row in grid):
-        raise ValueError("grid rows must all have the same length")
-    if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not 0 <= value <= 9
-        for row in grid
-        for value in row
-    ):
-        raise ValueError("grid values must be integers from 0 through 9")
 
 
 __all__ = [

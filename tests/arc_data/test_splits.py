@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from diffusion_arc.arc_data import generate_augmented_key_files
+from diffusion_arc.arc_data import generate_augmented_key_files, load_arc_split_config
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -71,14 +71,8 @@ class ArcSplitGenerationTest(unittest.TestCase):
             write_json(split_root / "train.json", ["train-a"])
             write_json(split_root / "validation.json", ["validation-a"])
 
-            generated = generate_augmented_key_files(
-                split_root,
-                data_root=root / "data",
-            )
-            repeated = generate_augmented_key_files(
-                split_root,
-                data_root=root / "data",
-            )
+            generated = generate_augmented_key_files(split_root)
+            repeated = generate_augmented_key_files(split_root)
 
             self.assertEqual(generated, repeated)
             self.assertEqual(len(generated["train"]), 4)
@@ -115,10 +109,27 @@ class ArcSplitGenerationTest(unittest.TestCase):
             write_json(split_root / "validation.json", ["shared-task"])
 
             with self.assertRaisesRegex(ValueError, "overlap"):
-                generate_augmented_key_files(
-                    split_root,
-                    data_root=root / "data",
-                )
+                generate_augmented_key_files(split_root)
+
+    def test_rejects_split_directory_outside_canonical_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            split_root = Path(temporary_directory) / "data/configurations/run"
+            write_json(split_root / "config.json", split_config())
+
+            with self.assertRaisesRegex(ValueError, "data_directory"):
+                generate_augmented_key_files(split_root)
+
+    def test_rejects_booleans_as_config_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "config.json"
+
+            for field in ("schema_version", "generator_version"):
+                payload = split_config()
+                payload[field] = True
+                write_json(config_path, payload)
+
+                with self.subTest(field=field), self.assertRaises(TypeError):
+                    load_arc_split_config(config_path)
 
 
 if __name__ == "__main__":

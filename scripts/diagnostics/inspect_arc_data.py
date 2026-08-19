@@ -8,16 +8,17 @@ import sys
 from pathlib import Path
 from random import Random
 
-from tokenizers import Regex, Tokenizer
-from tokenizers.models import WordLevel
-from tokenizers.pre_tokenizers import Split
 from transformers import PreTrainedTokenizerFast
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
+
+DIAGNOSTICS_ROOT = Path(__file__).resolve().parent
+if str(DIAGNOSTICS_ROOT) not in sys.path:
+    sys.path.insert(0, str(DIAGNOSTICS_ROOT))
 
 from diffusion_arc.arc_data import (  # noqa: E402
     NVARC_MAX_TOKENS,
@@ -37,31 +38,7 @@ from diffusion_arc.arc_data import (  # noqa: E402
     tokenize_nvarc_evaluation_sample,
     tokenize_nvarc_training_sample,
 )
-
-
-def make_nvarc_tokenizer() -> PreTrainedTokenizerFast:
-    """Build the complete 16-token NVARC tokenizer without a checkpoint."""
-
-    vocabulary = {
-        **{str(value): value for value in range(10)},
-        "\n": 10,
-        "user": 11,
-        "assistant": 12,
-        "<|endoftext|>": 13,
-        "<|im_start|>": 14,
-        "<|im_end|>": 15,
-    }
-    backend = Tokenizer(WordLevel(vocabulary, unk_token="<|endoftext|>"))
-    backend.pre_tokenizer = Split(
-        Regex(r"(<\|im_start\|>|<\|im_end\|>|assistant|user|\n|[0-9])"),
-        behavior="isolated",
-    )
-    return PreTrainedTokenizerFast(
-        tokenizer_object=backend,
-        unk_token="<|endoftext|>",
-        additional_special_tokens=["<|im_start|>", "<|im_end|>"],
-        model_max_length=NVARC_MAX_TOKENS,
-    )
+from _nvarc_tokenizer import make_nvarc_tokenizer  # noqa: E402
 
 
 def print_training_view(
@@ -91,7 +68,7 @@ def print_training_view(
 
 
 def inspect_task(args: argparse.Namespace) -> None:
-    tokenizer = make_nvarc_tokenizer()
+    tokenizer = make_nvarc_tokenizer(model_max_length=NVARC_MAX_TOKENS)
     training_task = load_training_task(args.task_path)
 
     identity = make_identity_training_augmentation(

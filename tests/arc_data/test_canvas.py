@@ -53,6 +53,25 @@ class ArcCanvasTest(unittest.TestCase):
         torch.testing.assert_close(images[0, :, 0, 0], normalized_color(1))
         torch.testing.assert_close(images[1, :, 0, 0], normalized_color(2))
 
+    def test_rejects_grids_larger_than_the_canvas(self) -> None:
+        oversized_grids = (
+            tuple((0,) for _ in range(31)),
+            (tuple(0 for _ in range(31)),),
+        )
+
+        for grid in oversized_grids:
+            with self.subTest(shape=(len(grid), len(grid[0]))), self.assertRaises(
+                ValueError
+            ):
+                render_grid_canvas(grid)
+
+    def test_accepts_a_grid_at_the_thirty_by_thirty_boundary(self) -> None:
+        grid = tuple(tuple(0 for _ in range(30)) for _ in range(30))
+
+        image = render_grid_canvas(grid)
+
+        self.assertEqual(image.shape, (3, 480, 480))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -130,15 +130,15 @@ python3 -m venv .venv
 Run the VAE smoke test on Apple Silicon with:
 
 ```bash
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 16
 ```
 
 After the model is cached, run the approved resolution comparison offline with:
 
 ```bash
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
-.venv/bin/python scripts/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 8 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 16 --local-files-only
+.venv/bin/python scripts/diagnostics/vae_smoke_test.py --device mps --cell-size 32 --local-files-only
 ```
 
 No canonical lint or training commands exist yet.

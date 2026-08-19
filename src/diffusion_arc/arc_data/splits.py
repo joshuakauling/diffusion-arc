@@ -11,6 +11,7 @@ from pathlib import Path
 from random import Random
 from typing import Any
 
+from ._layout import resolve_split_layout
 from .augmentation import (
     make_augmentation_key,
     make_identity_training_augmentation,
@@ -77,13 +78,21 @@ def load_arc_split_config(path: str | Path) -> ArcSplitConfig:
         },
         name="config",
     )
-    if payload["schema_version"] != ARC_SPLIT_SCHEMA_VERSION:
+    schema_version = _require_int(
+        payload["schema_version"],
+        name="schema_version",
+    )
+    if schema_version != ARC_SPLIT_SCHEMA_VERSION:
         raise ValueError(
-            f"unsupported schema_version: {payload['schema_version']!r}"
+            f"unsupported schema_version: {schema_version!r}"
         )
-    if payload["generator_version"] != ARC_AUGMENTATION_GENERATOR_VERSION:
+    generator_version = _require_int(
+        payload["generator_version"],
+        name="generator_version",
+    )
+    if generator_version != ARC_AUGMENTATION_GENERATOR_VERSION:
         raise ValueError(
-            f"unsupported generator_version: {payload['generator_version']!r}"
+            f"unsupported generator_version: {generator_version!r}"
         )
 
     source = _require_mapping(payload["source"], name="source")
@@ -148,22 +157,20 @@ def load_arc_split_config(path: str | Path) -> ArcSplitConfig:
 def generate_augmented_key_files(
     split_directory: str | Path,
     *,
-    data_root: str | Path,
     overwrite: bool = False,
 ) -> dict[str, tuple[str, ...]]:
     """Generate every configured training view and write its JSON key array."""
 
-    split_root = Path(split_directory).resolve()
-    config = load_arc_split_config(split_root / "config.json")
+    unresolved_split_root = Path(split_directory).resolve()
+    config = load_arc_split_config(unresolved_split_root / "config.json")
+    split_root, source_root = resolve_split_layout(
+        unresolved_split_root,
+        dataset=config.dataset,
+        source_split=config.source_split,
+    )
     task_ids_by_split = _load_task_splits(split_root, config)
     _validate_task_split_boundary(task_ids_by_split)
 
-    source_root = (
-        Path(data_root).resolve()
-        / "raw"
-        / config.dataset
-        / config.source_split
-    )
     tasks = _load_source_tasks(source_root, task_ids_by_split)
 
     views_by_name = {view.name: view for view in config.views}

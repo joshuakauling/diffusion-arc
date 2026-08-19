@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from random import Random
 
+from ._grid import validate_arc_grid
 from .types import ArcEvaluationTask, ArcPair, ArcTrainingTask, Grid
 
 
@@ -194,6 +195,8 @@ def sample_training_augmentation(
     """Sample one bounded, reproducible augmentation of a training task."""
 
     _validate_training_sampling_limits(task, max_pairs=max_pairs, max_cells=max_cells)
+    if not isinstance(augmentation_index, int) or isinstance(augmentation_index, bool):
+        raise TypeError("augmentation_index must be an integer")
     if augmentation_index < 0:
         raise ValueError("augmentation_index must be non-negative")
 
@@ -244,7 +247,7 @@ def augment_grid(grid: Grid, augmentation: ArcAugmentationSpec) -> Grid:
 
     if not isinstance(augmentation, ArcAugmentationSpec):
         raise TypeError("augmentation must be an ArcAugmentationSpec")
-    _validate_grid(grid)
+    validate_arc_grid(grid)
 
     transformed = tuple(
         tuple(augmentation.color_mapping[value] for value in row) for row in grid
@@ -314,6 +317,10 @@ def _validate_training_sampling_limits(
 ) -> None:
     if not isinstance(task, ArcTrainingTask):
         raise TypeError("task must be an ArcTrainingTask")
+    if not isinstance(max_pairs, int) or isinstance(max_pairs, bool):
+        raise TypeError("max_pairs must be an integer")
+    if not isinstance(max_cells, int) or isinstance(max_cells, bool):
+        raise TypeError("max_cells must be an integer")
     if max_pairs < 2:
         raise ValueError("max_pairs must allow at least two pairs")
     if max_cells <= 0:
@@ -348,22 +355,6 @@ def _select_pair_indices(
             "fewer than two task pairs fit within the configured sampling limits"
         )
     return selected_indices
-
-
-def _validate_grid(grid: Grid) -> None:
-    if not grid or any(not row for row in grid):
-        raise ValueError("grid must contain at least one non-empty row")
-    width = len(grid[0])
-    if any(len(row) != width for row in grid):
-        raise ValueError("grid rows must all have the same length")
-    if any(
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not 0 <= value <= 9
-        for row in grid
-        for value in row
-    ):
-        raise ValueError("grid values must be integers from 0 through 9")
 
 
 def _validate_task_id(task_id: str) -> None:

@@ -258,7 +258,7 @@ Use the local playground to print identity, augmented, and evaluation prompts,
 plus token counts, prefix cuts, augmentation keys, and canvas shapes:
 
 ```bash
-.venv/bin/python scripts/inspect_arc_data.py \
+.venv/bin/python scripts/diagnostics/inspect_arc_data.py \
   data/raw/arc-agi-2/training/00576224.json \
   --augmentations 2 \
   --seed 167
