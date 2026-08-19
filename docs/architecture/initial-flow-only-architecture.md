@@ -4,7 +4,7 @@
 
 This document specifies the flow-only architecture used by the nine core
 project milestones. The project scope and milestone order are defined in the
-root [`README.md`](../README.md).
+root [`README.md`](../../README.md).
 
 ## Core hypothesis
 
@@ -289,8 +289,8 @@ evaluated.
 
 ## Supporting documents
 
-- [Project scope and milestones](../README.md)
+- [Project scope and milestones](../../README.md)
 - [Architecture diagram](architecture.svg)
 - [FLUX.2 Klein architecture and flow matching](flux2-klein-architecture.md)
-- [FLUX.2 VAE smoke test](flux2-vae-smoke-test.md)
+- [FLUX.2 VAE smoke test](../experiments/flux2-vae-smoke-test.md)
 - [NVARC overview](nvarc-overview.md)

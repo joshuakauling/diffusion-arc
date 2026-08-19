@@ -2,7 +2,7 @@
 
 This document describes the implemented ARC data path from one-file-per-task
 JSON files to model-facing prompts, token IDs, and target canvases. The project
-scope and milestone definitions in [`README.md`](../README.md) remain
+scope and milestone definitions in [`README.md`](../../README.md) remain
 authoritative.
 
 ## Goals and invariants
@@ -17,7 +17,7 @@ The data layer is designed around four rules:
    augmentation choices in a canonical key.
 
 The public API lives in
-[`src/diffusion_arc/arc_data`](../src/diffusion_arc/arc_data).
+[`src/diffusion_arc/arc_data`](../../src/diffusion_arc/arc_data).
 
 ## On-disk layout
 
@@ -220,7 +220,7 @@ data-preparation layer.
 
 ## Reproducible split generation
 
-[`data/splits/overfitting_run_1/config.json`](../data/splits/overfitting_run_1/config.json)
+[`data/splits/overfitting_run_1/config.json`](../../data/splits/overfitting_run_1/config.json)
 is the first concrete split configuration. It defines:
 
 - source dataset and source split,

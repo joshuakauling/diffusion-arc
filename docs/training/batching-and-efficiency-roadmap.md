@@ -5,7 +5,7 @@
 This document records the staged batching strategy for Diffusion-ARC. It is a
 supporting engineering plan, not a change to the project hypothesis,
 architecture, milestone order, evaluation protocol, or initial non-goals in
-the root [`README.md`](../README.md).
+the root [`README.md`](../../README.md).
 
 This roadmap applies only to the training path. Inference contracts, batching,
 prefix reuse, and autoregressive caching are intentionally designed and
@@ -82,7 +82,7 @@ the statistical weighting of the training objective.
 
 ## Contract and execution layout
 
-[`PackedTrainingBatch`](../src/diffusion_arc/model/contracts.py) is a host-side
+[`PackedTrainingBatch`](../../src/diffusion_arc/model/contracts.py) is a host-side
 transport contract. Its flat `input_ids` and `sequence_offsets` preserve
 unpadded logical source sequences, but they do not require or authorize one
 concatenated attention operation. A runner handling more than one source must
@@ -91,9 +91,13 @@ padded or true variable-length NVARC layout.
 
 The implemented dataset-to-collator reference path and every public batch field
 are documented in
-[`training-data-assembly.md`](training-data-assembly.md). This roadmap starts
+[`training-data-assembly.md`](../data/training-data-assembly.md). This roadmap starts
 from that reference contract and describes only later execution and scheduling
 stages.
+
+The implemented target-blind padded NVARC execution boundary is documented in
+[`nvarc-batch-runner.md`](nvarc-batch-runner.md). It provides the correctness
+primitive used before adding length buckets or target-aware staging.
 
 The public target metadata is source-major so it can be validated against the
 source boundaries. Later staging pools may build an internal reordered view for
@@ -189,6 +193,13 @@ NVARC remains frozen and runs in evaluation mode. The intended reuse path is:
 2. concatenate the selected hidden layers;
 3. retain only the real, unpadded hidden states;
 4. create a conditioning view for every recorded target-prefix boundary.
+
+`NvarcBatchRunner` now implements steps 1 through 3 for one physical NVARC
+batch. It right-pads complete sources, supplies the attention mask, performs one
+batch forward, and returns only real positions in packed source-major order.
+Step 4 remains outside the runner so target metadata cannot enter the NVARC
+abstraction. Length bucketing and real-checkpoint numerical comparisons remain
+later work.
 
 This reuse is valid only if a prefix computed as part of the full causal
 sequence agrees with the same prefix computed in isolation. The real

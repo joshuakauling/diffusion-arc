@@ -70,7 +70,7 @@ Supporting questions include:
 
 ## Architecture
 
-![Diffusion-ARC architecture](docs/architecture.svg)
+![Diffusion-ARC architecture](docs/architecture/architecture.svg)
 
 The NVARC model and FLUX VAE remain frozen, while the complete FLUX
 transformer is trained. The architecture reuses FLUX's native Qwen3
@@ -94,7 +94,7 @@ and distributed profiling.
 
 The complete initial architecture, training objective, and decoding procedure
 are documented in
-[`docs/initial-flow-only-architecture.md`](docs/initial-flow-only-architecture.md).
+[`docs/architecture/initial-flow-only-architecture.md`](docs/architecture/initial-flow-only-architecture.md).
 
 ## Distributed Training
 

@@ -4,11 +4,13 @@
 
 This document describes the implemented CPU-side training path from one
 configured ARC training view to the tensors passed across the model boundary.
-The project scope and milestones in the root [`README.md`](../README.md) remain
+The project scope and milestones in the root [`README.md`](../../README.md) remain
 authoritative. The upstream loading, augmentation, prompt, and tokenization
 rules are documented in [`data-pipeline.md`](data-pipeline.md). Future batching
 optimizations are documented separately in
-[`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md).
+[`batching-and-efficiency-roadmap.md`](../training/batching-and-efficiency-roadmap.md).
+The target-blind execution of packed sources through frozen NVARC is documented
+in [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
 The implemented path is:
 
@@ -27,9 +29,9 @@ This is a host transport path. It prepares aligned CPU tensors but does not
 define how NVARC or FLUX execute them on an accelerator.
 
 The implemented dataset and collator live in
-[`src/diffusion_arc/training`](../src/diffusion_arc/training). Their tensor
+[`src/diffusion_arc/training`](../../src/diffusion_arc/training). Their tensor
 contract lives in
-[`src/diffusion_arc/model/contracts.py`](../src/diffusion_arc/model/contracts.py).
+[`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 
 ## Responsibility boundaries
 
@@ -38,6 +40,7 @@ contract lives in
 | `ArcTrainingDataset` | Selecting a configured view, loading and validating keys and tasks, applying stored augmentations, rendering prompts, tokenizing complete samples | Shuffling, batching, target budgeting, canvas rendering, model execution |
 | PyTorch `DataLoader` | Selecting dataset indices, source-level batch size, shuffle/sampler policy, workers, invoking the collator | ARC semantics, target selection, packed tensor meaning |
 | `TrainingCollator` | Selecting suffix targets, truncating sources, rendering target canvases, building the packed tensor contract and metadata sidecar | Sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
+| `NvarcBatchRunner` | Right-padding complete sources, constructing the NVARC attention mask, one frozen batch forward, selected hidden-state extraction, removal of padded positions | Targets, target-prefix derivation, target images, VAE or FLUX execution |
 | Future training runner | Target-prefix derivation, VAE encoding, flow noise and timestep sampling, FLUX execution, loss normalization, optimizer steps | Reinterpreting or silently changing dataset and collator alignment |
 
 ## `ArcTrainingDataset`
@@ -310,6 +313,14 @@ It does not automatically run the complete
 `validate_packed_training_batch` scan over every output tensor. That public
 validator remains available for diagnostics, tests, and batches constructed by
 other producers.
+
+`NvarcBatchRunner` interprets the flat representation explicitly. It validates
+the sources, right-pads them to their batch maximum, supplies a boolean
+attention mask, executes frozen NVARC once, and discards every padded hidden
+position before returning a compact result. Attention must never cross the
+boundaries in `sequence_offsets`. The runner's exact contract and outstanding
+real-checkpoint checks are documented in
+[`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
 ## Where noise enters
 

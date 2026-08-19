@@ -13,7 +13,7 @@ RGB candidate has not been evaluated through the VAE, and no palette has been
 compared in a FLUX training run.
 
 The authoritative project scope and milestone order remain in
-[`README.md`](../README.md).
+[`README.md`](../../README.md).
 
 ## Question
 
@@ -43,7 +43,7 @@ generalization results.
 
 This distinction is particularly important because the frozen NVARC checkpoint
 is already contaminated with respect to public ARC-AGI-2 evaluation tasks, as
-documented in [`nvarc-overview.md`](nvarc-overview.md). NVARC is not executed in
+documented in [`nvarc-overview.md`](../architecture/nvarc-overview.md). NVARC is not executed in
 the palette experiment, but the same public set cannot later be reclassified as
 an untouched final benchmark after it has been used for palette selection.
 
@@ -66,10 +66,10 @@ The experiment seed was `20260813`.
 
 The notebooks and machine-readable reports are:
 
-- [synthetic pilot notebook](../experiments/vae_palette_experiment.ipynb)
-- [synthetic pilot metrics](../experiments/results/vae-palette-experiment/metrics.json)
-- [real-grid notebook](../experiments/vae_palette_real_evaluation.ipynb)
-- [real-grid metrics](../experiments/results/vae-palette-real-evaluation/metrics.json)
+- [synthetic pilot notebook](../../experiments/vae_palette_experiment.ipynb)
+- [synthetic pilot metrics](../../experiments/results/vae-palette-experiment/metrics.json)
+- [real-grid notebook](../../experiments/vae_palette_real_evaluation.ipynb)
+- [real-grid metrics](../../experiments/results/vae-palette-real-evaluation/metrics.json)
 
 ## Candidate construction
 
@@ -110,7 +110,7 @@ same rule to those prototypes.
 | 9 | `#870C25` | `#0000AA` | `#550000` |
 | PAD | `#FFFFFF` | `#FFFFFF` | `#FFFFFF` |
 
-![The three tested palettes](../experiments/results/vae-palette-real-evaluation/palettes.png)
+![The three tested palettes](../../experiments/results/vae-palette-real-evaluation/palettes.png)
 
 ## Synthetic pilot
 
@@ -187,7 +187,7 @@ Standard deviations are included where the repeats differed.
 | 0.75 | 31.14% +/- 1.27% | **48.10% +/- 1.35%** | 46.21% +/- 0.56% |
 | 1.00 | 0.10% +/- 0.14% | 0.30% +/- 0.24% | 0.40% +/- 0.14% |
 
-![Exact-grid robustness over all views](../experiments/results/vae-palette-real-evaluation/robustness-exact-grid-all.png)
+![Exact-grid robustness over all views](../../experiments/results/vae-palette-real-evaluation/robustness-exact-grid-all.png)
 
 Greedy RGB maximin was the strongest tested palette throughout the meaningful
 transition at sigma `0.35`, `0.50`, and `0.75`. At sigma `1.0`, all candidates
@@ -209,13 +209,13 @@ single wrong cell invalidates an entire ARC output. At sigma `1.0`, the
 remaining high cell accuracy is misleading: exact-grid accuracy is near zero
 and PAD-boundary failures have already collapsed inferred output shapes.
 
-![Shape robustness over all views](../experiments/results/vae-palette-real-evaluation/robustness-shape-all.png)
+![Shape robustness over all views](../../experiments/results/vae-palette-real-evaluation/robustness-shape-all.png)
 
 The failure gallery confirms that errors concentrate around small structures,
 thin color regions, and cell boundaries rather than producing uniform RGB
 drift.
 
-![Representative failures at sigma 0.5](../experiments/results/vae-palette-real-evaluation/failure-gallery.png)
+![Representative failures at sigma 0.5](../../experiments/results/vae-palette-real-evaluation/failure-gallery.png)
 
 ### Focused post-hoc summary
 
