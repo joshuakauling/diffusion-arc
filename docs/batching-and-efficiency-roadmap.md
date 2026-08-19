@@ -24,9 +24,12 @@ Diffusion-ARC training has more than one useful notion of a batch.
 
 ### Source sequence
 
-A source sequence is one complete tokenized NVARC training prompt. It contains
-an ordered set of ARC input/output pairs. The first pair provides an initial
+A training view contains one complete tokenized NVARC training prompt with an
+ordered set of ARC input/output pairs. The first pair provides an initial
 demonstration, while each later pair may produce a target for FLUX training.
+The collated source sequence retains the view through the assistant header of
+its final selected target. It omits that target's output suffix because no
+later conditioning prefix can use it.
 
 One source sequence can therefore produce multiple target exposures. If a
 sequence contains four pairs, for example, it may provide three targets:
@@ -54,7 +57,7 @@ A physical microbatch is a collection of source sequences or target exposures
 executed together because they fit within a bounded device workload. NVARC and
 FLUX need not use the same physical grouping:
 
-- NVARC can group complete source sequences by their full token lengths.
+- NVARC can group collated source sequences by their actual token lengths.
 - FLUX can regroup the resulting target exposures by their prefix lengths.
 
 The physical microbatch is an execution detail and may contain a variable
@@ -86,6 +89,12 @@ concatenated attention operation. A runner handling more than one source must
 either execute the sources separately or convert them to a correctly masked
 padded or true variable-length NVARC layout.
 
+The implemented dataset-to-collator reference path and every public batch field
+are documented in
+[`training-data-assembly.md`](training-data-assembly.md). This roadmap starts
+from that reference contract and describes only later execution and scheduling
+stages.
+
 The public target metadata is source-major so it can be validated against the
 source boundaries. Later staging pools may build an internal reordered view for
 FLUX execution without changing the canonical contract. Task IDs,
@@ -93,11 +102,23 @@ augmentation keys, split identities, and other non-tensor audit metadata stay
 in a sidecar owned by the dataset or runner and must remain aligned with every
 source and target exposure.
 
+The initial `TrainingCollator` is the CPU-side adapter that creates this
+contract and its `TrainingBatchMetadata` sidecar from tokenized ARC samples. It
+keeps training-view pair selection independent from target selection. It takes
+at most the configured number of suffix targets, renders only their canvases,
+and truncates each packed source at its final selected prefix. It validates the
+external sample fields that could otherwise be silently cast or violate NVARC
+token limits, then trusts the offsets, tensor layouts, and palette values it
+constructs itself. The complete public tensor validator remains available to
+diagnostics, tests, and other batch producers. The collator does not sample
+data, pad tokens, create an attention mask, move tensors to an accelerator, or
+draw flow noise or timesteps.
+
 ## Variable structure and cost signals
 
 For source sequence `s`, define:
 
-- `L_s`: the full NVARC sequence length;
+- `L_s`: the collated NVARC source length after terminal-output truncation;
 - `K_s`: the number of target exposures produced by the sequence;
 - `p_sj`: the conditioning-prefix length for target `j`;
 - `q_sj = p_sj + 900`: the joint FLUX length for that target, including the
@@ -131,33 +152,40 @@ resource limits or use an empirically fitted cost model.
 
 The first implementation deliberately favors transparency over utilization.
 
-### Fixed targets per source sequence
+### Bounded suffix targets per source sequence
 
-The initial run configuration should declare an exact number of targets per
-source sequence. Equivalently, an accepted source prompt contains one initial
-demonstration plus the configured number of later target pairs.
+The training-view `max_pairs` and `max_cells` settings determine which ordered
+pairs enter a source independently of its FLUX target budget. Every pair after
+the first remains an available target candidate.
 
-The current `max_pairs` and `max_cells` data settings are upper bounds and do
-not by themselves guarantee that exact target count. The later training-view
-or collator implementation must enforce the configured value and reject a view
-that cannot supply it instead of silently producing a different `K`.
+The initial run configuration may declare `max_targets_per_source`. The
+collator selects the last `min(max_targets_per_source, available_targets)`
+candidates while preserving their source order. A view with fewer candidates
+is accepted, and `None` selects all available targets. Earlier unselected pairs
+remain useful because their teacher-forced outputs condition the selected
+suffix targets.
 
-The exact value is a run-configuration decision and is not fixed by the model
-contract. Starting with a fixed target count removes one source of execution
-variation while the end-to-end interfaces are being validated. The underlying
-contracts must continue to represent variable target counts so that this
-temporary policy does not become an architectural restriction.
+Suffix selection ensures that the retained source context contributes to at
+least one selected target, but it biases a single fixed view toward later pair
+positions and longer-context predictions. Sampled pair-order augmentations can
+move original pairs into the selected suffix across views. Runs that require
+complete per-view target coverage should select all candidates instead.
+
+The packed contract therefore represents variable target counts from the
+start. Physical FLUX batching and optimizer-batch normalization must use the
+actual number of selected target exposures rather than assuming an exact count
+per source.
 
 ### NVARC execution
 
-Complete source sequences may be bucketed by full token length. Within an
+Collated source sequences may be bucketed by actual token length. Within an
 NVARC microbatch, shorter sequences may be padded only when NVARC receives a
 correct attention mask. The mask makes padding semantically safe; whether the
 selected kernel also avoids computing padded positions must be measured.
 
 NVARC remains frozen and runs in evaluation mode. The intended reuse path is:
 
-1. run the complete causal source sequence through NVARC once;
+1. run the collated causal source sequence through NVARC once;
 2. concatenate the selected hidden layers;
 3. retain only the real, unpadded hidden states;
 4. create a conditioning view for every recorded target-prefix boundary.
@@ -321,7 +349,7 @@ work, synchronization, or optimizer steps erase the gain.
 
 This document intentionally does not yet select:
 
-- a permanent targets-per-source value;
+- a permanent maximum targets-per-source value;
 - final NVARC bucket boundaries;
 - a maximum token or compute budget;
 - a variable-length attention library or kernel;

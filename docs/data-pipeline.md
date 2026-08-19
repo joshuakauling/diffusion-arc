@@ -180,6 +180,11 @@ configured token limit when tokenizing a generated view.
 The stacked training result has shape
 `[number_of_targets, 3, 480, 480]`.
 
+The data layer exposes every pair after the first as an aligned target
+candidate. It does not apply the training run's target budget. The host-side
+training collator may later select a suffix of these candidates while retaining
+the preceding pairs as NVARC context.
+
 ## Evaluation path
 
 Evaluation keeps model inputs and scoring targets on separate branches:
@@ -252,6 +257,38 @@ Generate all configured key files with:
 The current `overfitting_run_1/validation.json` is empty. A real held-out
 validation run still requires selecting task IDs for that file.
 
+## PyTorch training assembly
+
+`ArcTrainingDataset` builds a map-style PyTorch dataset directly from one
+configured split view. The standard `DataLoader` groups source samples and
+invokes `TrainingCollator`:
+
+```python
+from pathlib import Path
+
+from torch.utils.data import DataLoader
+
+from diffusion_arc.training import ArcTrainingDataset, TrainingCollator
+
+
+dataset = ArcTrainingDataset(
+    split_directory=Path("data/splits/overfitting_run_1"),
+    view_name="train",
+    tokenizer=tokenizer,
+)
+loader = DataLoader(
+    dataset,
+    batch_size=2,
+    shuffle=False,
+    collate_fn=TrainingCollator(max_targets_per_source=2),
+)
+```
+
+The complete constructor semantics, item contract, suffix-target selection,
+packed tensor fields, metadata sidecar, CPU boundary, and responsibility split
+are documented in
+[`training-data-assembly.md`](training-data-assembly.md).
+
 ## Manual inspection
 
 Use the local playground to print identity, augmented, and evaluation prompts,
@@ -266,13 +303,15 @@ plus token counts, prefix cuts, augmentation keys, and canvas shapes:
 
 The playground rebuilds the small 16-token NVARC tokenizer locally so prompt
 inspection requires neither a model checkpoint nor network access. Production
-code should use the tokenizer from the verified NVARC checkpoint.
+code should use the tokenizer from the verified NVARC checkpoint. The separate
+collator inspection command is documented in
+[`training-data-assembly.md`](training-data-assembly.md#inspection).
 
 ## Current boundaries
 
-The data layer deliberately does not yet provide:
+The current data and training assembly deliberately does not provide:
 
-- a PyTorch `Dataset`, sampler, collator, or distributed `DataLoader`,
+- a custom sampler or distributed `DataLoader` setup,
 - NVARC hidden-state extraction,
 - VAE encoding,
 - flow-noise or timestep sampling,
@@ -282,3 +321,8 @@ The data layer deliberately does not yet provide:
 Those responsibilities belong to the training and evaluation runners. They
 should compose the immutable objects produced here rather than duplicating the
 loading, augmentation, prompt, tokenization, or target-alignment logic.
+
+The training package provides the config-driven map-style dataset and the
+initial host-side collator. They consume the objects and configuration from
+`arc_data` but do not add model execution, accelerator placement, flow-noise
+sampling, or timestep sampling to the data pipeline.

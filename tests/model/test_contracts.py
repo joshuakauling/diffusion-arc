@@ -156,16 +156,18 @@ class PackedContractTests(unittest.TestCase):
                     _replace(batch, target_sequence_indices=indices)
                 )
 
-    def test_target_prefixes_must_be_ordered_and_inside_source(self) -> None:
+    def test_target_prefixes_must_be_ordered_and_not_beyond_source(self) -> None:
         batch = _make_training_batch(
             source_lengths=(8,),
-            targets=((0, 2), (0, 4), (0, 6)),
+            targets=((0, 2), (0, 4), (0, 8)),
         )
+        validate_packed_training_batch(batch)
+
         invalid_prefixes = (
-            torch.tensor([0, 4, 6], dtype=torch.int64),
-            torch.tensor([2, 2, 6], dtype=torch.int64),
-            torch.tensor([2, 6, 4], dtype=torch.int64),
-            torch.tensor([2, 4, 8], dtype=torch.int64),
+            torch.tensor([0, 4, 8], dtype=torch.int64),
+            torch.tensor([2, 2, 8], dtype=torch.int64),
+            torch.tensor([2, 8, 4], dtype=torch.int64),
+            torch.tensor([2, 4, 9], dtype=torch.int64),
         )
 
         for prefix_ends in invalid_prefixes:

@@ -37,7 +37,9 @@ class PackedTrainingBatch:
 
     ``sequence_offsets`` delimits ``S`` unpadded source sequences inside the
     flat token tensor. Each of the ``K`` target exposures refers to one source
-    and stores an end-exclusive prefix boundary relative to that source.
+    and stores an end-exclusive prefix boundary relative to that source. The
+    final prefix may equal its source length when the unused terminal target
+    output has been omitted.
     """
 
     input_ids: Tensor
@@ -97,9 +99,9 @@ def validate_packed_training_batch(batch: PackedTrainingBatch) -> None:
                 "target_prefix_ends must be positive and strictly increasing "
                 "within each source"
             )
-        if prefix_end >= source_lengths[source_index]:
+        if prefix_end > source_lengths[source_index]:
             raise ValueError(
-                "target_prefix_ends must lie before the end of their source sequence"
+                "target_prefix_ends must not lie beyond their source sequence"
             )
 
         seen_source_indices.add(source_index)
