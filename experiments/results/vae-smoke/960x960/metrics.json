@@ -1,0 +1,296 @@
+{
+  "model": {
+    "id": "black-forest-labs/FLUX.2-klein-base-4B",
+    "revision": "8c44a2fbef88fae175da65df054db0f901aa9747",
+    "subfolder": "vae",
+    "class": "AutoencoderKLFlux2",
+    "weight_file": "/Users/joshi/diffusion-arc/.cache/huggingface/models--black-forest-labs--FLUX.2-klein-base-4B/blobs/ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+    "weight_bytes": 168120878,
+    "weight_sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+    "parameter_count": 84046115,
+    "frozen": true,
+    "eval_mode": true
+  },
+  "environment": {
+    "python": "3.11.9",
+    "platform": "macOS-26.5.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "torch": "2.13.0",
+    "diffusers": "0.39.0",
+    "huggingface_hub": "1.24.0",
+    "numpy": "2.4.6",
+    "pillow": "11.3.0",
+    "safetensors": "0.8.0",
+    "device": "mps",
+    "mps_built": true,
+    "mps_available": true,
+    "mps_name": "Apple M1"
+  },
+  "command": [
+    "/Users/joshi/diffusion-arc/.venv/bin/python",
+    "scripts/vae_smoke_test.py",
+    "--device",
+    "mps",
+    "--cell-size",
+    "32",
+    "--cache-dir",
+    ".cache/huggingface",
+    "--local-files-only"
+  ],
+  "configuration": {
+    "seed": 20260722,
+    "grid_size": 30,
+    "cell_size": 32,
+    "image_size": 960,
+    "pad_class": 10,
+    "pad_rgb": [
+      255,
+      255,
+      255
+    ],
+    "input_shape": [
+      1,
+      3,
+      960,
+      960
+    ],
+    "vae_latent_shape": [
+      1,
+      32,
+      120,
+      120
+    ],
+    "transformer_latent_shape": [
+      1,
+      128,
+      60,
+      60
+    ],
+    "dtype": "float32",
+    "posterior_statistic": "mode"
+  },
+  "determinism_max_abs_error": 0.0,
+  "aggregate": {
+    "correct_cells": 4500,
+    "total_cells": 4500,
+    "cell_accuracy": 1.0,
+    "exact_grids": 5,
+    "total_grids": 5,
+    "confusion_matrix": [
+      [
+        655,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        296,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        297,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        271,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        302,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        303,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        306,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        277,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        310,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        312,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1171
+      ]
+    ]
+  },
+  "patterns": {
+    "palette-bands": {
+      "correct_cells": 900,
+      "total_cells": 900,
+      "cell_accuracy": 1.0,
+      "exact_grid": 1,
+      "pixel_mae": 0.008752701804041862,
+      "pixel_mse": 0.00018859209376387298,
+      "pixel_psnr_db": 37.24476517890815,
+      "wrong_cell_indices": [],
+      "duration_seconds": 64.67021604199908,
+      "latent_roundtrip_max_abs_error": 4.76837158203125e-07
+    },
+    "isolated-cells": {
+      "correct_cells": 900,
+      "total_cells": 900,
+      "cell_accuracy": 1.0,
+      "exact_grid": 1,
+      "pixel_mae": 0.004426457919180393,
+      "pixel_mse": 8.711940608918667e-05,
+      "pixel_psnr_db": 40.59885093916517,
+      "wrong_cell_indices": [],
+      "duration_seconds": 74.16806124999857,
+      "latent_roundtrip_max_abs_error": 4.76837158203125e-07
+    },
+    "thin-lines": {
+      "correct_cells": 900,
+      "total_cells": 900,
+      "cell_accuracy": 1.0,
+      "exact_grid": 1,
+      "pixel_mae": 0.005837494041770697,
+      "pixel_mse": 0.00015206258103717119,
+      "pixel_psnr_db": 38.17977642280885,
+      "wrong_cell_indices": [],
+      "duration_seconds": 77.98978191700007,
+      "latent_roundtrip_max_abs_error": 4.76837158203125e-07
+    },
+    "checkerboard": {
+      "correct_cells": 900,
+      "total_cells": 900,
+      "cell_accuracy": 1.0,
+      "exact_grid": 1,
+      "pixel_mae": 0.010134467855095863,
+      "pixel_mse": 0.00032293147523887455,
+      "pixel_psnr_db": 34.908896234363134,
+      "wrong_cell_indices": [],
+      "duration_seconds": 76.45773245900273,
+      "latent_roundtrip_max_abs_error": 4.76837158203125e-07
+    },
+    "random-balanced": {
+      "correct_cells": 900,
+      "total_cells": 900,
+      "cell_accuracy": 1.0,
+      "exact_grid": 1,
+      "pixel_mae": 0.009462682530283928,
+      "pixel_mse": 0.00027158905868418515,
+      "pixel_psnr_db": 35.66087730152939,
+      "wrong_cell_indices": [],
+      "duration_seconds": 75.99595862500064,
+      "latent_roundtrip_max_abs_error": 4.76837158203125e-07
+    }
+  },
+  "artifacts": [
+    "overview.png",
+    "latent-pca.png",
+    "palette-bands.png",
+    "isolated-cells.png",
+    "thin-lines.png",
+    "checkerboard.png",
+    "random-balanced.png"
+  ]
+}
