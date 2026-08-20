@@ -5,22 +5,47 @@ import unittest
 import torch
 
 from diffusion_arc.arc_data import (
-    ARC_PALETTE_RGB,
     ArcAugmentationKey,
     ArcAugmentationSpec,
     ArcGeometry,
     ArcPromptTarget,
     ArcRenderedTrainingSample,
+    PAD_CLASS,
+    TARGET_PALETTE_ID,
+    TARGET_PALETTE_RGB,
     render_grid_canvas,
     render_training_target_canvases,
 )
 
 
 def normalized_color(color_index: int) -> torch.Tensor:
-    return ARC_PALETTE_RGB[color_index].float().div(127.5).sub(1.0)
+    return TARGET_PALETTE_RGB[color_index].float().div(127.5).sub(1.0)
 
 
 class ArcCanvasTest(unittest.TestCase):
+    def test_uses_fixed_greedy_rgb_maximin_palette(self) -> None:
+        self.assertEqual(TARGET_PALETTE_ID, "greedy_rgb_maximin_v1")
+        self.assertEqual(PAD_CLASS, 10)
+        torch.testing.assert_close(
+            TARGET_PALETTE_RGB,
+            torch.tensor(
+                [
+                    (0x00, 0x00, 0x00),
+                    (0x00, 0x55, 0xFF),
+                    (0x55, 0xFF, 0x00),
+                    (0xFF, 0x00, 0x55),
+                    (0x00, 0xFF, 0xAA),
+                    (0xAA, 0x00, 0xFF),
+                    (0xFF, 0xAA, 0x00),
+                    (0xAA, 0xAA, 0xAA),
+                    (0x55, 0x55, 0x55),
+                    (0x00, 0x00, 0xAA),
+                    (0xFF, 0xFF, 0xFF),
+                ],
+                dtype=torch.uint8,
+            ),
+        )
+
     def test_grid_uses_fixed_palette_and_white_padding(self) -> None:
         image = render_grid_canvas(((0, 1), (2, 3)))
 

@@ -15,10 +15,8 @@ from .augmentation import (
     validate_augmentation_for_task,
 )
 from .canvas import (
-    ARC_PALETTE_RGB,
     CANVAS_SIZE,
     CELL_SIZE,
-    PAD_CLASS,
     render_grid_canvas,
     render_training_target_canvases,
 )
@@ -35,10 +33,10 @@ from .prompt import (
     render_evaluation_prompts,
     render_training_prompt,
 )
+from .palette import PAD_CLASS, TARGET_PALETTE_ID, TARGET_PALETTE_RGB
 from .splits import (
     ARC_AUGMENTATION_GENERATOR_VERSION,
     ARC_SPLIT_SCHEMA_VERSION,
-    ARC_STANDARD_PALETTE_NAME,
     ArcSplitConfig,
     ArcTrainingViewConfig,
     ArcTrainingViewMode,
@@ -63,10 +61,8 @@ from .types import (
 )
 
 __all__ = [
-    "ARC_PALETTE_RGB",
     "ARC_AUGMENTATION_GENERATOR_VERSION",
     "ARC_SPLIT_SCHEMA_VERSION",
-    "ARC_STANDARD_PALETTE_NAME",
     "ArcAugmentationKey",
     "ArcAugmentationSpec",
     "ArcAugmentedTrainingSample",
@@ -90,6 +86,8 @@ __all__ = [
     "Grid",
     "NVARC_MAX_TOKENS",
     "PAD_CLASS",
+    "TARGET_PALETTE_ID",
+    "TARGET_PALETTE_RGB",
     "align_evaluation_targets",
     "apply_training_augmentation",
     "augment_grid",

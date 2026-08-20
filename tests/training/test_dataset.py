@@ -58,7 +58,7 @@ def make_split_config(*, max_tokens: int = 256) -> dict[str, object]:
         "schema_version": 1,
         "generator_version": 1,
         "source": {"dataset": "arc-agi-2", "split": "training"},
-        "palette": "arc_standard_v1",
+        "palette": "greedy_rgb_maximin_v1",
         "limits": {
             "max_pairs": 4,
             "max_cells": 8,

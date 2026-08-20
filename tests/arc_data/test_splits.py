@@ -29,7 +29,7 @@ def split_config() -> dict[str, object]:
         "schema_version": 1,
         "generator_version": 1,
         "source": {"dataset": "arc-agi-2", "split": "training"},
-        "palette": "arc_standard_v1",
+        "palette": "greedy_rgb_maximin_v1",
         "limits": {"max_pairs": 3, "max_cells": 6, "max_tokens": 8192},
         "task_splits": {"train": "train.json", "validation": "validation.json"},
         "views": {
@@ -130,6 +130,16 @@ class ArcSplitGenerationTest(unittest.TestCase):
 
                 with self.subTest(field=field), self.assertRaises(TypeError):
                     load_arc_split_config(config_path)
+
+    def test_rejects_the_retired_standard_rgb_palette(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "config.json"
+            payload = split_config()
+            payload["palette"] = "arc_standard_v1"
+            write_json(config_path, payload)
+
+            with self.assertRaisesRegex(ValueError, "unsupported palette"):
+                load_arc_split_config(config_path)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
     "dataset": "arc-agi-2",
     "split": "training"
   },
-  "palette": "arc_standard_v1",
+  "palette": "greedy_rgb_maximin_v1",
   "limits": {
     "max_pairs": 6,
     "max_cells": 120,

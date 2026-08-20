@@ -1,0 +1,29 @@
+"""Fixed RGB representation for ARC target canvases."""
+
+from __future__ import annotations
+
+import torch
+
+
+TARGET_PALETTE_ID = "greedy_rgb_maximin_v1"
+PAD_CLASS = 10
+
+TARGET_PALETTE_RGB = torch.tensor(
+    [
+        (0x00, 0x00, 0x00),
+        (0x00, 0x55, 0xFF),
+        (0x55, 0xFF, 0x00),
+        (0xFF, 0x00, 0x55),
+        (0x00, 0xFF, 0xAA),
+        (0xAA, 0x00, 0xFF),
+        (0xFF, 0xAA, 0x00),
+        (0xAA, 0xAA, 0xAA),
+        (0x55, 0x55, 0x55),
+        (0x00, 0x00, 0xAA),
+        (0xFF, 0xFF, 0xFF),
+    ],
+    dtype=torch.uint8,
+)
+
+
+__all__ = ["PAD_CLASS", "TARGET_PALETTE_ID", "TARGET_PALETTE_RGB"]

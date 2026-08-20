@@ -26,12 +26,12 @@ from .augmentation import (
     sample_training_augmentation,
 )
 from .loading import load_training_task
+from .palette import TARGET_PALETTE_ID
 from .types import ArcTrainingTask
 
 
 ARC_SPLIT_SCHEMA_VERSION = 1
 ARC_AUGMENTATION_GENERATOR_VERSION = 1
-ARC_STANDARD_PALETTE_NAME = "arc_standard_v1"
 
 
 class ArcTrainingViewMode(str, Enum):
@@ -109,7 +109,7 @@ def load_arc_split_config(path: str | Path) -> ArcSplitConfig:
     source_split = require_path_component(source["split"], name="source.split")
 
     palette = _require_string(payload["palette"], name="palette")
-    if palette != ARC_STANDARD_PALETTE_NAME:
+    if palette != TARGET_PALETTE_ID:
         raise ValueError(f"unsupported palette: {palette!r}")
 
     limits = _require_mapping(payload["limits"], name="limits")
@@ -440,7 +440,6 @@ def _require_positive_int(value: Any, *, name: str) -> int:
 __all__ = [
     "ARC_AUGMENTATION_GENERATOR_VERSION",
     "ARC_SPLIT_SCHEMA_VERSION",
-    "ARC_STANDARD_PALETTE_NAME",
     "ArcSplitConfig",
     "ArcTrainingViewConfig",
     "ArcTrainingViewMode",

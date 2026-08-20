@@ -173,7 +173,7 @@ configured token limit when tokenizing a generated view.
 
 - placed at the top-left of a fixed 30×30 logical canvas,
 - padded with the white PAD sentinel,
-- rendered with the fixed ARC RGB palette,
+- rendered with the fixed `greedy_rgb_maximin_v1` target RGB palette,
 - expanded to 480×480 pixels using 16×16 pixels per ARC cell,
 - returned as a float tensor in `[-1, 1]` with shape `[3, 480, 480]`.
 
@@ -224,7 +224,7 @@ data-preparation layer.
 is the first concrete split configuration. It defines:
 
 - source dataset and source split,
-- palette name,
+- the required `greedy_rgb_maximin_v1` palette identifier,
 - pair, cell, and token limits,
 - task-level train and validation files,
 - named generated training views.

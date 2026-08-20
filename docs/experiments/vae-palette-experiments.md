@@ -8,9 +8,11 @@ on labelled public ARC development outputs, and a post-hoc analysis of the
 greedy maximin search.
 
 The measured experiments identify the greedy RGB-maximin palette as the leading
-tested candidate. The production palette is not yet frozen: an exactly optimal
-RGB candidate has not been evaluated through the VAE, and no palette has been
-compared in a FLUX training run.
+tested candidate. It is selected as the fixed Milestone 1 target representation
+under the identifier `greedy_rgb_maximin_v1`. This selection does not claim
+global or end-to-end optimality: an exactly optimal RGB candidate has not been
+evaluated through the VAE, and no palette has been compared in a FLUX training
+run.
 
 The authoritative project scope and milestone order remain in
 [`README.md`](../../README.md).
@@ -297,12 +299,14 @@ The evidence supports the following bounded conclusion:
   error.
 - No palette should yet be described as globally or end-to-end optimal.
 
-Greedy RGB maximin is sufficient to continue Milestone 1. Before freezing the
-representation for expensive training, one optional bounded follow-up can
-compare it against a single globally RGB-optimal candidate chosen with a VAE
-secondary criterion. That comparison should use the informative sigma range
-`0`, `0.35`, `0.50`, `0.75`, and `1.0`, require 334/334 clean exact grids, and
-reject any candidate that worsens shape or PAD behavior.
+Greedy RGB maximin is therefore fixed as `greedy_rgb_maximin_v1` for Milestone
+1. Before expensive training, one optional bounded follow-up can compare it
+against a single globally RGB-optimal candidate chosen with a VAE secondary
+criterion. That comparison should use the informative sigma range `0`, `0.35`,
+`0.50`, `0.75`, and `1.0`, require 334/334 clean exact grids, and reject any
+candidate that worsens shape or PAD behavior. Adopting a different candidate
+would require a new explicit palette identifier rather than silently changing
+the current mapping.
 
 Regardless of that result, the selected palette should remain a hypothesis
 until it is compared against the conventional palette in a small fixed FLUX
