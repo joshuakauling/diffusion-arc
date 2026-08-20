@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1550" viewBox="0 0 1500 1550" role="img" aria-labelledby="title desc">
+  <title id="title">FLUX.2 Klein Base 4B inference architecture</title>
+  <desc id="desc">Four separate inputs provide the current target flow state, optional reference-image tokens, Qwen3 text conditioning, and flow-time modulation. The trainable FLUX transformer predicts velocity, an ODE step updates the target state and loops it back, and the final latent is decoded once by the frozen VAE.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8250df"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2d7d46"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #1f2328;
+      }
+      .title { font-size: 30px; font-weight: 700; }
+      .section-title { font-size: 18px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 600; }
+      .body { font-size: 15px; }
+      .small { font-size: 13px; fill: #57606a; }
+      .input-area { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.5; }
+      .frozen-node { fill: #f2f7ff; stroke: #4c82c3; stroke-width: 2; }
+      .trainable-area { fill: #faf7ff; stroke: #8250df; stroke-width: 2.5; }
+      .trainable-node { fill: #f1eaff; stroke: #8250df; stroke-width: 2; }
+      .state-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; }
+      .inference-node { fill: #edfaef; stroke: #2d7d46; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2; marker-end: url(#arrow); }
+      .modulation { fill: none; stroke: #8250df; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-purple); }
+      .loop { fill: none; stroke: #2d7d46; stroke-width: 2.5; marker-end: url(#arrow-green); }
+    </style>
+  </defs>
+
+  <rect width="1500" height="1550" fill="#ffffff"/>
+  <text x="750" y="48" text-anchor="middle" class="title">FLUX.2 Klein Base 4B · inference architecture</text>
+
+  <!-- 1. Target flow state -->
+  <rect x="45" y="82" width="330" height="298" rx="16" class="input-area"/>
+  <text x="210" y="118" text-anchor="middle" class="section-title">1 · Target flow state</text>
+
+  <rect x="70" y="145" width="280" height="96" rx="11" class="state-node"/>
+  <text x="210" y="174" text-anchor="middle" class="label">Initial state z₁ ~ N(0, I)</text>
+  <text x="210" y="200" text-anchor="middle" class="body">or current solver state zₜ</text>
+  <text x="210" y="224" text-anchor="middle" class="small">[B, N_target, 128]</text>
+
+  <text x="210" y="281" text-anchor="middle" class="body">Normalized packed latent</text>
+  <text x="210" y="307" text-anchor="middle" class="small">no target image or target VAE encoding</text>
+  <text x="210" y="334" text-anchor="middle" class="small">during inference</text>
+
+  <!-- 2. Reference images -->
+  <rect x="405" y="82" width="330" height="298" rx="16" class="input-area"/>
+  <text x="570" y="118" text-anchor="middle" class="section-title">2 · Reference images</text>
+
+  <rect x="440" y="140" width="260" height="48" rx="10" class="node"/>
+  <text x="570" y="170" text-anchor="middle" class="label">Clean images · optional</text>
+  <path d="M 570 188 L 570 205" class="arrow"/>
+
+  <rect x="430" y="205" width="280" height="62" rx="11" class="frozen-node"/>
+  <text x="570" y="230" text-anchor="middle" class="label">Frozen VAE encoder</text>
+  <text x="570" y="253" text-anchor="middle" class="small">32 channels at 1/8 resolution</text>
+  <path d="M 570 267 L 570 284" class="arrow"/>
+
+  <rect x="430" y="284" width="280" height="66" rx="11" class="frozen-node"/>
+  <text x="570" y="310" text-anchor="middle" class="label">Pack + normalize</text>
+  <text x="570" y="334" text-anchor="middle" class="small">[B, N_reference, 128]</text>
+
+  <!-- 3. Text conditioning -->
+  <rect x="765" y="82" width="330" height="298" rx="16" class="input-area"/>
+  <text x="930" y="118" text-anchor="middle" class="section-title">3 · Text conditioning</text>
+
+  <rect x="800" y="145" width="260" height="48" rx="10" class="node"/>
+  <text x="930" y="175" text-anchor="middle" class="label">Text prompt</text>
+  <path d="M 930 193 L 930 215" class="arrow"/>
+
+  <rect x="790" y="215" width="280" height="82" rx="11" class="frozen-node"/>
+  <text x="930" y="244" text-anchor="middle" class="label">Frozen Qwen3 encoder</text>
+  <text x="930" y="270" text-anchor="middle" class="body">hidden states</text>
+  <text x="930" y="291" text-anchor="middle" class="small">[B, N_text, 7,680]</text>
+
+  <text x="930" y="334" text-anchor="middle" class="small">token context for joint attention</text>
+
+  <!-- 4. Flow-time conditioning -->
+  <rect x="1125" y="82" width="330" height="298" rx="16" class="input-area"/>
+  <text x="1290" y="118" text-anchor="middle" class="section-title">4 · Flow-time conditioning</text>
+
+  <rect x="1160" y="140" width="260" height="48" rx="10" class="node"/>
+  <text x="1290" y="170" text-anchor="middle" class="label">Current flow time t</text>
+  <path d="M 1290 188 L 1290 205" class="arrow"/>
+
+  <rect x="1150" y="205" width="280" height="62" rx="11" class="trainable-node"/>
+  <text x="1290" y="230" text-anchor="middle" class="label">Sinusoidal embedding</text>
+  <text x="1290" y="253" text-anchor="middle" class="small">256-D → trainable MLP</text>
+  <path d="M 1290 267 L 1290 284" class="arrow"/>
+
+  <rect x="1150" y="284" width="280" height="66" rx="11" class="trainable-node"/>
+  <text x="1290" y="310" text-anchor="middle" class="label">Adaptive modulation</text>
+  <text x="1290" y="334" text-anchor="middle" class="small">shift · scale · residual gate</text>
+
+  <!-- Trainable FLUX transformer -->
+  <rect x="125" y="440" width="1250" height="678" rx="18" class="trainable-area"/>
+  <text x="750" y="477" text-anchor="middle" class="section-title">FLUX transformer · all parameters trainable</text>
+
+  <rect x="225" y="515" width="390" height="76" rx="12" class="trainable-node"/>
+  <text x="420" y="544" text-anchor="middle" class="label">Image projection · img_in</text>
+  <text x="420" y="570" text-anchor="middle" class="body">128 → 3,072 · target + references</text>
+
+  <rect x="885" y="515" width="390" height="76" rx="12" class="trainable-node"/>
+  <text x="1080" y="544" text-anchor="middle" class="label">Text projection · txt_in</text>
+  <text x="1080" y="570" text-anchor="middle" class="body">7,680 → 3,072 · N_text tokens</text>
+
+  <path d="M 350 193 L 390 193 L 390 405 L 340 405 L 340 515" class="arrow"/>
+  <path d="M 570 350 L 570 414 L 500 414 L 500 515" class="arrow"/>
+  <path d="M 1070 256 L 1110 256 L 1110 405 L 1080 405 L 1080 515" class="arrow"/>
+
+  <rect x="340" y="642" width="820" height="104" rx="13" class="trainable-node"/>
+  <text x="750" y="674" text-anchor="middle" class="section-title">5 double-stream blocks</text>
+  <text x="750" y="702" text-anchor="middle" class="body">separate image and text residual streams · joint attention</text>
+  <text x="750" y="727" text-anchor="middle" class="small">stream-specific QKV, output, and SwiGLU MLP projections</text>
+
+  <path d="M 420 591 C 420 619, 610 612, 610 642" class="arrow"/>
+  <path d="M 1080 591 C 1080 619, 890 612, 890 642" class="arrow"/>
+
+  <rect x="480" y="790" width="540" height="66" rx="11" class="node"/>
+  <text x="750" y="818" text-anchor="middle" class="label">Concatenate text and image sequences</text>
+  <text x="750" y="842" text-anchor="middle" class="body">[text | references | target]</text>
+  <path d="M 750 746 L 750 790" class="arrow"/>
+
+  <rect x="340" y="898" width="820" height="94" rx="13" class="trainable-node"/>
+  <text x="750" y="930" text-anchor="middle" class="section-title">20 single-stream blocks</text>
+  <text x="750" y="958" text-anchor="middle" class="body">attention and SwiGLU features computed in parallel</text>
+  <text x="750" y="981" text-anchor="middle" class="small">one combined gated residual update per block</text>
+  <path d="M 750 856 L 750 898" class="arrow"/>
+
+  <rect x="420" y="1034" width="660" height="60" rx="12" class="trainable-node"/>
+  <text x="750" y="1059" text-anchor="middle" class="label">Retain target tokens · final velocity head</text>
+  <text x="750" y="1082" text-anchor="middle" class="small">LayerNorm + t-dependent shift/scale + projection 3,072 → 128</text>
+  <path d="M 750 992 L 750 1034" class="arrow"/>
+
+  <!-- Flow-time modulation is separate from text conditioning -->
+  <path d="M 1430 317 L 1470 317 L 1470 694 L 1160 694" class="modulation"/>
+  <path d="M 1470 694 L 1470 945 L 1160 945" class="modulation"/>
+  <path d="M 1470 945 L 1470 1064 L 1080 1064" class="modulation"/>
+  <text x="1484" y="710" transform="rotate(90 1484 710)" text-anchor="middle" class="small">t-dependent adaptive LayerNorm controls</text>
+
+  <!-- Velocity prediction and ODE update -->
+  <path d="M 750 1094 L 750 1145" class="arrow"/>
+  <rect x="420" y="1145" width="660" height="70" rx="13" class="inference-node"/>
+  <text x="750" y="1173" text-anchor="middle" class="section-title">Velocity prediction</text>
+  <text x="750" y="1199" text-anchor="middle" class="body">vθ(zₜ, t, conditions) · [B, N_target, 128]</text>
+
+  <path d="M 750 1215 L 750 1250" class="arrow"/>
+  <rect x="420" y="1250" width="660" height="86" rx="13" class="inference-node"/>
+  <text x="750" y="1280" text-anchor="middle" class="section-title">Euler / ODE update</text>
+  <text x="750" y="1307" text-anchor="middle" class="body">z_next = zₜ + (t_next − t) · vθ</text>
+  <text x="750" y="1327" text-anchor="middle" class="small">advance along the shifted inference schedule</text>
+
+  <!-- Iterative inference loop -->
+  <path d="M 420 1293 L 25 1293 L 25 193 L 70 193" class="loop"/>
+  <text x="42" y="745" transform="rotate(-90 42 745)" text-anchor="middle" class="small">next solver state while t_next &gt; 0</text>
+
+  <!-- Final decoding after the loop -->
+  <path d="M 750 1336 L 750 1380" class="arrow"/>
+  <text x="765" y="1364" class="small">t_next = 0</text>
+
+  <rect x="420" y="1380" width="660" height="72" rx="12" class="frozen-node"/>
+  <text x="750" y="1408" text-anchor="middle" class="label">Denormalize + unpack → frozen VAE decoder</text>
+  <text x="750" y="1434" text-anchor="middle" class="body">final packed latent → RGB image</text>
+
+  <path d="M 750 1452 L 750 1480" class="arrow"/>
+  <rect x="520" y="1480" width="460" height="50" rx="11" class="inference-node"/>
+  <text x="750" y="1511" text-anchor="middle" class="label">Generated image</text>
+
+  <!-- Legend -->
+  <rect x="65" y="1388" width="18" height="18" rx="3" class="frozen-node"/>
+  <text x="94" y="1402" class="small">frozen</text>
+  <rect x="65" y="1418" width="18" height="18" rx="3" class="trainable-node"/>
+  <text x="94" y="1432" class="small">trainable</text>
+  <rect x="205" y="1388" width="18" height="18" rx="3" class="state-node"/>
+  <text x="234" y="1402" class="small">flow state</text>
+  <rect x="205" y="1418" width="18" height="18" rx="3" class="inference-node"/>
+  <text x="234" y="1432" class="small">inference step</text>
+  <path d="M 65 1470 L 112 1470" class="modulation"/>
+  <text x="124" y="1475" class="small">flow-time modulation</text>
+</svg>

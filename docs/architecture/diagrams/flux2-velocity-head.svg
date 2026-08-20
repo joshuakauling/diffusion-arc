@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820" role="img" aria-labelledby="title desc">
+  <title id="title">FLUX.2 Klein Base 4B final velocity prediction head</title>
+  <desc id="desc">The final combined text, reference, and target hidden-state sequence has width 3072. Only target tokens are retained. A non-affine LayerNorm is followed by flow-time-dependent scale and shift without a gate, then a tokenwise linear projection produces 128 velocity channels per target token. Text and reference conditions influence the result only through the hidden states already mixed by the transformer.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8250df"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #1f2328;
+      }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 16px; fill: #57606a; }
+      .section-title { font-size: 18px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 600; }
+      .body { font-size: 15px; }
+      .small { font-size: 13px; fill: #57606a; }
+      .input-area { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.5; }
+      .trainable-area { fill: #faf7ff; stroke: #8250df; stroke-width: 2.5; }
+      .trainable-node { fill: #f1eaff; stroke: #8250df; stroke-width: 2; }
+      .text-segment { fill: #f2f7ff; stroke: #4c82c3; stroke-width: 1.5; }
+      .reference-segment { fill: #eef7ff; stroke: #4c82c3; stroke-width: 1.5; }
+      .target-segment { fill: #fff5e8; stroke: #bc6b00; stroke-width: 1.5; }
+      .target-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; }
+      .output-node { fill: #edfaef; stroke: #2d7d46; stroke-width: 2; }
+      .note-node { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.5; stroke-dasharray: 5 4; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2; marker-end: url(#arrow); }
+      .modulation { fill: none; stroke: #8250df; stroke-width: 2.25; stroke-dasharray: 7 6; marker-end: url(#arrow-purple); }
+    </style>
+  </defs>
+
+  <rect width="1500" height="820" fill="#ffffff"/>
+  <text x="750" y="46" text-anchor="middle" class="title">Final velocity prediction</text>
+  <text x="750" y="75" text-anchor="middle" class="subtitle">FLUX.2 Klein Base 4B · target-token-only output path</text>
+
+  <!-- Combined sequence produced by the single-stream stack -->
+  <rect x="50" y="120" width="420" height="250" rx="16" class="input-area"/>
+  <text x="260" y="157" text-anchor="middle" class="section-title">Combined hidden-state sequence</text>
+  <text x="260" y="183" text-anchor="middle" class="small">output of the 20 single-stream blocks</text>
+
+  <rect x="82" y="213" width="108" height="72" rx="10" class="text-segment"/>
+  <text x="136" y="243" text-anchor="middle" class="label">text</text>
+  <text x="136" y="266" text-anchor="middle" class="small">N_text</text>
+
+  <rect x="190" y="213" width="122" height="72" class="reference-segment"/>
+  <text x="251" y="243" text-anchor="middle" class="label">references</text>
+  <text x="251" y="266" text-anchor="middle" class="small">N_reference</text>
+
+  <rect x="312" y="213" width="126" height="72" rx="10" class="target-segment"/>
+  <text x="375" y="243" text-anchor="middle" class="label">target</text>
+  <text x="375" y="266" text-anchor="middle" class="small">N_target</text>
+
+  <text x="260" y="319" text-anchor="middle" class="body">[text | references | target]</text>
+  <text x="260" y="344" text-anchor="middle" class="small">[B, N_total, 3,072]</text>
+
+  <!-- Target-token selection -->
+  <path d="M 470 245 L 515 245" class="arrow"/>
+  <rect x="515" y="168" width="290" height="154" rx="13" class="target-node"/>
+  <text x="660" y="204" text-anchor="middle" class="section-title">Select target tokens</text>
+  <text x="660" y="235" text-anchor="middle" class="body">retain the final sequence segment</text>
+  <text x="660" y="264" text-anchor="middle" class="label">h_target</text>
+  <text x="660" y="291" text-anchor="middle" class="small">[B, N_target, 3,072]</text>
+  <text x="660" y="346" text-anchor="middle" class="small">text and reference positions end here</text>
+
+  <!-- Final trainable head -->
+  <rect x="855" y="105" width="590" height="478" rx="18" class="trainable-area"/>
+  <text x="1150" y="143" text-anchor="middle" class="section-title">Final prediction head · trainable</text>
+
+  <path d="M 805 245 L 900 245 L 900 224 L 925 224" class="arrow"/>
+  <rect x="925" y="180" width="450" height="88" rx="12" class="trainable-node"/>
+  <text x="1150" y="213" text-anchor="middle" class="label">Non-affine LayerNorm</text>
+  <text x="1150" y="241" text-anchor="middle" class="body">LN(h_target)</text>
+  <text x="1150" y="260" text-anchor="middle" class="small">no learned elementwise scale or bias</text>
+
+  <path d="M 1150 268 L 1150 306" class="arrow"/>
+  <rect x="925" y="306" width="450" height="114" rx="12" class="trainable-node"/>
+  <text x="1150" y="338" text-anchor="middle" class="label">Flow-time adaptive shift + scale</text>
+  <text x="1150" y="369" text-anchor="middle" class="body">(1 + scale(t)) ⊙ LN(h_target) + shift(t)</text>
+  <text x="1150" y="397" text-anchor="middle" class="small">broadcast over target tokens · no residual gate</text>
+
+  <path d="M 1150 420 L 1150 458" class="arrow"/>
+  <rect x="925" y="458" width="450" height="82" rx="12" class="trainable-node"/>
+  <text x="1150" y="491" text-anchor="middle" class="label">Tokenwise linear projection</text>
+  <text x="1150" y="519" text-anchor="middle" class="body">3,072 → 128</text>
+
+  <!-- Flow-time controls are separate from the token path -->
+  <rect x="515" y="430" width="290" height="148" rx="13" class="trainable-node"/>
+  <text x="660" y="465" text-anchor="middle" class="section-title">Flow-time conditioning</text>
+  <text x="660" y="496" text-anchor="middle" class="body">current time embedding t</text>
+  <text x="660" y="526" text-anchor="middle" class="label">shift(t) · scale(t)</text>
+  <text x="660" y="552" text-anchor="middle" class="small">final-head modulation parameters</text>
+  <path d="M 805 504 C 855 504, 855 363, 925 363" class="modulation"/>
+
+  <!-- Conditions are already represented in the mixed target states -->
+  <rect x="50" y="430" width="420" height="148" rx="13" class="note-node"/>
+  <text x="260" y="466" text-anchor="middle" class="section-title">Where the conditions enter</text>
+  <text x="260" y="499" text-anchor="middle" class="body">Text and reference information is already mixed</text>
+  <text x="260" y="524" text-anchor="middle" class="body">into h_target by the transformer blocks.</text>
+  <text x="260" y="553" text-anchor="middle" class="small">No additional c-tensor is passed into this head.</text>
+
+  <!-- Velocity output -->
+  <path d="M 1150 540 L 1150 630" class="arrow"/>
+  <rect x="925" y="630" width="450" height="112" rx="13" class="output-node"/>
+  <text x="1150" y="665" text-anchor="middle" class="section-title">Packed latent velocity</text>
+  <text x="1150" y="696" text-anchor="middle" class="body">vθ(zₜ, t, c)</text>
+  <text x="1150" y="724" text-anchor="middle" class="label">[B, N_target, 128]</text>
+
+  <!-- Compact reading guide -->
+  <path d="M 50 665 L 102 665" class="arrow"/>
+  <text x="118" y="670" class="small">hidden-state and operation path</text>
+  <path d="M 50 704 L 102 704" class="modulation"/>
+  <text x="118" y="709" class="small">flow-time modulation path</text>
+  <rect x="50" y="734" width="18" height="18" rx="3" class="target-node"/>
+  <text x="80" y="748" class="small">target-token segment</text>
+</svg>

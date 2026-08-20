@@ -10,7 +10,7 @@ details.
 - [Initial flow-only architecture](architecture/initial-flow-only-architecture.md)
 - [FLUX.2 Klein architecture and flow matching](architecture/flux2-klein-architecture.md)
 - [NVARC overview and evaluation caveats](architecture/nvarc-overview.md)
-- [Architecture diagram](architecture/architecture.svg)
+- [Architecture diagram](architecture/diagrams/architecture.svg)
 
 ## Data
 
@@ -21,6 +21,9 @@ details.
 
 - [Batching and efficiency roadmap](training/batching-and-efficiency-roadmap.md)
 - [NVARC batch runner](training/nvarc-batch-runner.md)
+- [FLUX text conditioning](training/flux-text-conditioning.md)
+- [FLUX target-image encoding](training/flux-image-encoding.md)
+- [Flow-matching training state](training/flow-matching.md)
 
 ## Experiments
 

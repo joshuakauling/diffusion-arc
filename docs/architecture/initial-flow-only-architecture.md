@@ -21,7 +21,7 @@ output head.
 
 ## End-to-end architecture
 
-![Diffusion-ARC architecture](architecture.svg)
+![Diffusion-ARC architecture](diagrams/architecture.svg)
 
 No visual reference images are used in the initial architecture. All
 demonstrations and the test input reach FLUX through NVARC conditioning.
@@ -77,10 +77,18 @@ ARC output cells  | PAD
 PAD in all remaining rows
 ```
 
-The valid region contains the ten standard ARC colors. Every cell outside the
-valid rectangle uses an eleventh visual sentinel: RGB white `(255, 255, 255)`.
-White is not one of the ten ARC palette colors and has already been exercised
-as the padding color in the VAE smoke test.
+The valid region contains ARC color IDs `0` through `9`, rendered through the
+fixed `greedy_rgb_maximin_v1` target palette selected by the measured
+[VAE palette experiment](../experiments/vae-palette-experiments.md):
+
+```text
+0 #000000   1 #0055FF   2 #55FF00   3 #FF0055   4 #00FFAA
+5 #AA00FF   6 #FFAA00   7 #AAAAAA   8 #555555   9 #0000AA
+```
+
+Every cell outside the valid rectangle uses class `10`, the RGB-white
+`#FFFFFF` PAD sentinel. White is not one of the ten target colors and has
+already been exercised as the padding color in the VAE experiments.
 
 Each ARC cell is rendered as a solid `16x16` pixel block:
 
@@ -290,7 +298,9 @@ evaluated.
 ## Supporting documents
 
 - [Project scope and milestones](../../README.md)
-- [Architecture diagram](architecture.svg)
+- [Architecture diagram](diagrams/architecture.svg)
 - [FLUX.2 Klein architecture and flow matching](flux2-klein-architecture.md)
 - [FLUX.2 VAE smoke test](../experiments/flux2-vae-smoke-test.md)
+- [FLUX.2 VAE ARC palette experiments](../experiments/vae-palette-experiments.md)
+- [FLUX target-image encoding](../training/flux-image-encoding.md)
 - [NVARC overview](nvarc-overview.md)

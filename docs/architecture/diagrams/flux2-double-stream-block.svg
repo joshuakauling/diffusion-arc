@@ -1,0 +1,227 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1940" viewBox="0 0 1500 1940" role="img" aria-labelledby="title desc">
+  <title id="title">FLUX.2 Klein double-stream transformer block</title>
+  <desc id="desc">A detailed view of one FLUX.2 double-stream block. Image and text hidden states use separate adaptive LayerNorm, QKV, output-projection, and SwiGLU weights. Their Q, K, and V tensors are concatenated for one joint-attention operation and split back into separate streams. Flow-time controls provide shift, scale, and residual gates through a separate modulation path.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8250df"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #1f2328;
+      }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 15px; fill: #57606a; }
+      .section-title { font-size: 18px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 600; }
+      .body { font-size: 15px; }
+      .small { font-size: 13px; fill: #57606a; }
+      .control-label { font-size: 13px; fill: #8250df; font-weight: 600; }
+      .stream-area { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.5; }
+      .flow-area { fill: #faf7ff; stroke: #8250df; stroke-width: 2.5; }
+      .trainable-node { fill: #f1eaff; stroke: #8250df; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
+      .joint-node { fill: #f2f7ff; stroke: #4c82c3; stroke-width: 2; }
+      .residual-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; }
+      .output-node { fill: #edfaef; stroke: #2d7d46; stroke-width: 2; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2; marker-end: url(#arrow); }
+      .modulation { fill: none; stroke: #8250df; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-purple); }
+      .modulation-rail { fill: none; stroke: #8250df; stroke-width: 2; stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="1940" fill="#ffffff"/>
+  <text x="750" y="46" text-anchor="middle" class="title">One FLUX.2 double-stream transformer block</text>
+  <text x="750" y="73" text-anchor="middle" class="subtitle">Repeated 5× · separate image and text parameters · one joint-attention operation</text>
+
+  <!-- Flow-time controls are not part of the token sequence. -->
+  <rect x="120" y="98" width="1260" height="184" rx="16" class="flow-area"/>
+  <text x="750" y="128" text-anchor="middle" class="section-title">Flow-time conditioning · separate control path, not tokens</text>
+
+  <rect x="590" y="145" width="320" height="46" rx="10" class="trainable-node"/>
+  <text x="750" y="174" text-anchor="middle" class="label">Flow-time vector vec · [B, 3,072]</text>
+
+  <rect x="170" y="211" width="500" height="54" rx="10" class="trainable-node"/>
+  <text x="420" y="233" text-anchor="middle" class="label">Image modulation projection</text>
+  <text x="420" y="253" text-anchor="middle" class="small">(shift₁, scale₁, gate₁) · (shift₂, scale₂, gate₂) · shared across 5 blocks</text>
+
+  <rect x="830" y="211" width="500" height="54" rx="10" class="trainable-node"/>
+  <text x="1080" y="233" text-anchor="middle" class="label">Text modulation projection</text>
+  <text x="1080" y="253" text-anchor="middle" class="small">(shift₁, scale₁, gate₁) · (shift₂, scale₂, gate₂) · shared across 5 blocks</text>
+
+  <path d="M 675 191 C 675 202, 420 198, 420 211" class="modulation"/>
+  <path d="M 825 191 C 825 202, 1080 198, 1080 211" class="modulation"/>
+
+  <!-- Separate residual streams. -->
+  <rect x="60" y="315" width="650" height="1560" rx="17" class="stream-area"/>
+  <rect x="790" y="315" width="650" height="1560" rx="17" class="stream-area"/>
+  <text x="385" y="350" text-anchor="middle" class="section-title">Image stream · target + reference tokens</text>
+  <text x="1115" y="350" text-anchor="middle" class="section-title">Text stream</text>
+
+  <rect x="170" y="376" width="430" height="68" rx="11" class="node"/>
+  <text x="385" y="404" text-anchor="middle" class="label">Image hidden state x_img</text>
+  <text x="385" y="429" text-anchor="middle" class="small">[B, N_image, 3,072]</text>
+
+  <rect x="900" y="376" width="430" height="68" rx="11" class="node"/>
+  <text x="1115" y="404" text-anchor="middle" class="label">Text hidden state x_txt</text>
+  <text x="1115" y="429" text-anchor="middle" class="small">[B, N_text, 3,072]</text>
+
+  <!-- Attention preparation. -->
+  <rect x="170" y="494" width="430" height="88" rx="11" class="trainable-node"/>
+  <text x="385" y="520" text-anchor="middle" class="label">Adaptive LayerNorm 1 · image</text>
+  <text x="385" y="546" text-anchor="middle" class="body">x̂ = (1 + scale₁) · LN(x_img) + shift₁</text>
+  <text x="385" y="568" text-anchor="middle" class="small">gate₁ is reserved for the attention residual</text>
+
+  <rect x="900" y="494" width="430" height="88" rx="11" class="trainable-node"/>
+  <text x="1115" y="520" text-anchor="middle" class="label">Adaptive LayerNorm 1 · text</text>
+  <text x="1115" y="546" text-anchor="middle" class="body">x̂ = (1 + scale₁) · LN(x_txt) + shift₁</text>
+  <text x="1115" y="568" text-anchor="middle" class="small">gate₁ is reserved for the attention residual</text>
+
+  <path d="M 385 444 L 385 494" class="arrow"/>
+  <path d="M 1115 444 L 1115 494" class="arrow"/>
+
+  <rect x="170" y="628" width="430" height="78" rx="11" class="trainable-node"/>
+  <text x="385" y="657" text-anchor="middle" class="label">Image QKV projection</text>
+  <text x="385" y="683" text-anchor="middle" class="body">3,072 → 9,216 · separate Q, K, V</text>
+
+  <rect x="900" y="628" width="430" height="78" rx="11" class="trainable-node"/>
+  <text x="1115" y="657" text-anchor="middle" class="label">Text QKV projection</text>
+  <text x="1115" y="683" text-anchor="middle" class="body">3,072 → 9,216 · separate Q, K, V</text>
+
+  <path d="M 385 582 L 385 628" class="arrow"/>
+  <path d="M 1115 582 L 1115 628" class="arrow"/>
+
+  <rect x="170" y="752" width="430" height="94" rx="11" class="trainable-node"/>
+  <text x="385" y="779" text-anchor="middle" class="label">QK RMSNorm + 4D RoPE</text>
+  <text x="385" y="805" text-anchor="middle" class="body">24 heads × 128 · axes [32, 32, 32, 32]</text>
+  <text x="385" y="829" text-anchor="middle" class="small">applied to Q and K · V passes through unchanged</text>
+
+  <rect x="900" y="752" width="430" height="94" rx="11" class="trainable-node"/>
+  <text x="1115" y="779" text-anchor="middle" class="label">QK RMSNorm + 4D RoPE</text>
+  <text x="1115" y="805" text-anchor="middle" class="body">24 heads × 128 · axes [32, 32, 32, 32]</text>
+  <text x="1115" y="829" text-anchor="middle" class="small">applied to Q and K · V passes through unchanged</text>
+
+  <path d="M 385 706 L 385 752" class="arrow"/>
+  <path d="M 1115 706 L 1115 752" class="arrow"/>
+
+  <!-- The modalities meet only for joint attention. -->
+  <rect x="325" y="895" width="850" height="72" rx="12" class="joint-node"/>
+  <text x="750" y="922" text-anchor="middle" class="label">Concatenate Q, K, and V along the token axis</text>
+  <text x="750" y="948" text-anchor="middle" class="body">canonical attention layout: [text | image]</text>
+
+  <path d="M 385 846 L 385 870 L 535 870 L 535 895" class="arrow"/>
+  <path d="M 1115 846 L 1115 870 L 965 870 L 965 895" class="arrow"/>
+
+  <rect x="325" y="1009" width="850" height="92" rx="12" class="joint-node"/>
+  <text x="750" y="1037" text-anchor="middle" class="section-title">Joint scaled dot-product attention</text>
+  <text x="750" y="1064" text-anchor="middle" class="body">text and image queries attend to all text and image keys</text>
+  <text x="750" y="1087" text-anchor="middle" class="small">one attention matrix · information can move in both directions</text>
+  <path d="M 750 967 L 750 1009" class="arrow"/>
+
+  <rect x="325" y="1143" width="850" height="70" rx="12" class="joint-node"/>
+  <text x="750" y="1170" text-anchor="middle" class="label">Split attention output at the original stream boundary</text>
+  <text x="750" y="1195" text-anchor="middle" class="small">return N_text results to text and N_image results to image</text>
+  <path d="M 750 1101 L 750 1143" class="arrow"/>
+
+  <!-- Stream-specific attention outputs and first residuals. -->
+  <rect x="170" y="1256" width="430" height="74" rx="11" class="trainable-node"/>
+  <text x="385" y="1284" text-anchor="middle" class="label">Image output projection</text>
+  <text x="385" y="1310" text-anchor="middle" class="body">W_o,img · 3,072 → 3,072</text>
+
+  <rect x="900" y="1256" width="430" height="74" rx="11" class="trainable-node"/>
+  <text x="1115" y="1284" text-anchor="middle" class="label">Text output projection</text>
+  <text x="1115" y="1310" text-anchor="middle" class="body">W_o,txt · 3,072 → 3,072</text>
+
+  <path d="M 535 1213 L 535 1233 L 385 1233 L 385 1256" class="arrow"/>
+  <path d="M 965 1213 L 965 1233 L 1115 1233 L 1115 1256" class="arrow"/>
+
+  <rect x="170" y="1372" width="430" height="84" rx="11" class="residual-node"/>
+  <text x="385" y="1400" text-anchor="middle" class="label">Gated attention residual</text>
+  <text x="385" y="1427" text-anchor="middle" class="body">x_img¹ = x_img + gate₁ · W_o,img(attn_img)</text>
+  <text x="385" y="1448" text-anchor="middle" class="small">flow-time gate · distinct from the SwiGLU gate</text>
+
+  <rect x="900" y="1372" width="430" height="84" rx="11" class="residual-node"/>
+  <text x="1115" y="1400" text-anchor="middle" class="label">Gated attention residual</text>
+  <text x="1115" y="1427" text-anchor="middle" class="body">x_txt¹ = x_txt + gate₁ · W_o,txt(attn_txt)</text>
+  <text x="1115" y="1448" text-anchor="middle" class="small">flow-time gate · distinct from the SwiGLU gate</text>
+
+  <path d="M 385 1330 L 385 1372" class="arrow"/>
+  <path d="M 1115 1330 L 1115 1372" class="arrow"/>
+
+  <!-- MLP sublayers. -->
+  <rect x="170" y="1502" width="430" height="86" rx="11" class="trainable-node"/>
+  <text x="385" y="1528" text-anchor="middle" class="label">Adaptive LayerNorm 2 · image</text>
+  <text x="385" y="1554" text-anchor="middle" class="body">x̂¹ = (1 + scale₂) · LN(x_img¹) + shift₂</text>
+  <text x="385" y="1577" text-anchor="middle" class="small">gate₂ is reserved for the MLP residual</text>
+
+  <rect x="900" y="1502" width="430" height="86" rx="11" class="trainable-node"/>
+  <text x="1115" y="1528" text-anchor="middle" class="label">Adaptive LayerNorm 2 · text</text>
+  <text x="1115" y="1554" text-anchor="middle" class="body">x̂¹ = (1 + scale₂) · LN(x_txt¹) + shift₂</text>
+  <text x="1115" y="1577" text-anchor="middle" class="small">gate₂ is reserved for the MLP residual</text>
+
+  <path d="M 385 1456 L 385 1502" class="arrow"/>
+  <path d="M 1115 1456 L 1115 1502" class="arrow"/>
+
+  <rect x="170" y="1632" width="430" height="108" rx="11" class="trainable-node"/>
+  <text x="385" y="1659" text-anchor="middle" class="label">Image SwiGLU MLP</text>
+  <text x="385" y="1686" text-anchor="middle" class="body">3,072 → 2 × 9,216 → 9,216 → 3,072</text>
+  <text x="385" y="1711" text-anchor="middle" class="body">SiLU(a) ⊙ b</text>
+  <text x="385" y="1732" text-anchor="middle" class="small">stream-specific input and output projections</text>
+
+  <rect x="900" y="1632" width="430" height="108" rx="11" class="trainable-node"/>
+  <text x="1115" y="1659" text-anchor="middle" class="label">Text SwiGLU MLP</text>
+  <text x="1115" y="1686" text-anchor="middle" class="body">3,072 → 2 × 9,216 → 9,216 → 3,072</text>
+  <text x="1115" y="1711" text-anchor="middle" class="body">SiLU(a) ⊙ b</text>
+  <text x="1115" y="1732" text-anchor="middle" class="small">stream-specific input and output projections</text>
+
+  <path d="M 385 1588 L 385 1632" class="arrow"/>
+  <path d="M 1115 1588 L 1115 1632" class="arrow"/>
+
+  <rect x="170" y="1782" width="430" height="82" rx="11" class="residual-node"/>
+  <text x="385" y="1810" text-anchor="middle" class="label">Gated MLP residual</text>
+  <text x="385" y="1837" text-anchor="middle" class="body">x_img_out = x_img¹ + gate₂ · MLP_img(x̂¹)</text>
+  <text x="385" y="1856" text-anchor="middle" class="small">image stream remains separate</text>
+
+  <rect x="900" y="1782" width="430" height="82" rx="11" class="residual-node"/>
+  <text x="1115" y="1810" text-anchor="middle" class="label">Gated MLP residual</text>
+  <text x="1115" y="1837" text-anchor="middle" class="body">x_txt_out = x_txt¹ + gate₂ · MLP_txt(x̂¹)</text>
+  <text x="1115" y="1856" text-anchor="middle" class="small">text stream remains separate</text>
+
+  <path d="M 385 1740 L 385 1782" class="arrow"/>
+  <path d="M 1115 1740 L 1115 1782" class="arrow"/>
+
+  <path d="M 385 1864 L 385 1890" class="arrow"/>
+  <path d="M 1115 1864 L 1115 1890" class="arrow"/>
+  <rect x="195" y="1890" width="380" height="40" rx="10" class="output-node"/>
+  <rect x="925" y="1890" width="380" height="40" rx="10" class="output-node"/>
+  <text x="385" y="1916" text-anchor="middle" class="label">Image stream → next block</text>
+  <text x="1115" y="1916" text-anchor="middle" class="label">Text stream → next block</text>
+
+  <!-- Dashed rails keep adaptive controls visually separate from token flow. -->
+  <path d="M 170 238 L 28 238 L 28 1823" class="modulation-rail"/>
+  <path d="M 1330 238 L 1472 238 L 1472 1823" class="modulation-rail"/>
+  <text x="16" y="1030" transform="rotate(-90 16 1030)" text-anchor="middle" class="control-label">image flow-time controls</text>
+  <text x="1484" y="1030" transform="rotate(90 1484 1030)" text-anchor="middle" class="control-label">text flow-time controls</text>
+
+  <path d="M 28 538 L 170 538" class="modulation"/>
+  <path d="M 28 1418 L 170 1418" class="modulation"/>
+  <path d="M 28 1545 L 170 1545" class="modulation"/>
+  <path d="M 28 1824 L 170 1824" class="modulation"/>
+  <text x="98" y="528" text-anchor="middle" class="control-label">shift₁ · scale₁</text>
+  <text x="98" y="1408" text-anchor="middle" class="control-label">gate₁</text>
+  <text x="98" y="1535" text-anchor="middle" class="control-label">shift₂ · scale₂</text>
+  <text x="98" y="1814" text-anchor="middle" class="control-label">gate₂</text>
+
+  <path d="M 1472 538 L 1330 538" class="modulation"/>
+  <path d="M 1472 1418 L 1330 1418" class="modulation"/>
+  <path d="M 1472 1545 L 1330 1545" class="modulation"/>
+  <path d="M 1472 1824 L 1330 1824" class="modulation"/>
+  <text x="1402" y="528" text-anchor="middle" class="control-label">shift₁ · scale₁</text>
+  <text x="1402" y="1408" text-anchor="middle" class="control-label">gate₁</text>
+  <text x="1402" y="1535" text-anchor="middle" class="control-label">shift₂ · scale₂</text>
+  <text x="1402" y="1814" text-anchor="middle" class="control-label">gate₂</text>
+</svg>

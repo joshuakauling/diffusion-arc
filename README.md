@@ -70,7 +70,7 @@ Supporting questions include:
 
 ## Architecture
 
-![Diffusion-ARC architecture](docs/architecture/architecture.svg)
+![Diffusion-ARC architecture](docs/architecture/diagrams/architecture.svg)
 
 The NVARC model and FLUX VAE remain frozen, while the complete FLUX
 transformer is trained. The architecture reuses FLUX's native Qwen3
@@ -80,9 +80,10 @@ from NVARC. Their combined width of 7,680 matches FLUX's existing `txt_in`
 projection and avoids introducing a separate conditioning adapter.
 
 ARC target grids are aligned to the top-left of a fixed 30×30 canvas, padded
-with a white sentinel, and rendered as 480×480 RGB images. The frozen FLUX VAE
-and its 2×2 latent packing convert each canvas into 900 image tokens, providing
-one spatial token for every ARC cell.
+with a white sentinel, and rendered as 480×480 RGB images. ARC color IDs use the
+fixed `greedy_rgb_maximin_v1` target palette selected by the measured VAE
+palette experiment. The frozen FLUX VAE and its 2×2 latent packing convert each
+canvas into 900 image tokens, providing one spatial token for every ARC cell.
 
 The main change to the original FLUX input path is the context length. FLUX's
 reference text preparation is capped at 512 tokens, while serialized ARC tasks

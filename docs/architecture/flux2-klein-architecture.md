@@ -17,44 +17,7 @@ checkpoint-specific facts that cannot be verified.
 
 ## End-to-end view
 
-```text
-Target image
-    |
-    v
-Frozen VAE encoder: RGB -> 32-channel latent at 1/8 resolution
-    |
-    v
-2x2 latent packing + normalization
-    |
-    v
-Target state z_t: [B, N_target, 128] -----------------------+
-                                                            |
-Clean reference images                                     |
-    |                                                       |
-    +-> frozen VAE -> packed reference tokens               |
-                                                            v
-Text -> frozen Qwen3 hidden states -> [B, N_text, 7680]   input projections
-                                                            |
-Flow time t -> 256-D sinusoidal embedding -> 3072-D vector  |
-                                                            v
-                                               5 double-stream blocks
-                                         (separate text and image streams)
-                                                            |
-                                                            v
-                                           concatenate text and image tokens
-                                                            |
-                                                            v
-                                                20 single-stream blocks
-                                                            |
-                                                            v
-                                           retain only target image outputs
-                                                            |
-                                                            v
-                                                final projection 3072 -> 128
-                                                            |
-                                                            v
-                                         velocity [B, N_target, 128]
-```
+![FLUX.2 Klein Base 4B inference architecture](diagrams/flux2-klein-architecture.svg)
 
 At inference, the transformer is evaluated repeatedly while an ODE solver moves
 the target latent from noise at `t=1` toward a clean latent at `t=0`. The VAE
@@ -203,6 +166,8 @@ different learned projections.
 Each double-stream block keeps image and text hidden states separate and has
 stream-specific QKV, output, and MLP weights. For each stream:
 
+![FLUX.2 double-stream transformer block](diagrams/flux2-double-stream-block.svg)
+
 1. adaptive LayerNorm prepares the attention input;
 2. a `3072 -> 9216` projection creates Q, K, and V;
 3. Q and K receive RMS normalization and multidimensional RoPE;
@@ -236,6 +201,8 @@ After the double-stream stack, text and image sequences are concatenated. A
 single-stream block computes attention and MLP features in parallel from the
 same adaptively normalized input.
 
+![FLUX.2 single-stream transformer block](diagrams/flux2-single-stream-block.svg)
+
 Its first projection produces:
 
 \[
@@ -268,6 +235,8 @@ residual update.
 
 After the single-stream stack, only the target-token segment is retained by the
 model or sampling wrapper. The final layer applies:
+
+![FLUX.2 final velocity head](diagrams/flux2-velocity-head.svg)
 
 1. non-affine LayerNorm;
 2. flow-time-dependent shift and scale;

@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1515" viewBox="0 0 1500 1515" role="img" aria-labelledby="title desc">
+  <title id="title">FLUX.2 Klein Base 4B single-stream transformer block</title>
+  <desc id="desc">A shared text, reference-image, and target-image token sequence passes through flow-time-adaptive LayerNorm and one projection. The projection splits into a self-attention branch and a parallel SwiGLU branch. Their outputs are concatenated, projected back to the hidden width, multiplied by a separate flow-time gate, and added to one residual bypass.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8250df"/>
+    </marker>
+    <style>
+      text {
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        fill: #1f2328;
+      }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 15px; fill: #57606a; }
+      .section-title { font-size: 18px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 600; }
+      .body { font-size: 15px; }
+      .small { font-size: 13px; fill: #57606a; }
+      .trainable-area { fill: #faf7ff; stroke: #8250df; stroke-width: 2.5; }
+      .branch-area { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.5; }
+      .trainable-node { fill: #f1eaff; stroke: #8250df; stroke-width: 2; }
+      .state-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; }
+      .node { fill: #ffffff; stroke: #8c959f; stroke-width: 1.5; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2; marker-end: url(#arrow); }
+      .line { fill: none; stroke: #57606a; stroke-width: 2; }
+      .modulation { fill: none; stroke: #8250df; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow-purple); }
+      .split-dot { fill: #57606a; }
+      .add-circle { fill: #ffffff; stroke: #57606a; stroke-width: 2; }
+      .plus { font-size: 28px; font-weight: 500; fill: #57606a; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="1515" fill="#ffffff"/>
+  <text x="750" y="48" text-anchor="middle" class="title">FLUX.2 single-stream block</text>
+  <text x="750" y="76" text-anchor="middle" class="subtitle">one of 20 blocks · parallel attention and SwiGLU · one gated residual update</text>
+
+  <!-- Shared token input -->
+  <rect x="400" y="105" width="700" height="100" rx="14" class="state-node"/>
+  <text x="750" y="138" text-anchor="middle" class="section-title">Shared input sequence · x</text>
+  <text x="750" y="168" text-anchor="middle" class="body">[text | references | target]</text>
+  <text x="750" y="191" text-anchor="middle" class="small">[B, N_total, 3,072]</text>
+
+  <!-- Flow-time controls remain visually separate from token flow -->
+  <rect x="1150" y="105" width="300" height="100" rx="14" class="trainable-node"/>
+  <text x="1300" y="138" text-anchor="middle" class="section-title">Flow-time controls</text>
+  <text x="1300" y="168" text-anchor="middle" class="body">from vec ∈ R³⁰⁷²</text>
+  <text x="1300" y="191" text-anchor="middle" class="small">shift · scale · residual gate</text>
+
+  <!-- Complete trainable block -->
+  <rect x="60" y="245" width="1380" height="1165" rx="18" class="trainable-area"/>
+  <text x="750" y="282" text-anchor="middle" class="section-title">Single-stream transformer block · trainable</text>
+
+  <!-- Main normalized path -->
+  <path d="M 750 205 L 750 315" class="arrow"/>
+  <rect x="400" y="315" width="700" height="88" rx="12" class="trainable-node"/>
+  <text x="750" y="345" text-anchor="middle" class="section-title">Adaptive LayerNorm</text>
+  <text x="750" y="375" text-anchor="middle" class="body">x̂ = (1 + scale) · LN(x) + shift</text>
+  <text x="750" y="396" text-anchor="middle" class="small">shift and scale come from the current flow time</text>
+
+  <path d="M 1150 155 L 1125 155 L 1125 359 L 1100 359" class="modulation"/>
+  <text x="1138" y="275" transform="rotate(-90 1138 275)" text-anchor="middle" class="small">shift + scale</text>
+
+  <path d="M 750 403 L 750 445" class="arrow"/>
+  <rect x="400" y="445" width="700" height="90" rx="12" class="trainable-node"/>
+  <text x="750" y="477" text-anchor="middle" class="section-title">Combined input projection</text>
+  <text x="750" y="506" text-anchor="middle" class="body">3,072 → 27,648</text>
+  <text x="750" y="528" text-anchor="middle" class="small">Q, K, V, a, b produced from the same normalized input</text>
+
+  <!-- Projection fan-out -->
+  <path d="M 750 535 L 750 567" class="line"/>
+  <circle cx="750" cy="567" r="4.5" class="split-dot"/>
+  <path d="M 750 567 L 475 567 L 475 617" class="arrow"/>
+  <path d="M 750 567 L 1025 567 L 1025 617" class="arrow"/>
+
+  <!-- Parallel attention branch -->
+  <rect x="250" y="590" width="450" height="392" rx="15" class="branch-area"/>
+  <text x="475" y="626" text-anchor="middle" class="section-title">Self-attention branch</text>
+
+  <rect x="285" y="650" width="380" height="78" rx="11" class="trainable-node"/>
+  <text x="475" y="680" text-anchor="middle" class="label">Q · K · V</text>
+  <text x="475" y="707" text-anchor="middle" class="body">3 × 3,072 = 9,216 features</text>
+
+  <path d="M 475 728 L 475 758" class="arrow"/>
+  <rect x="285" y="758" width="380" height="82" rx="11" class="trainable-node"/>
+  <text x="475" y="789" text-anchor="middle" class="label">QK RMSNorm + 4D RoPE</text>
+  <text x="475" y="817" text-anchor="middle" class="small">normalization and rotation apply to Q and K</text>
+
+  <path d="M 475 840 L 475 870" class="arrow"/>
+  <rect x="285" y="870" width="380" height="78" rx="11" class="trainable-node"/>
+  <text x="475" y="900" text-anchor="middle" class="label">Joint self-attention</text>
+  <text x="475" y="927" text-anchor="middle" class="body">output · 3,072 features</text>
+
+  <!-- Parallel SwiGLU branch -->
+  <rect x="800" y="590" width="450" height="392" rx="15" class="branch-area"/>
+  <text x="1025" y="626" text-anchor="middle" class="section-title">SwiGLU branch</text>
+
+  <rect x="835" y="650" width="380" height="90" rx="11" class="trainable-node"/>
+  <text x="1025" y="681" text-anchor="middle" class="label">Two projected branches</text>
+  <text x="1025" y="708" text-anchor="middle" class="body">a · 9,216  |  b · 9,216</text>
+  <text x="1025" y="731" text-anchor="middle" class="small">18,432 features in total</text>
+
+  <path d="M 1025 740 L 1025 782" class="arrow"/>
+  <rect x="835" y="782" width="380" height="90" rx="11" class="trainable-node"/>
+  <text x="1025" y="815" text-anchor="middle" class="label">SwiGLU</text>
+  <text x="1025" y="844" text-anchor="middle" class="body">SiLU(a) ⊙ b</text>
+  <text x="1025" y="865" text-anchor="middle" class="small">data-dependent MLP gate</text>
+
+  <path d="M 1025 872 L 1025 900" class="arrow"/>
+  <rect x="835" y="900" width="380" height="48" rx="11" class="trainable-node"/>
+  <text x="1025" y="930" text-anchor="middle" class="label">9,216 features</text>
+
+  <!-- Merge parallel results -->
+  <path d="M 475 948 L 475 1010 L 620 1010 L 620 1033" class="arrow"/>
+  <path d="M 1025 948 L 1025 1010 L 880 1010 L 880 1033" class="arrow"/>
+
+  <rect x="400" y="1033" width="700" height="78" rx="12" class="node"/>
+  <text x="750" y="1064" text-anchor="middle" class="section-title">Concatenate branch outputs</text>
+  <text x="750" y="1093" text-anchor="middle" class="body">3,072 + 9,216 = 12,288 features</text>
+
+  <path d="M 750 1111 L 750 1143" class="arrow"/>
+  <rect x="400" y="1143" width="700" height="78" rx="12" class="trainable-node"/>
+  <text x="750" y="1174" text-anchor="middle" class="section-title">Output projection</text>
+  <text x="750" y="1203" text-anchor="middle" class="body">12,288 → 3,072</text>
+
+  <path d="M 750 1221 L 750 1252" class="arrow"/>
+  <rect x="500" y="1252" width="500" height="70" rx="12" class="trainable-node"/>
+  <text x="750" y="1281" text-anchor="middle" class="section-title">Flow-time gate</text>
+  <text x="750" y="1307" text-anchor="middle" class="body">gate ⊙ projected features</text>
+
+  <path d="M 1300 205 L 1300 1287 L 1000 1287" class="modulation"/>
+  <text x="1315" y="754" transform="rotate(90 1315 754)" text-anchor="middle" class="small">separate residual gate</text>
+
+  <!-- One residual bypass and addition -->
+  <path d="M 400 155 L 130 155 L 130 1360 L 721 1360" class="arrow"/>
+  <text x="113" y="760" transform="rotate(-90 113 760)" text-anchor="middle" class="small">unchanged residual bypass · x</text>
+
+  <path d="M 750 1322 L 750 1331" class="arrow"/>
+  <circle cx="750" cy="1360" r="29" class="add-circle"/>
+  <text x="750" y="1370" text-anchor="middle" class="plus">+</text>
+  <text x="790" y="1366" class="small">one residual addition</text>
+
+  <!-- Shared token output -->
+  <path d="M 750 1389 L 750 1430" class="arrow"/>
+  <rect x="400" y="1430" width="700" height="70" rx="13" class="state-node"/>
+  <text x="750" y="1459" text-anchor="middle" class="section-title">Output sequence · x_next</text>
+  <text x="750" y="1486" text-anchor="middle" class="body">[B, N_total, 3,072]</text>
+</svg>
