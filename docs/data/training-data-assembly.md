@@ -11,6 +11,12 @@ optimizations are documented separately in
 [`batching-and-efficiency-roadmap.md`](../training/batching-and-efficiency-roadmap.md).
 The target-blind execution of packed sources through frozen NVARC is documented
 in [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
+Target-aware prefix derivation and dynamic FLUX text padding are documented in
+[`flux-text-conditioning.md`](../training/flux-text-conditioning.md).
+Frozen target-image encoding is documented in
+[`flux-image-encoding.md`](../training/flux-image-encoding.md).
+Per-target flow-noise and timestep sampling is documented in
+[`flow-matching.md`](../training/flow-matching.md).
 
 The implemented path is:
 
@@ -41,7 +47,10 @@ contract lives in
 | PyTorch `DataLoader` | Selecting dataset indices, source-level batch size, shuffle/sampler policy, workers, invoking the collator | ARC semantics, target selection, packed tensor meaning |
 | `TrainingCollator` | Assembling trusted tokenized samples by selecting suffix targets, truncating sources, rendering target canvases, and building the packed tensor contract and metadata sidecar | Validating alternate sample producers, sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
 | `NvarcBatchRunner` | Executing trusted packed sources by right-padding, constructing the attention mask, running one frozen batch forward, selecting hidden states, and removing padded positions | Revalidating stable checkpoint contracts, targets, target-prefix derivation, target images, VAE or FLUX execution |
-| Future training runner | Target-prefix derivation, VAE encoding, flow noise and timestep sampling, FLUX execution, loss normalization, optimizer steps | Reinterpreting or silently changing dataset and collator alignment |
+| `prepare_flux_text_inputs` | Deriving exact per-target NVARC prefixes, dynamic right padding, FLUX text position IDs, and the text key mask | Target images, VAE encoding, FLUX execution, loss normalization |
+| `FluxVaeEncoder` | Moving trusted target canvases to the VAE, deterministic posterior-mode encoding, 2×2 latent packing, frozen BatchNorm normalization, flattening, and FLUX target position IDs | Palette selection, flow noise, timesteps, FLUX execution, or loss normalization |
+| Flow-matching helpers | Drawing independent per-target Gaussian noise and uniform timesteps, constructing `z_t` and `epsilon - z_0`, and computing the unweighted FP32 velocity MSE | FLUX execution, alternate timestep densities, loss weighting, or optimizer steps |
+| Future training runner | Combined FLUX input assembly, FLUX execution, invoking the loss, gradient accumulation, and optimizer steps | Reinterpreting or silently changing dataset and collator alignment |
 
 ## `ArcTrainingDataset`
 
@@ -322,10 +331,29 @@ experiment, not to every forward call. The runner's exact contract and
 outstanding real-checkpoint checks are documented in
 [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
+`prepare_flux_text_inputs` then uses `target_sequence_indices` and
+`target_prefix_ends` to copy only each target's exact conditioning prefix. It
+right-pads the resulting target exposures to their microbatch maximum and
+returns a boolean text mask plus FLUX position IDs. The full contract is
+documented in
+[`flux-text-conditioning.md`](../training/flux-text-conditioning.md).
+
+`FluxVaeEncoder` independently consumes `target_images` in their canonical
+target-exposure order. It uses the frozen VAE posterior mode and returns clean
+normalized packed latents plus fixed target-image position IDs. The full
+contract is documented in
+[`flux-image-encoding.md`](../training/flux-image-encoding.md).
+
+`sample_flow_matching_batch` independently draws one Gaussian noise tensor and
+one uniform normalized timestep for every encoded target. It constructs the
+noisy transformer input and straight-path velocity target. The matching FP32
+MSE helper and complete contract are documented in
+[`flow-matching.md`](../training/flow-matching.md).
+
 ## Where noise enters
 
 Noise and flow timesteps are not data-loading or collation concerns. They enter
-after this host batch reaches the future model runner:
+after this host batch reaches the model-side flow sampler:
 
 ```text
 target_images
@@ -337,8 +365,8 @@ target_images
 ```
 
 Each selected target exposure receives its own target image and therefore its
-own latent, noise sample, and potentially its own timestep. Their sampling and
-loss normalization must be controlled and recorded by the training runner.
+own latent, noise sample, and uniform timestep. The optional generator lets the
+future training runner control and record sampling reproducibly.
 
 ## Inspection
 
@@ -363,9 +391,9 @@ The implemented dataset and collator intentionally do not yet provide:
 - a custom length-aware or cost-aware sampler;
 - accelerator transfer or automatic pinned-memory traversal;
 - a true variable-length NVARC attention path or length-bucket scheduler;
-- target-conditioning-prefix derivation or prefix-reuse validation;
-- VAE encoding, flow noise, or timestep sampling;
-- FLUX batching, execution, loss computation, or optimization;
+- real-checkpoint prefix-reuse validation;
+- alternate flow-timestep densities or timestep-dependent loss weighting;
+- complete FLUX input assembly, execution, or optimization;
 - distributed sampling or optimizer-batch accounting.
 
 Those pieces should be added around the stable host contract in measured,

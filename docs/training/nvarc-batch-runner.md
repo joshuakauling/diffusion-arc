@@ -133,6 +133,12 @@ Keeping this operation separate ensures that NVARC always processes each
 collated complete source once and cannot acquire dependencies on target images
 or FLUX execution policy.
 
+That target-aware operation is now implemented by `prepare_flux_text_inputs`.
+It derives the exact recorded prefixes, dynamically right-pads a physical FLUX
+text microbatch, and returns its text mask and position IDs. Its contract and
+remaining real-model checks are documented in
+[`flux-text-conditioning.md`](flux-text-conditioning.md).
+
 ## Remaining real-checkpoint validation
 
 Local fake-model tests cannot establish the numerical behavior of the released
@@ -149,3 +155,17 @@ No prefix reuse should be connected to FLUX until those comparisons meet a
 predeclared numerical tolerance. This experiment is run explicitly for the
 checkpoint and execution environment; the runner neither detects a "first"
 forward nor caches a preflight result inside the training path.
+
+[`experiments/nvarc_batch_preflight_colab.ipynb`](../../experiments/nvarc_batch_preflight_colab.ipynb)
+implements that real-checkpoint preflight with two differently sized synthetic
+ARC sources and multiple target prefixes per source. It loads only the NVARC
+checkpoint already present in Google Drive, runs the selected states both
+individually and concatenated, and writes a timestamped JSON report before its
+final pass/fail assertion. The optional 8192-token capacity probe is disabled by
+default and is not part of the causal-equivalence verdict.
+
+This Colab result complements rather than replaces the local unit tests. Local
+tests establish deterministic packing and interface behavior with a fake model;
+the Colab report establishes checkpoint-, backend-, precision-, and GPU-specific
+numerical evidence. A new report is required whenever any of those execution
+variables changes.

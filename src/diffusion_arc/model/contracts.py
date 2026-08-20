@@ -34,6 +34,14 @@ TARGET_IMAGE_SHAPE = (
     TARGET_IMAGE_HEIGHT,
     TARGET_IMAGE_WIDTH,
 )
+TARGET_LATENT_CHANNELS = 128
+TARGET_LATENT_HEIGHT = TARGET_IMAGE_HEIGHT // 16
+TARGET_LATENT_WIDTH = TARGET_IMAGE_WIDTH // 16
+TARGET_LATENT_TOKEN_COUNT = TARGET_LATENT_HEIGHT * TARGET_LATENT_WIDTH
+TARGET_LATENT_SHAPE = (
+    TARGET_LATENT_TOKEN_COUNT,
+    TARGET_LATENT_CHANNELS,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,50 @@ class PackedNvarcHiddenStates:
 
     hidden_states: Tensor
     sequence_offsets: Tensor
+
+
+@dataclass(frozen=True)
+class EncodedTargetLatents:
+    """Clean transformer-facing target latents and their FLUX coordinates.
+
+    ``clean_latents`` contains one normalized packed VAE latent per target
+    exposure in the same order as ``PackedTrainingBatch.target_images``.
+    ``image_position_ids`` uses FLUX's four-axis ``(0, h, w, 0)`` target-image
+    coordinates.
+    """
+
+    clean_latents: Tensor
+    image_position_ids: Tensor
+
+
+@dataclass(frozen=True)
+class FlowMatchingBatch:
+    """One independently sampled straight-path state per target exposure.
+
+    ``noisy_latents`` contains the interpolated transformer input ``z_t``.
+    ``timesteps`` contains one normalized flow time per target exposure.
+    ``target_velocity`` is the straight-path supervision ``epsilon - z_0``.
+    """
+
+    noisy_latents: Tensor
+    timesteps: Tensor
+    target_velocity: Tensor
+
+
+@dataclass(frozen=True)
+class FluxTextInputs:
+    """Dynamically padded per-target text inputs for a FLUX microbatch.
+
+    ``encoder_hidden_states`` contains exact NVARC conditioning prefixes in
+    target-exposure order, right-padded to the longest prefix in the physical
+    microbatch. ``text_attention_mask`` marks only real prefix positions.
+    ``text_position_ids`` uses FLUX's four-axis ``(0, 0, 0, l)`` text
+    coordinates.
+    """
+
+    encoder_hidden_states: Tensor
+    text_position_ids: Tensor
+    text_attention_mask: Tensor
 
 
 def validate_packed_training_batch(batch: PackedTrainingBatch) -> None:
@@ -211,6 +263,14 @@ __all__ = [
     "TARGET_IMAGE_HEIGHT",
     "TARGET_IMAGE_SHAPE",
     "TARGET_IMAGE_WIDTH",
+    "TARGET_LATENT_CHANNELS",
+    "TARGET_LATENT_HEIGHT",
+    "TARGET_LATENT_SHAPE",
+    "TARGET_LATENT_TOKEN_COUNT",
+    "TARGET_LATENT_WIDTH",
+    "EncodedTargetLatents",
+    "FlowMatchingBatch",
+    "FluxTextInputs",
     "PackedNvarcHiddenStates",
     "PackedTrainingBatch",
     "validate_packed_source_sequences",

@@ -266,6 +266,7 @@ class PackedContractTests(unittest.TestCase):
                     "assert not any(name == 'transformers' or "
                     "name.startswith('transformers.') for name in sys.modules); "
                     "assert not any(name.startswith('diffusion_arc._vendor') "
+                    "or name.startswith('diffusion_arc._third_party') "
                     "or 'bfl_flux' in name for name in sys.modules)"
                 ),
             ],

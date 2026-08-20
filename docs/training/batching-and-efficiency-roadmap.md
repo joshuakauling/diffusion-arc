@@ -99,6 +99,23 @@ The implemented target-blind padded NVARC execution boundary is documented in
 [`nvarc-batch-runner.md`](nvarc-batch-runner.md). It provides the correctness
 primitive used before adding length buckets or target-aware staging.
 
+The implemented target-aware text boundary is documented in
+[`flux-text-conditioning.md`](flux-text-conditioning.md). It derives exact
+prefixes, dynamically right-pads a physical FLUX text microbatch, and builds the
+text portion of a joint attention mask. It does not yet execute FLUX.
+
+The implemented target-image boundary is documented in
+[`flux-image-encoding.md`](flux-image-encoding.md). It deterministically encodes
+each fixed canvas with the frozen VAE, produces normalized `[900,128]` clean
+latents, and constructs the matching FLUX image position IDs.
+
+The implemented flow-matching boundary is documented in
+[`flow-matching.md`](flow-matching.md). It independently samples standard
+Gaussian noise and a uniform normalized timestep for each target exposure,
+constructs the noisy FLUX state and velocity target, and provides the
+unweighted FP32 velocity MSE. Alternative timestep densities and loss weights
+remain later training-recipe experiments.
+
 The public target metadata is source-major so it can be validated against the
 source boundaries. Later staging pools may build an internal reordered view for
 FLUX execution without changing the canonical contract. Task IDs,
@@ -194,15 +211,15 @@ NVARC remains frozen and runs in evaluation mode. The intended reuse path is:
 3. retain only the real, unpadded hidden states;
 4. create a conditioning view for every recorded target-prefix boundary.
 
-`NvarcBatchRunner` now implements steps 1 through 3 for one physical NVARC
+`NvarcBatchRunner` implements steps 1 through 3 for one physical NVARC
 batch. It right-pads complete sources, supplies the attention mask, performs one
 batch forward, and returns only real positions in packed source-major order.
-Step 4 remains outside the runner so target metadata cannot enter the NVARC
-abstraction. It trusts the collator-produced source contract and a separately
-verified stable checkpoint-output contract rather than rescanning both on every
-forward. Length bucketing and explicit real-checkpoint numerical comparisons
+`prepare_flux_text_inputs` implements step 4 outside the runner so target
+metadata cannot enter the NVARC abstraction. It trusts the collator-produced
+target mapping and the packed NVARC output rather than rescanning both on every
+microbatch. Length bucketing and explicit real-checkpoint numerical comparisons
 remain later work; they are not triggered or remembered by a first-forward
-branch in the runner.
+branch in either component.
 
 This reuse is valid only if a prefix computed as part of the full causal
 sequence agrees with the same prefix computed in isolation. The real
@@ -272,17 +289,21 @@ measurement or provides a clearly documented engineering finding.
 - Bound the pool so that retained conditioning states cannot cause unmeasured
   host or device memory growth.
 
-### Stage 3 - Exact-length FLUX batching
+### Stage 3 - Masked dynamic-length FLUX batching
 
-- Batch multiple target exposures only when their exact conditioning lengths
-  are compatible with the unmodified FLUX interface.
-- Compare batched losses, gradients, and parameter updates with the sequential
-  reference.
-- Measure whether exact-length groups occur frequently enough to improve
-  end-to-end throughput.
+- Right-pad target prefixes only to the longest prefix in their physical FLUX
+  microbatch.
+- Concatenate the boolean text key mask with valid keys for all 900 image
+  tokens and pass the resulting joint mask through FLUX double- and
+  single-stream attention.
+- Compare masked batched outputs, losses, gradients, and parameter updates with
+  the unpadded sequential reference.
+- Record padded-token fractions and measure end-to-end throughput rather than
+  assuming that larger physical batches are faster.
 
-This stage requires no FLUX padding mask, but it may provide limited benefit if
-exact lengths are sparse.
+Exact-length groups are the no-padding special case. Dense masked attention can
+be semantically correct while still computing padded query and key positions.
+Its utility depends on measured batch utilization and the selected backend.
 
 ### Stage 4 - Variable-length FLUX attention
 
@@ -366,7 +387,7 @@ This document intentionally does not yet select:
 - a permanent maximum targets-per-source value;
 - final NVARC bucket boundaries;
 - a maximum token or compute budget;
-- a variable-length attention library or kernel;
+- a production CUDA attention backend or true variable-length kernel;
 - a fixed analytical cost model;
 - non-unit target weighting;
 - a final DDP or FSDP2 scheduling policy.

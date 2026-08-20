@@ -11,11 +11,22 @@ from .contracts import (
     TARGET_IMAGE_HEIGHT,
     TARGET_IMAGE_SHAPE,
     TARGET_IMAGE_WIDTH,
+    TARGET_LATENT_CHANNELS,
+    TARGET_LATENT_HEIGHT,
+    TARGET_LATENT_SHAPE,
+    TARGET_LATENT_TOKEN_COUNT,
+    TARGET_LATENT_WIDTH,
+    EncodedTargetLatents,
+    FlowMatchingBatch,
+    FluxTextInputs,
     PackedNvarcHiddenStates,
     PackedTrainingBatch,
     validate_packed_source_sequences,
     validate_packed_training_batch,
 )
+from .flow import flow_matching_loss, sample_flow_matching_batch
+from .flux_image import FluxVaeEncoder
+from .flux_text import build_flux_joint_attention_mask, prepare_flux_text_inputs
 from .nvarc import NvarcBatchRunner
 
 __all__ = [
@@ -29,9 +40,22 @@ __all__ = [
     "TARGET_IMAGE_HEIGHT",
     "TARGET_IMAGE_SHAPE",
     "TARGET_IMAGE_WIDTH",
+    "TARGET_LATENT_CHANNELS",
+    "TARGET_LATENT_HEIGHT",
+    "TARGET_LATENT_SHAPE",
+    "TARGET_LATENT_TOKEN_COUNT",
+    "TARGET_LATENT_WIDTH",
+    "EncodedTargetLatents",
+    "FlowMatchingBatch",
+    "FluxTextInputs",
+    "FluxVaeEncoder",
     "NvarcBatchRunner",
     "PackedNvarcHiddenStates",
     "PackedTrainingBatch",
+    "build_flux_joint_attention_mask",
+    "flow_matching_loss",
+    "prepare_flux_text_inputs",
+    "sample_flow_matching_batch",
     "validate_packed_source_sequences",
     "validate_packed_training_batch",
 ]
