@@ -101,7 +101,8 @@ per-target weighting in this baseline.
 
 ## Complete microbatch computation
 
-`compute_flux_microbatch_loss(transformer, microbatch, generator=...)` performs:
+`compute_flux_microbatch_loss(transformer, microbatch, compute_dtype=..., generator=...)`
+performs:
 
 ```text
 FluxMicrobatch.clean_latents
@@ -113,17 +114,22 @@ FluxMicrobatch.clean_latents
 
 The transformer receives the noisy latents, padded NVARC conditioning, flow
 timesteps, text and image position IDs, and the joint key mask already carried
-or derivable from the microbatch. The function returns one scalar loss. It does
-not scale that loss for an optimizer batch and does not call `backward()`.
+or derivable from the microbatch. Only the transformer forward runs inside an
+autocast region using the supplied compute dtype. Persistent transformer
+parameters retain their loader-established FP32 dtype, while the loss is
+computed after leaving autocast and explicitly uses FP32 inputs. The function
+returns one scalar loss. It does not scale that loss for an optimizer batch or
+call `backward()`.
 
 ## Validation boundaries
 
 The hot path checks only the narrow structural contract needed to avoid silent
 broadcasting or dtype errors: fixed latent shape, non-empty target count,
-floating dtype, matching prediction and target shapes, and matching loss
-devices. It does not scan complete tensors for finite values on every training
-step. Explicit preflights and the future training runner remain responsible
-for finite-value diagnostics and recorded RNG seeds.
+floating latent dtype, FP32 persistent FLUX parameter storage, matching
+prediction and target shapes, and matching loss devices. It does not scan
+complete tensors for finite values on every training step. Explicit preflights
+and the future training runner remain responsible for finite-value diagnostics
+and recorded RNG seeds.
 
 Unit tests establish:
 
@@ -131,7 +137,8 @@ Unit tests establish:
 - independent per-target timestep shape and broadcasting;
 - deterministic outputs from identically seeded generators;
 - latent dtype and device preservation with FP32 timesteps;
-- immutable output contracts; and
+- immutable output contracts;
+- BF16-autocast compute with FP32 parameters and gradients;
 - unweighted FP32 MSE with finite prediction gradients; and
 - one complete two-target, 900-image-token tiny FLUX forward and backward.
 
@@ -143,5 +150,6 @@ The complete microbatch computation does not:
 - choose a non-uniform timestep density or loss weighting;
 - select or build `FluxInput` objects or physical microbatches;
 - scale losses, call `backward()`, accumulate gradients, or update parameters;
-- configure autocast, gradient checkpointing, or distributed execution; or
+- configure gradient scaling, gradient checkpointing, or distributed execution;
+  or
 - define the inference-time ODE schedule.
