@@ -13,6 +13,7 @@ from .flux_input import (
 )
 from .flux_microbatch import FluxMicrobatch, build_flux_microbatch
 from .flux_forward import compute_flux_microbatch_loss
+from .single_gpu import run_single_gpu_training
 
 __all__ = [
     "ArcTrainingDataset",
@@ -25,4 +26,5 @@ __all__ = [
     "build_flux_microbatch",
     "compute_flux_microbatch_loss",
     "prepare_flux_inputs",
+    "run_single_gpu_training",
 ]
