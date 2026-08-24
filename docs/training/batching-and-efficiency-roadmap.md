@@ -17,8 +17,9 @@ The three models also have different useful batch boundaries:
 An optimizer update introduces a fourth boundary: its FLUX inputs must be fixed
 before physical grouping, or a planner could change the training order or objective.
 
-The design therefore separates the two input buffers, logical optimizer
-batches, and physical FLUX microbatches.
+The design therefore separates the input sample stream, prepared FLUX input
+queue, logical optimizer batches, and physical FLUX microbatches. A separate
+NVARC lookahead buffer is introduced only when length-aware batching needs it.
 
 ## Buffers, batches, and bucketing
 
@@ -30,7 +31,7 @@ object.
 | Term | Meaning |
 | --- | --- |
 | `ArcTokenizedTrainingSample` | One tokenized ARC sequence with all recorded target positions and target grids. |
-| `NvarcInputBuffer` | ARC sequences waiting to be selected for NVARC execution. |
+| `NvarcInputBuffer` | Optional future lookahead buffer for length-aware NVARC selection. |
 | `NvarcBatch` | A physical batch of complete NVARC sequences, normally grouped by similar length. |
 | `NvarcBatchOutput` | One independent, unpadded hidden-state tensor for each sequence in an `NvarcBatch`. |
 | `NvarcSequenceState` | The owner of one sequence tensor and the prefix ends that still need it. |
@@ -73,7 +74,7 @@ ArcTokenizedTrainingSample
               tuple[FluxInput, ...]
                     |
                     v
-              [future FluxInputBuffer]
+              internal FIFO deque[FluxInput]
                     |
                     v
               build_flux_microbatch(...)
@@ -89,9 +90,10 @@ ArcTokenizedTrainingSample
               flow sampling + FLUX forward/backward
 ```
 
-Preparation and FLUX training interleave throughout the run. Neither buffer is
-an offline cache or persists across runs. The `NvarcInputBuffer` and
-`FluxInputBuffer` may have different capacities and selection strategies.
+Preparation and FLUX training interleave throughout the run. The initial FIFO
+queue is in-memory state owned by `run_single_gpu_training`; it is not an
+offline cache and does not persist across runs. A separate `NvarcInputBuffer`
+is deferred until lookahead bucketing is implemented.
 
 ## Initial single-GPU scheduling policy
 
@@ -99,40 +101,44 @@ The first implementation is consumer-first and uses the simplest physical
 execution:
 
 ```text
-NvarcInputBuffer selection = FIFO
-NvarcBatch size            = 1 sequence
-FluxMicrobatch size        = 1 input
-OptimizerBatch size        = configured target count B
+Input source        = one DataLoader or dataset sample stream
+NvarcBatch size     = 1 sequence
+FluxMicrobatch size = configured physical target count M
+OptimizerBatch size = configured logical target count B
+Run length          = exact max_optimizer_steps
 ```
 
 The trainer always prefers a parameter update over producing more staged
 inputs:
 
 ```python
-while training_not_finished:
-    if flux_input_buffer.has_complete_optimizer_batch():
+for sample in training_samples:
+    flux_input_buffer.extend(prepare_flux_inputs(sample))
+
+    while len(flux_input_buffer) >= optimizer_batch_size:
         train_one_optimizer_batch()
-    elif nvarc_work_remains:
-        fill_nvarc_input_buffer()
-        run_one_nvarc_batch_and_prepare_flux_inputs()
-    elif flux_input_buffer:
-        train_final_optimizer_batch()
-    else:
+        if optimizer_steps == max_optimizer_steps:
+            break
+
+    if optimizer_steps == max_optimizer_steps:
         break
+
+if sample_stream_exhausted and flux_input_buffer:
+    train_final_optimizer_batch()
 ```
 
-`fill_nvarc_input_buffer` reads ARC sequences up to its configured capacity.
-Because the initial `NvarcBatch` size is one, it removes the oldest sequence.
-One frozen NVARC forward and the required frozen VAE work then append all of
-that sequence's eligible inputs to the `FluxInputBuffer`. The loop immediately
-checks again whether a complete `OptimizerBatch` can be trained.
+The sample stream normally comes from a DataLoader over `ArcTrainingDataset`.
+Each sample runs through one frozen NVARC forward and the required frozen VAE
+work, then appends all of its eligible inputs to the internal FIFO queue. The
+loop immediately consumes every available complete `OptimizerBatch` before it
+requests another sample.
 
 For example, let `S1`, `S2`, and `S3` produce two, three, and one FLUX inputs,
 respectively. With optimizer batch size four and FLUX microbatch size one:
 
-| Action | `NvarcInputBuffer` | `FluxInputBuffer` |
+| Action | Remaining sample stream | Internal `FluxInput` queue |
 | --- | --- | --- |
-| Initial fill | `S1, S2, S3` | empty |
+| Initial state | `S1, S2, S3` | empty |
 | Prepare `S1` | `S2, S3` | `S1-T1, S1-T2` |
 | Prepare `S2` | `S3` | `S1-T1, S1-T2, S2-T1, S2-T2, S2-T3` |
 | Select update | `S3` | retain `S2-T3` |
@@ -142,9 +148,10 @@ The selected `OptimizerBatch` is
 `FluxMicrobatch` objects, each scaled by `1 / 4`, followed by one
 `optimizer.step()`. Preparation then resumes because only `S2-T3` remains.
 
-At epoch exhaustion, any remaining inputs form a smaller final
-`OptimizerBatch` and use its actual size as the loss denominator. The
-correctness reference never drops eligible inputs.
+If the sample stream ends before the configured step limit, any remaining
+inputs form one smaller final `OptimizerBatch` and use its actual size as the
+loss denominator. Reaching `max_optimizer_steps` instead stops immediately:
+the loop performs no extra tail update and requests no additional sample.
 
 ## Which FLUX inputs are trained
 
@@ -171,7 +178,7 @@ accepted ARC sequences, eligible FLUX inputs, and excluded targets.
 The seeded sampler and the target positions inside each
 `ArcTokenizedTrainingSample` define the stable logical input order. The initial
 FIFO scheduler preserves that order outside the model objects; `FluxInput`
-does not duplicate sampler, epoch, task, or augmentation metadata.
+does not duplicate sampler, task, or augmentation metadata.
 
 The next `OptimizerBatch` is selected from this order before any FLUX backward
 call. NVARC and VAE preparation may run in a different physical order. The
@@ -305,8 +312,8 @@ and end-to-end throughput comparisons with the preceding validated path.
 
 - NVARC and the VAE remain frozen; the complete FLUX transformer is trainable.
 - A FLUX input sees only its recorded end-exclusive conditioning prefix.
-- Every eligible input is consumed exactly once under the configured epoch
-  policy.
+- Every input selected for an optimizer batch is consumed exactly once.
+- Reaching `max_optimizer_steps` never triggers an additional tail update.
 - Physical grouping never changes optimizer target membership or weight.
 - Padded NVARC and FLUX text positions are masked and excluded from stored
   sequence states.
@@ -341,8 +348,15 @@ single-source `prepare_flux_inputs`, explicit `NvarcSequenceState` ownership,
 pure `pad_flux_text_prefixes`, and transactional `build_flux_microbatch`
 assembly. `compute_flux_microbatch_loss` now composes flow sampling, joint-mask
 construction, one trainable FLUX forward, and the unscaled velocity loss. The
-old fused step, loop, and training entrypoint are not part of this path.
-`FluxInputBuffer`, optimizer-batch selection, loss scaling, backward and
-optimizer execution, and the consumer-first scheduler remain the next
-implementation layers. A separate `NvarcInputBuffer` remains unnecessary while
-NVARC batch size is one and no lookahead bucketing is used.
+step-limited `run_single_gpu_training` loop now consumes an
+`ArcTokenizedTrainingSample` stream, maintains its private FIFO queue, forms
+optimizer and FLUX microbatches, scales losses, accumulates gradients, performs
+optimizer updates, flushes only a true stream tail, and exposes an optional
+backend-neutral update callback. A separate `NvarcInputBuffer` remains
+unnecessary while NVARC batch size is one and no lookahead bucketing is used.
+The initial offline `train_single_gpu.py` entrypoint and strict JSON run
+configuration now compose these pieces without changing their ownership. The
+single-GPU path keeps persistent FLUX parameters, gradients, and AdamW state in
+FP32 while executing the FLUX forward under BF16 autocast. A real CUDA
+end-to-end precision and memory preflight, logging system, gradient diagnostics,
+and checkpointing remain subsequent implementation layers.

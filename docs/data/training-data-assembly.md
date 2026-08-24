@@ -395,19 +395,20 @@ The script constructs deterministic identity samples, prints the candidate and
 selected prefix cuts, shows source offsets and target mappings, reports tensor
 properties, and explicitly runs `validate_packed_training_batch`.
 
-## Current non-goals
+## Responsibility boundary
 
-The implemented dataset and collator intentionally do not yet provide:
+The implemented dataset and collator intentionally do not own:
 
 - a validation or inference dataset;
 - a custom length-aware or cost-aware sampler;
 - accelerator transfer or automatic pinned-memory traversal;
 - a true variable-length NVARC attention path or length-bucket scheduler;
-- downstream FLUX loss, gradient, and update validation of NVARC prefix reuse;
 - alternate flow-timestep densities or timestep-dependent loss weighting;
-- `NvarcInputBuffer`, `FluxInputBuffer`, and optimizer-batch scheduling;
-- complete FLUX execution or optimization;
+- FLUX input buffering, optimizer-batch scheduling, or model execution;
 - distributed sampling or optimizer-batch accounting.
 
-Those pieces should be added around the stable host contract in measured,
-independently testable stages.
+These responsibilities remain separate from the stable host contract. The
+current training-side path already provides frozen-model preparation, FLUX
+microbatch assembly, flow loss computation, and the initial step-limited
+single-GPU FIFO loop. Length-aware scheduling, distributed sampling, and the
+remaining run infrastructure stay future measured stages.
