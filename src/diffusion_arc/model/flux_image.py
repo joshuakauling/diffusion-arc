@@ -7,10 +7,7 @@ from torch import Tensor, nn
 
 from .contracts import (
     TARGET_LATENT_CHANNELS,
-    TARGET_LATENT_HEIGHT,
     TARGET_LATENT_TOKEN_COUNT,
-    TARGET_LATENT_WIDTH,
-    EncodedTargetLatents,
 )
 
 
@@ -77,29 +74,6 @@ def _patchify_latents(latents: Tensor) -> Tensor:
     )
 
 
-def _target_image_position_ids(batch_size: int, device: torch.device) -> Tensor:
-    """Return fixed ``(0, h, w, 0)`` coordinates for all target tokens."""
-
-    position_ids = torch.zeros(
-        (TARGET_LATENT_HEIGHT, TARGET_LATENT_WIDTH, 4),
-        dtype=torch.int64,
-        device=device,
-    )
-    position_ids[:, :, 1] = torch.arange(
-        TARGET_LATENT_HEIGHT,
-        device=device,
-    ).unsqueeze(1)
-    position_ids[:, :, 2] = torch.arange(
-        TARGET_LATENT_WIDTH,
-        device=device,
-    ).unsqueeze(0)
-    return position_ids.reshape(1, TARGET_LATENT_TOKEN_COUNT, 4).expand(
-        batch_size,
-        -1,
-        -1,
-    )
-
-
 class FluxVaeEncoder(nn.Module):
     """Encode target canvases through a permanently frozen FLUX.2 VAE."""
 
@@ -122,7 +96,7 @@ class FluxVaeEncoder(nn.Module):
         self.vae.eval()
         return self
 
-    def forward(self, target_images: Tensor) -> EncodedTargetLatents:
+    def forward(self, target_images: Tensor) -> Tensor:
         """Encode trusted target canvases into clean packed FLUX latents."""
 
         device, dtype = _module_input_device_and_dtype(self.vae)
@@ -158,13 +132,7 @@ class FluxVaeEncoder(nn.Module):
                 TARGET_LATENT_TOKEN_COUNT,
             ).transpose(1, 2).contiguous()
 
-        return EncodedTargetLatents(
-            clean_latents=clean_latents,
-            image_position_ids=_target_image_position_ids(
-                images.shape[0],
-                clean_latents.device,
-            ),
-        )
+        return clean_latents
 
 
 __all__ = ["FluxVaeEncoder"]

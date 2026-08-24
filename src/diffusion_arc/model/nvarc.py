@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from .contracts import (
     NVARC_HIDDEN_STATE_INDICES,
     NVARC_PAD_TOKEN_ID,
-    PackedNvarcHiddenStates,
+    NvarcBatchOutput,
 )
 
 
@@ -58,8 +58,8 @@ class NvarcBatchRunner(nn.Module):
         self,
         input_ids: Tensor,
         sequence_offsets: Tensor,
-    ) -> PackedNvarcHiddenStates:
-        """Encode all complete sources and return their compact hidden states."""
+    ) -> NvarcBatchOutput:
+        """Encode all complete sources into independent compact tensors."""
 
         offsets = sequence_offsets.tolist()
         source_lengths = tuple(
@@ -100,24 +100,20 @@ class NvarcBatchRunner(nn.Module):
                 return_dict=True,
             )
 
-        padded_context = torch.cat(
-            tuple(
-                output.hidden_states[hidden_state_index]
-                for hidden_state_index in NVARC_HIDDEN_STATE_INDICES
-            ),
-            dim=-1,
+        sequence_hidden_states = tuple(
+            torch.cat(
+                tuple(
+                    output.hidden_states[hidden_state_index][
+                        source_index, :source_length
+                    ]
+                    for hidden_state_index in NVARC_HIDDEN_STATE_INDICES
+                ),
+                dim=-1,
+            )
+            for source_index, source_length in enumerate(source_lengths)
         )
-
-        compact_context = torch.cat(
-            [
-                padded_context[source_index, :source_length]
-                for source_index, source_length in enumerate(source_lengths)
-            ],
-            dim=0,
-        )
-        return PackedNvarcHiddenStates(
-            hidden_states=compact_context,
-            sequence_offsets=sequence_offsets,
+        return NvarcBatchOutput(
+            sequence_hidden_states=sequence_hidden_states,
         )
 
 

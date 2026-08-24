@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 import unittest
 
@@ -16,7 +15,6 @@ from diffusion_arc.model import (
     TARGET_LATENT_SHAPE,
     TARGET_LATENT_TOKEN_COUNT,
     TARGET_LATENT_WIDTH,
-    EncodedTargetLatents,
     FluxVaeEncoder,
 )
 
@@ -117,36 +115,17 @@ class FluxVaeEncoderTests(unittest.TestCase):
         self.assertEqual(TARGET_LATENT_TOKEN_COUNT, 900)
         self.assertEqual(TARGET_LATENT_SHAPE, (900, 128))
 
-    def test_patches_normalizes_flattens_and_builds_position_ids(self) -> None:
+    def test_patches_normalizes_and_flattens_latents(self) -> None:
         vae = FakeFluxVae(batch_size=2)
         encoder = FluxVaeEncoder(vae)
 
         result = encoder(_target_images(batch_size=2))
 
-        self.assertIsInstance(result, EncodedTargetLatents)
-        self.assertEqual(result.clean_latents.shape, (2, *TARGET_LATENT_SHAPE))
+        self.assertIsInstance(result, Tensor)
+        self.assertEqual(result.shape, (2, *TARGET_LATENT_SHAPE))
         torch.testing.assert_close(
-            result.clean_latents,
+            result,
             _reference_clean_latents(vae, batch_size=2),
-        )
-        self.assertEqual(result.image_position_ids.shape, (2, 900, 4))
-        self.assertEqual(result.image_position_ids.dtype, torch.int64)
-        torch.testing.assert_close(
-            result.image_position_ids[0, (0, 1, 29, 30, 899), :],
-            torch.tensor(
-                [
-                    [0, 0, 0, 0],
-                    [0, 0, 1, 0],
-                    [0, 0, 29, 0],
-                    [0, 1, 0, 0],
-                    [0, 29, 29, 0],
-                ],
-                dtype=torch.int64,
-            ),
-        )
-        torch.testing.assert_close(
-            result.image_position_ids[0],
-            result.image_position_ids[1],
         )
 
     def test_freezes_vae_and_uses_posterior_mode_without_grad(self) -> None:
@@ -166,8 +145,8 @@ class FluxVaeEncoderTests(unittest.TestCase):
         self.assertEqual(vae.posterior_mode_calls, 1)
         self.assertEqual(vae.seen_training_modes, [False])
         self.assertEqual(vae.seen_grad_modes, [False])
-        self.assertFalse(result.clean_latents.requires_grad)
-        self.assertIsNone(result.clean_latents.grad_fn)
+        self.assertFalse(result.requires_grad)
+        self.assertIsNone(result.grad_fn)
 
     def test_casts_images_to_vae_dtype(self) -> None:
         vae = FakeFluxVae(dtype=torch.float64)
@@ -177,26 +156,17 @@ class FluxVaeEncoderTests(unittest.TestCase):
 
         self.assertIsNotNone(vae.last_images)
         self.assertEqual(vae.last_images.dtype, torch.float64)
-        self.assertEqual(result.clean_latents.dtype, torch.float64)
+        self.assertEqual(result.dtype, torch.float64)
 
     def test_latents_support_downstream_parameter_gradients(self) -> None:
         vae = FakeFluxVae()
         result = FluxVaeEncoder(vae)(_target_images())
         projection = nn.Linear(TARGET_LATENT_CHANNELS, 1)
 
-        projection(result.clean_latents).square().mean().backward()
+        projection(result).square().mean().backward()
 
         self.assertIsNotNone(projection.weight.grad)
         self.assertTrue(all(parameter.grad is None for parameter in vae.parameters()))
-
-    def test_output_contract_is_frozen(self) -> None:
-        result = EncodedTargetLatents(
-            clean_latents=torch.zeros((1, *TARGET_LATENT_SHAPE)),
-            image_position_ids=torch.zeros((1, 900, 4), dtype=torch.int64),
-        )
-
-        with self.assertRaises(FrozenInstanceError):
-            result.clean_latents = torch.ones(1)  # type: ignore[misc]
 
     def test_rejects_incompatible_vae_interface(self) -> None:
         with self.assertRaises(TypeError):

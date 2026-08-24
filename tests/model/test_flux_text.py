@@ -11,39 +11,32 @@ import torch
 from diffusion_arc.model import (
     NVARC_CONTEXT_WIDTH,
     FluxTextInputs,
-    PackedNvarcHiddenStates,
     build_flux_joint_attention_mask,
-    prepare_flux_text_inputs,
+    pad_flux_text_prefixes,
 )
 
 
-def _packed_hidden_states(
+def _source_hidden_states(
     source_lengths: tuple[int, ...],
     *,
     random: bool = False,
-) -> tuple[PackedNvarcHiddenStates, tuple[torch.Tensor, ...]]:
-    offsets = [0]
+) -> tuple[torch.Tensor, ...]:
+    next_token = 10
     sources = []
     for source_length in source_lengths:
         if random:
             source = torch.randn(source_length, NVARC_CONTEXT_WIDTH)
         else:
             token_values = torch.arange(
-                offsets[-1] + 10,
-                offsets[-1] + source_length + 10,
+                next_token,
+                next_token + source_length,
                 dtype=torch.float32,
             )
             source = token_values.unsqueeze(1).expand(-1, NVARC_CONTEXT_WIDTH)
         sources.append(source)
-        offsets.append(offsets[-1] + source_length)
+        next_token += source_length
 
-    return (
-        PackedNvarcHiddenStates(
-            hidden_states=torch.cat(sources),
-            sequence_offsets=torch.tensor(offsets, dtype=torch.int64),
-        ),
-        tuple(sources),
-    )
+    return tuple(sources)
 
 
 def _tiny_flux_model():
@@ -64,12 +57,10 @@ def _tiny_flux_model():
 
 class FluxTextInputTests(unittest.TestCase):
     def test_builds_exact_prefixes_with_dynamic_right_padding(self) -> None:
-        packed, _ = _packed_hidden_states((5, 4))
+        sources = _source_hidden_states((5, 4))
 
-        result = prepare_flux_text_inputs(
-            packed,
-            target_sequence_indices=torch.tensor([0, 0, 1], dtype=torch.int64),
-            target_prefix_ends=torch.tensor([2, 5, 3], dtype=torch.int64),
+        result = pad_flux_text_prefixes(
+            (sources[0][:2], sources[0][:5], sources[1][:3]),
         )
 
         self.assertIsInstance(result, FluxTextInputs)
@@ -111,26 +102,16 @@ class FluxTextInputTests(unittest.TestCase):
         )
 
     def test_future_source_states_cannot_enter_an_earlier_prefix(self) -> None:
-        packed, _ = _packed_hidden_states((5, 4))
-        changed_hidden_states = packed.hidden_states.clone()
-        changed_hidden_states[2:5] = 1000.0
-        changed_hidden_states[8:9] = -1000.0
-        changed = PackedNvarcHiddenStates(
-            hidden_states=changed_hidden_states,
-            sequence_offsets=packed.sequence_offsets,
-        )
-        target_sequence_indices = torch.tensor([0, 1], dtype=torch.int64)
-        target_prefix_ends = torch.tensor([2, 3], dtype=torch.int64)
+        sources = _source_hidden_states((5, 4))
+        changed_sources = tuple(source.clone() for source in sources)
+        changed_sources[0][2:] = 1000.0
+        changed_sources[1][3:] = -1000.0
 
-        original_inputs = prepare_flux_text_inputs(
-            packed,
-            target_sequence_indices,
-            target_prefix_ends,
+        original_inputs = pad_flux_text_prefixes(
+            (sources[0][:2], sources[1][:3]),
         )
-        changed_inputs = prepare_flux_text_inputs(
-            changed,
-            target_sequence_indices,
-            target_prefix_ends,
+        changed_inputs = pad_flux_text_prefixes(
+            (changed_sources[0][:2], changed_sources[1][:3]),
         )
 
         torch.testing.assert_close(
@@ -170,12 +151,8 @@ class FluxTextInputTests(unittest.TestCase):
 
     def test_masked_batch_matches_unpadded_outputs_and_gradients(self) -> None:
         torch.manual_seed(7)
-        packed, sources = _packed_hidden_states((3, 5), random=True)
-        text_inputs = prepare_flux_text_inputs(
-            packed,
-            target_sequence_indices=torch.tensor([0, 1], dtype=torch.int64),
-            target_prefix_ends=torch.tensor([3, 5], dtype=torch.int64),
-        )
+        sources = _source_hidden_states((3, 5), random=True)
+        text_inputs = pad_flux_text_prefixes(sources)
         image_token_count = 3
         image_states = torch.randn(2, image_token_count, 8)
         image_ids = torch.zeros((2, image_token_count, 4), dtype=torch.int64)

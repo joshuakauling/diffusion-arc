@@ -63,30 +63,16 @@ class PackedTrainingBatch:
 
 
 @dataclass(frozen=True)
-class PackedNvarcHiddenStates:
-    """Unpadded NVARC hidden states retaining their source boundaries.
+class NvarcBatchOutput:
+    """Independent unpadded hidden-state tensors for one NVARC batch.
 
-    ``hidden_states`` contains every real source position in source-major order.
-    ``sequence_offsets`` is the unchanged offset tensor supplied to the NVARC
-    runner and therefore delimits the same ``S`` complete source sequences.
+    ``sequence_hidden_states`` follows the input source order and contains one
+    owning ``[L_s, 7680]`` tensor per complete source sequence. Different
+    sequence tensors do not share storage, so their lifetimes can be managed
+    independently after the physical NVARC batch has completed.
     """
 
-    hidden_states: Tensor
-    sequence_offsets: Tensor
-
-
-@dataclass(frozen=True)
-class EncodedTargetLatents:
-    """Clean transformer-facing target latents and their FLUX coordinates.
-
-    ``clean_latents`` contains one normalized packed VAE latent per target
-    exposure in the same order as ``PackedTrainingBatch.target_images``.
-    ``image_position_ids`` uses FLUX's four-axis ``(0, h, w, 0)`` target-image
-    coordinates.
-    """
-
-    clean_latents: Tensor
-    image_position_ids: Tensor
+    sequence_hidden_states: tuple[Tensor, ...]
 
 
 @dataclass(frozen=True)
@@ -268,10 +254,9 @@ __all__ = [
     "TARGET_LATENT_SHAPE",
     "TARGET_LATENT_TOKEN_COUNT",
     "TARGET_LATENT_WIDTH",
-    "EncodedTargetLatents",
     "FlowMatchingBatch",
     "FluxTextInputs",
-    "PackedNvarcHiddenStates",
+    "NvarcBatchOutput",
     "PackedTrainingBatch",
     "validate_packed_source_sequences",
     "validate_packed_training_batch",

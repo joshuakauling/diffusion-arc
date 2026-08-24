@@ -28,7 +28,7 @@ from diffusion_arc.model import NvarcBatchRunner
 
 
 nvarc_runner = NvarcBatchRunner(nvarc_model)
-packed_hidden_states = nvarc_runner(
+nvarc_output = nvarc_runner(
     input_ids=batch.input_ids,
     sequence_offsets=batch.sequence_offsets,
 )
@@ -45,17 +45,24 @@ collation path:
 It returns:
 
 ```python
-PackedNvarcHiddenStates(
-    hidden_states=...,      # [T, 7680]
-    sequence_offsets=...,   # the original input tensor
+NvarcBatchOutput(
+    sequence_hidden_states=(
+        ...,  # [L_0, 7680]
+        ...,  # [L_1, 7680]
+    ),
 )
 ```
 
-The returned `sequence_offsets` field is the same tensor object passed to the
-runner. Hidden states reside on the NVARC output device; offsets retain their
-original device. This allows CPU-side boundaries from the collator to remain an
-unchanged audit record while the compact hidden states remain on the model
-device.
+`sequence_hidden_states` follows input source order and contains one unpadded
+tensor per complete source. Every tensor owns independent storage; it is not a
+view into one larger packed result. Sequence boundaries are therefore resolved
+once inside the runner rather than carried into the target-aware training
+path. Hidden states reside on the NVARC output device.
+
+Independent ownership is intentional. All targets belonging to one ARC source
+can share that source's tensor, while the tensor can be released as soon as its
+last dependent target has entered a physical FLUX microbatch. Releasing one
+source never keeps unrelated sources from the same NVARC batch alive.
 
 ## Fixed NVARC contract
 
@@ -86,9 +93,8 @@ flat input_ids [T]
   -> build bool attention_mask with true only at real positions
   -> one frozen NVARC forward with batch size S
   -> select hidden_states[9], [18], and [27]
-  -> concatenate on the feature axis to [S, max(L_s), 7680]
-  -> remove every padded position
-  -> compact hidden_states [T, 7680]
+  -> for each source, concatenate its real positions to [L_s, 7680]
+  -> return S independent owning tensors in source order
 ```
 
 The NVARC call explicitly requests hidden states, disables the key/value cache,
@@ -119,53 +125,84 @@ for diagnostics and tests.
 
 ## Target boundary
 
-The runner never receives `target_sequence_indices` or `target_prefix_ends`.
-Those tensors belong to a later target-aware operation:
+The runner never receives target identities, prefix boundaries, target images,
+or FLUX state. Target-aware ownership and prefix selection happen later:
 
 ```text
-PackedNvarcHiddenStates
-  + target_sequence_indices
-  + target_prefix_ends
-  -> exact per-target conditioning prefixes
+NvarcBatchOutput.sequence_hidden_states[source_index]
+  -> one NvarcSequenceState per source
+  + one relative prefix_end per FluxInput
+  -> exact prefix hidden_states[:prefix_end]
 ```
 
 Keeping this operation separate ensures that NVARC always processes each
 collated complete source once and cannot acquire dependencies on target images
 or FLUX execution policy.
 
-That target-aware operation is now implemented by `prepare_flux_text_inputs`.
-It derives the exact recorded prefixes, dynamically right-pads a physical FLUX
-text microbatch, and returns its text mask and position IDs. Its contract and
-remaining real-model checks are documented in
+The initial single-source preparation path wraps the returned source tensor in
+`NvarcSequenceState`. Each `FluxInput` stores only a reference to that owner and
+its relative `prefix_end`. `build_flux_microbatch` obtains exact prefix views,
+and the pure `pad_flux_text_prefixes` operation copies them into the independent
+padded FLUX text tensor. Their contracts and remaining real-model checks are
+documented in
 [`flux-text-conditioning.md`](flux-text-conditioning.md).
 
-## Remaining real-checkpoint validation
+## Measured real-checkpoint preflight and interpretation
 
 Local fake-model tests cannot establish the numerical behavior of the released
-NVARC checkpoint or its CUDA attention backend. A separate offline Colab smoke
-or preflight experiment must record the checkpoint revision, Transformers
-version, precision, attention backend, and GPU, then compare:
+NVARC checkpoint or its CUDA attention backend. The explicit real-checkpoint
+preflight therefore covered two separate questions:
 
-1. each sequence run alone versus the same sequence in a right-padded batch;
-2. real positions only, excluding every padded output;
-3. the exact dtypes and shapes of hidden states 9, 18, and 27; and
-4. full-sequence prefix states versus separately executed truncated prefixes.
+1. whether real-token hidden states from a right-padded NVARC batch agree with
+   the same sequences executed individually without padding; and
+2. whether a prefix sliced from a complete causal source forward agrees with a
+   separately executed truncated-prefix forward.
 
-No prefix reuse should be connected to FLUX until those comparisons meet a
-predeclared numerical tolerance. This experiment is run explicitly for the
-checkpoint and execution environment; the runner neither detects a "first"
-forward nor caches a preflight result inside the training path.
+The first comparison was a broad, environment-specific numerical check rather
+than evidence of an unresolved expectation that NVARC lacked padding-mask
+support. NVARC already exposes the standard `attention_mask` path used by the
+runner. The project's separate attention-mask concern arose at the FLUX
+boundary: the original inference path did not expose the padding-mask route
+needed for variable-length text batching, while the pinned Diffusers
+implementation does. That FLUX-specific contract and its tests are documented
+in [`flux-text-conditioning.md`](flux-text-conditioning.md).
 
 [`experiments/nvarc_batch_preflight_colab.ipynb`](../../experiments/nvarc_batch_preflight_colab.ipynb)
-implements that real-checkpoint preflight with two differently sized synthetic
-ARC sources and multiple target prefixes per source. It loads only the NVARC
-checkpoint already present in Google Drive, runs the selected states both
-individually and concatenated, and writes a timestamped JSON report before its
-final pass/fail assertion. The optional 8192-token capacity probe is disabled by
-default and is not part of the causal-equivalence verdict.
+ran both NVARC comparisons with two differently sized synthetic ARC sources and
+multiple target prefixes per source. It used the released checkpoint in BF16,
+the SDPA attention implementation, Transformers 4.56.1, and an NVIDIA A100. The
+runner's structural checks all passed: shapes, dtypes, selected layers, packed
+offsets, finite values, frozen parameters, and evaluation mode matched the
+then-current contract. The retained notebook and report use the earlier packed
+output surface; their numerical comparisons remain relevant, while their
+structural output fields do not validate the current tuple contract.
 
-This Colab result complements rather than replaces the local unit tests. Local
-tests establish deterministic packing and interface behavior with a fake model;
-the Colab report establishes checkpoint-, backend-, precision-, and GPU-specific
-numerical evidence. A new report is required whenever any of those execution
-variables changes.
+The predeclared elementwise `torch.allclose` gate used `atol=0.05` and
+`rtol=0.02`. It returned `False` for the nontrivial padded and truncated-prefix
+comparisons, so the historical report correctly retains the formal status
+`FAIL`. That status must not be interpreted as padding, masking, or causal
+prefix reuse being functionally broken. One out-of-tolerance element is enough
+to fail a complete `[T,2560]` tensor, and the concatenated `7680` records repeat
+the same three selected-layer differences rather than representing independent
+failures.
+
+The diagnostic measurements show near-equivalent representations despite the
+hard gate: every tensor was finite, cosine similarities ranged from
+`0.99999648` to `1.0`, and mean absolute errors ranged from approximately
+`0.0026` to `0.0368`. The much larger isolated maximum absolute errors therefore
+dominate the binary result without describing the typical error. The accepted
+engineering interpretation is that right-padded NVARC batching and complete-
+source prefix reuse are operationally valid in the tested BF16/SDPA environment,
+but they are not elementwise identical under the original tolerance.
+
+The retained
+[`report.json`](../../experiments/results/nvarc-batch-preflight/20260819T160051Z/report.json)
+records the exact environment, aggregate errors, and formal verdict. This
+post-run interpretation does not retroactively change the predeclared
+acceptance criterion. Before treating the optimization as fully validated for a
+learning experiment, a downstream comparison should measure FLUX outputs,
+losses, gradients, and parameter updates against exact unpadded and separately
+executed-prefix references. A new NVARC report is also required whenever the
+checkpoint, Transformers version, precision, attention backend, or GPU family
+changes. The optional 8192-token capacity probe remained disabled and was not
+part of the result.

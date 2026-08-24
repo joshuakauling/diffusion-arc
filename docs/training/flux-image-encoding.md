@@ -5,16 +5,14 @@
 `FluxVaeEncoder` is the implemented boundary between canonical ARC target
 canvases and clean transformer-facing FLUX latents. It executes the frozen
 FLUX.2 VAE in evaluation mode, uses the posterior mode, applies FLUX.2's native
-2×2 packing and frozen BatchNorm normalization, and emits target-image position
-IDs.
+2×2 packing and frozen BatchNorm normalization, and returns the clean latents.
 
 The implementation lives in
 [`src/diffusion_arc/model/flux_image.py`](../../src/diffusion_arc/model/flux_image.py).
-Its immutable `EncodedTargetLatents` output contract lives in
-[`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 
 This component does not choose the palette, sample flow noise or timesteps,
-construct a noisy state, execute the FLUX transformer, or compute a loss.
+construct image position IDs or a noisy state, execute the FLUX transformer, or
+compute a loss.
 
 ## Fixed input representation
 
@@ -60,17 +58,16 @@ parent training module calls `train(True)`.
 
 ## Output contract
 
-The returned value is:
+The returned value is one tensor:
 
 ```python
-EncodedTargetLatents(
-    clean_latents=...,       # [K, 900, 128], VAE floating dtype
-    image_position_ids=...,  # [K, 900, 4], torch.int64
-)
+clean_latents  # [K, 900, 128], VAE floating dtype
 ```
 
-Target order is unchanged from `PackedTrainingBatch.target_images`. Position
-IDs follow FLUX's four-axis target convention:
+Target order is unchanged from the supplied target images. The fixed
+target-image coordinates are independent of VAE encoding and are therefore
+generated later by `build_flux_microbatch`. They follow FLUX's four-axis target
+convention:
 
 ```text
 (t, h, w, l) = (0, h, w, 0),  h,w in [0,29]
@@ -92,11 +89,13 @@ Unit tests establish:
 
 - exact 2×2 channel order and row-major token order;
 - BatchNorm normalization and `[K,900,128]` output shape;
-- `(0,h,w,0)` position IDs;
 - posterior-mode execution under `no_grad()`;
 - permanent VAE freezing and evaluation mode;
 - VAE dtype transfer; and
 - downstream trainable-parameter gradients without VAE gradients.
+
+The microbatch tests independently establish the fixed `(0,h,w,0)` image
+coordinates.
 
 ## Measured real-checkpoint preflight
 
@@ -109,7 +108,6 @@ cache; no download occurred.
 Measured results:
 
 - clean latent shape: `[2,900,128]`;
-- position-ID shape: `[2,900,4]`;
 - all clean latents finite;
 - maximum absolute difference from the pinned Diffusers reference: `0.0`;
 - maximum absolute difference across two encoder calls: `0.0`;

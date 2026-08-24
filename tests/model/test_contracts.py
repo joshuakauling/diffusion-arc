@@ -21,7 +21,7 @@ from diffusion_arc.model import (
     TARGET_IMAGE_HEIGHT,
     TARGET_IMAGE_SHAPE,
     TARGET_IMAGE_WIDTH,
-    PackedNvarcHiddenStates,
+    NvarcBatchOutput,
     PackedTrainingBatch,
     validate_packed_source_sequences,
     validate_packed_training_batch,
@@ -87,14 +87,13 @@ class PackedContractTests(unittest.TestCase):
 
         self.assertEqual(source_lengths, (2, 5, 2))
 
-    def test_packed_nvarc_hidden_state_contract_is_frozen(self) -> None:
-        packed = PackedNvarcHiddenStates(
-            hidden_states=torch.zeros((2, NVARC_CONTEXT_WIDTH)),
-            sequence_offsets=torch.tensor([0, 2], dtype=torch.int64),
+    def test_nvarc_batch_output_contract_is_frozen(self) -> None:
+        output = NvarcBatchOutput(
+            sequence_hidden_states=(torch.zeros((2, NVARC_CONTEXT_WIDTH)),),
         )
 
         with self.assertRaises(FrozenInstanceError):
-            packed.hidden_states = torch.ones(1)  # type: ignore[misc]
+            output.sequence_hidden_states = ()  # type: ignore[misc]
 
     def test_one_source_can_expose_multiple_targets(self) -> None:
         validate_packed_training_batch(_make_training_batch())

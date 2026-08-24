@@ -1,51 +1,49 @@
-"""Target-aware preparation of frozen NVARC prefixes for FLUX text input."""
+"""Dynamic padding and attention masks for exact FLUX text prefixes."""
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import torch
 from torch import Tensor
 
-from .contracts import FluxTextInputs, PackedNvarcHiddenStates
+from .contracts import FluxTextInputs
 
 
-def prepare_flux_text_inputs(
-    packed_hidden_states: PackedNvarcHiddenStates,
-    target_sequence_indices: Tensor,
-    target_prefix_ends: Tensor,
+def pad_flux_text_prefixes(
+    hidden_state_prefixes: Sequence[Tensor],
 ) -> FluxTextInputs:
-    """Build a dynamically right-padded FLUX text microbatch.
+    """Right-pad exact NVARC prefixes into one FLUX text batch.
 
-    Inputs are trusted internal contracts produced by the validated collation
-    and frozen-NVARC paths. Target order is preserved exactly.
+    Prefix selection and ownership remain training-side concerns. This pure
+    tensor operation trusts a non-empty sequence of compatible exact prefixes
+    and preserves their order.
     """
 
-    offsets = packed_hidden_states.sequence_offsets.tolist()
-    source_indices = target_sequence_indices.tolist()
-    prefix_ends = target_prefix_ends.tolist()
-    target_count = len(prefix_ends)
-    max_prefix_length = max(prefix_ends)
+    prefix_lengths = tuple(prefix.shape[0] for prefix in hidden_state_prefixes)
+    target_count = len(hidden_state_prefixes)
+    max_prefix_length = max(prefix_lengths)
 
-    hidden_states = packed_hidden_states.hidden_states
-    encoder_hidden_states = hidden_states.new_zeros(
-        (target_count, max_prefix_length, hidden_states.shape[-1])
+    reference_prefix = hidden_state_prefixes[0]
+    encoder_hidden_states = reference_prefix.new_zeros(
+        (target_count, max_prefix_length, reference_prefix.shape[-1])
     )
 
-    for target_index, (source_index, prefix_end) in enumerate(
-        zip(source_indices, prefix_ends, strict=True)
-    ):
-        source_start = offsets[source_index]
-        encoder_hidden_states[target_index, :prefix_end] = hidden_states[
-            source_start : source_start + prefix_end
-        ]
+    for target_index, prefix in enumerate(hidden_state_prefixes):
+        encoder_hidden_states[target_index, : prefix.shape[0]] = prefix
 
-    positions = torch.arange(max_prefix_length, device=hidden_states.device)
-    prefix_lengths = target_prefix_ends.to(device=hidden_states.device)
-    text_attention_mask = positions.unsqueeze(0) < prefix_lengths.unsqueeze(1)
+    positions = torch.arange(max_prefix_length, device=reference_prefix.device)
+    prefix_length_tensor = torch.tensor(
+        prefix_lengths,
+        dtype=torch.int64,
+        device=reference_prefix.device,
+    )
+    text_attention_mask = positions.unsqueeze(0) < prefix_length_tensor.unsqueeze(1)
 
     text_position_ids = torch.zeros(
         (target_count, max_prefix_length, 4),
         dtype=torch.int64,
-        device=hidden_states.device,
+        device=reference_prefix.device,
     )
     text_position_ids[:, :, 3] = positions
 
@@ -74,4 +72,4 @@ def build_flux_joint_attention_mask(
     return key_attention_mask[:, None, None, :]
 
 
-__all__ = ["build_flux_joint_attention_mask", "prepare_flux_text_inputs"]
+__all__ = ["build_flux_joint_attention_mask", "pad_flux_text_prefixes"]

@@ -14,8 +14,8 @@ from diffusion_arc.model import (
     NVARC_HIDDEN_SIZE,
     NVARC_HIDDEN_STATE_INDICES,
     NVARC_PAD_TOKEN_ID,
+    NvarcBatchOutput,
     NvarcBatchRunner,
-    PackedNvarcHiddenStates,
 )
 
 
@@ -79,7 +79,9 @@ class NvarcBatchRunnerTests(unittest.TestCase):
             ("self", "input_ids", "sequence_offsets"),
         )
 
-    def test_batches_variable_lengths_and_returns_compact_hidden_states(self) -> None:
+    def test_batches_variable_lengths_and_returns_independent_sequence_states(
+        self,
+    ) -> None:
         model = FakeNvarc()
         runner = NvarcBatchRunner(model)
         input_ids = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int64)
@@ -87,9 +89,16 @@ class NvarcBatchRunnerTests(unittest.TestCase):
 
         result = runner(input_ids, sequence_offsets)
 
-        self.assertIsInstance(result, PackedNvarcHiddenStates)
-        self.assertIs(result.sequence_offsets, sequence_offsets)
-        self.assertEqual(result.hidden_states.shape, (6, NVARC_CONTEXT_WIDTH))
+        self.assertIsInstance(result, NvarcBatchOutput)
+        self.assertEqual(len(result.sequence_hidden_states), 2)
+        self.assertEqual(
+            [tuple(states.shape) for states in result.sequence_hidden_states],
+            [(2, NVARC_CONTEXT_WIDTH), (4, NVARC_CONTEXT_WIDTH)],
+        )
+        self.assertNotEqual(
+            result.sequence_hidden_states[0].untyped_storage().data_ptr(),
+            result.sequence_hidden_states[1].untyped_storage().data_ptr(),
+        )
         self.assertEqual(model.forward_calls, 1)
         torch.testing.assert_close(
             model.last_input_ids,
@@ -114,13 +123,20 @@ class NvarcBatchRunnerTests(unittest.TestCase):
         self.assertFalse(model.last_use_cache)
         self.assertTrue(model.last_return_dict)
 
-        expected_tokens = input_ids.to(torch.float32)
-        for chunk_index, hidden_state_index in enumerate(NVARC_HIDDEN_STATE_INDICES):
-            chunk_start = chunk_index * NVARC_HIDDEN_SIZE
-            torch.testing.assert_close(
-                result.hidden_states[:, chunk_start],
-                expected_tokens + float(hidden_state_index),
-            )
+        expected_sources = (input_ids[:2], input_ids[2:])
+        for sequence_states, expected_tokens in zip(
+            result.sequence_hidden_states,
+            expected_sources,
+            strict=True,
+        ):
+            for chunk_index, hidden_state_index in enumerate(
+                NVARC_HIDDEN_STATE_INDICES
+            ):
+                chunk_start = chunk_index * NVARC_HIDDEN_SIZE
+                torch.testing.assert_close(
+                    sequence_states[:, chunk_start],
+                    expected_tokens.to(torch.float32) + float(hidden_state_index),
+                )
 
     def test_freezes_model_and_keeps_eval_mode(self) -> None:
         model = FakeNvarc().train()
@@ -141,8 +157,12 @@ class NvarcBatchRunnerTests(unittest.TestCase):
 
         self.assertEqual(model.seen_training_modes, [False])
         self.assertEqual(model.seen_grad_modes, [False])
-        self.assertFalse(result.hidden_states.requires_grad)
-        self.assertIsNone(result.hidden_states.grad_fn)
+        self.assertTrue(
+            all(
+                not hidden_states.requires_grad and hidden_states.grad_fn is None
+                for hidden_states in result.sequence_hidden_states
+            )
+        )
 
     def test_fails_clearly_without_input_embedding_interface(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "input embeddings"):
