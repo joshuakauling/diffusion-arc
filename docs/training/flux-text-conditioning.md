@@ -2,54 +2,49 @@
 
 ## Status and scope
 
-`prepare_flux_text_inputs` is the implemented target-aware boundary between
-compact frozen-NVARC hidden states and a physical FLUX text microbatch. It
-derives only the conditioning prefix recorded for each target exposure, pads
-the resulting prefixes to the longest one in that microbatch, and records which
-positions are real.
+`pad_flux_text_prefixes` is the implemented pure tensor boundary between exact
+frozen-NVARC prefix tensors and the padded text portion of a physical FLUX
+microbatch. It pads the supplied prefixes to the longest one in that
+microbatch and records which positions are real.
 
-This component does not execute NVARC or FLUX. It does not receive target
-images, latents, noise, or flow timesteps. Image preparation and the complete
-FLUX forward remain separate stages.
+This model-side component does not select prefixes, own NVARC state, execute
+NVARC or FLUX, or receive target images, latents, noise, or flow timesteps.
+Prefix selection and lifetime management belong to the training-side
+`build_flux_microbatch` operation.
 
 The implementation lives in
 [`src/diffusion_arc/model/flux_text.py`](../../src/diffusion_arc/model/flux_text.py),
 and the immutable `FluxTextInputs` contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 
-## Inputs and target boundary
+## Exact-prefix input
 
-The preparation function consumes trusted internal objects produced by the
-validated collation and frozen-NVARC paths:
+The padding function consumes a non-empty ordered sequence of exact prefix
+tensors:
 
 ```python
-from diffusion_arc.model import prepare_flux_text_inputs
+from diffusion_arc.model import pad_flux_text_prefixes
 
 
-text_inputs = prepare_flux_text_inputs(
-    packed_hidden_states,
-    batch.target_sequence_indices,
-    batch.target_prefix_ends,
+text_inputs = pad_flux_text_prefixes(
+    (
+        first_sequence_hidden_states[:first_prefix_end],
+        second_sequence_hidden_states[:second_prefix_end],
+    )
 )
 ```
 
-| Input | Shape and dtype | Meaning |
-| --- | --- | --- |
-| `packed_hidden_states.hidden_states` | `[T, 7680]`, floating point | Every real NVARC source position in source-major order. |
-| `packed_hidden_states.sequence_offsets` | `[S + 1]`, `torch.int64` | Source boundaries inside the compact hidden-state tensor. |
-| `target_sequence_indices` | `[K]`, `torch.int64` | Source belonging to each target exposure. |
-| `target_prefix_ends` | `[K]`, `torch.int64` | End-exclusive prefix length relative to that source. |
-
-For target `k`, the exact source span is:
+Each input has shape `[p_k, 7680]` and uses the same floating dtype and device.
+The function preserves input order. It trusts that the training-side caller
+already selected the correct end-exclusive prefix:
 
 ```python
-source_start = sequence_offsets[target_sequence_indices[k]]
-prefix = hidden_states[source_start : source_start + target_prefix_ends[k]]
+prefix = sequence_hidden_states[:prefix_end]
 ```
 
-No position after `target_prefix_ends[k]` is copied into that target's FLUX
-conditioning. Future assistant outputs therefore cannot enter an earlier
-target through the padding operation.
+There is no packed-source offset arithmetic at this boundary. No position after
+`prefix_end` is supplied or copied into that target's FLUX conditioning, so
+future assistant outputs cannot enter an earlier target through padding.
 
 ## Output contract
 
@@ -63,9 +58,9 @@ FluxTextInputs(
 )
 ```
 
-`encoder_hidden_states` preserves target-exposure order. Every real prefix is
-left-aligned and every remaining position is filled with zero. The floating
-dtype and device are inherited from the packed NVARC hidden states.
+`encoder_hidden_states` preserves the supplied prefix order. Every real prefix
+is left-aligned and every remaining position is filled with zero. The floating
+dtype and device are inherited from the first prefix.
 
 `text_attention_mask` is boolean. `True` marks a real prefix position and
 `False` marks right padding.
@@ -80,6 +75,34 @@ FLUX's four-axis text coordinates:
 Coordinates are generated through the padded length. Coordinates belonging to
 padding cannot affect a valid FLUX output when the corresponding keys remain
 masked.
+
+## Training-side ownership and microbatch construction
+
+`NvarcBatchRunner` returns one independent owning hidden-state tensor per ARC
+source. The initial training preparation wraps each source tensor in one
+`NvarcSequenceState`. All `FluxInput` objects produced from that source share
+the owner and store a relative `prefix_end`; they do not copy the complete
+hidden states.
+
+Prefix ends are strictly increasing within one source, so the owner uses its
+pending `prefix_end` values directly for lifetime bookkeeping.
+`build_flux_microbatch(flux_inputs)` performs the complete deterministic
+physical assembly:
+
+1. validate that every prefix is unique within its source and still pending;
+2. obtain each exact `hidden_states[:prefix_end]` view;
+3. call `pad_flux_text_prefixes` to copy those prefixes into an independent
+   padded `FluxTextInputs` tensor;
+4. stack the clean target latents and generate the fixed image position IDs;
+   and
+5. only after all construction succeeds, commit all consumed prefix ends
+   without another fallible operation.
+
+A failed build leaves every source state pending and available for diagnosis or
+retry. After the final dependent prefix is committed, the owner replaces its
+hidden-state reference with `None`. The completed `FluxMicrobatch` retains only
+its independently allocated padded text tensor and stacked image tensors, so it
+does not keep the source owner or its original hidden-state storage alive.
 
 ## Joint FLUX attention mask
 
@@ -119,9 +142,9 @@ The same attention kwargs reach its double-stream and single-stream blocks.
 
 ## Local correctness evidence
 
-The unit test constructs a random CPU FP32 `Flux2Transformer2DModel` with one
-double-stream block, one single-stream block, the production conditioning width
-of 7,680, and two prefix lengths. It compares:
+The model-side unit test constructs a random CPU FP32
+`Flux2Transformer2DModel` with one double-stream block, one single-stream block,
+the production conditioning width of 7,680, and two prefix lengths. It compares:
 
 1. one dynamically padded masked batch;
 2. the same target exposures executed separately without padding;
@@ -141,6 +164,11 @@ Run it with:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   .venv/bin/python -B -m unittest tests.model.test_flux_text
 ```
+
+Training-side tests separately verify successful microbatch construction,
+partial and final owner release, automatic owner collection after references
+disappear, rejection of duplicate or stale prefixes, and no consumption when
+tensor construction fails.
 
 ## Remaining real-model validation
 

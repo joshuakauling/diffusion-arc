@@ -1,399 +1,348 @@
-# Batching and Efficiency Roadmap
+# NVARC and FLUX Batching Roadmap
 
-## Status and purpose
+## The problem
 
-This document records the staged batching strategy for Diffusion-ARC. It is a
-supporting engineering plan, not a change to the project hypothesis,
-architecture, milestone order, evaluation protocol, or initial non-goals in
-the root [`README.md`](../../README.md).
+One ARC sequence produces several FLUX inputs. Running NVARC, VAE, and FLUX
+separately for every target repeats frozen work and wastes compute through padding.
 
-This roadmap applies only to the training path. Inference contracts, batching,
-prefix reuse, and autoregressive caching are intentionally designed and
-validated independently when the inference path is implemented.
+The three models also have different useful batch boundaries:
 
-The implementation should begin with the smallest correct reference path and
-become more efficient only through measured, numerically validated changes.
-This progression is itself a project result: it should make the costs and
-correctness requirements of variable-length NVARC conditioning and FLUX
-training explicit rather than hiding them behind a prematurely optimized
-batching implementation.
+- NVARC processes complete token sequences and benefits from grouping sources
+  with similar sequence lengths.
+- The frozen VAE processes fixed-size target images and can use a batch size
+  independent of NVARC and FLUX.
+- FLUX processes one target at a time logically, but targets with similar text
+  prefix lengths can share a physical forward with less padding.
 
-## Training units and terminology
+An optimizer update introduces a fourth boundary: its FLUX inputs must be fixed
+before physical grouping, or a planner could change the training order or objective.
 
-Diffusion-ARC training has more than one useful notion of a batch.
+The design therefore separates the two input buffers, logical optimizer
+batches, and physical FLUX microbatches.
 
-### Source sequence
+## Buffers, batches, and bucketing
 
-A training view contains one complete tokenized NVARC training prompt with an
-ordered set of ARC input/output pairs. The first pair provides an initial
-demonstration, while each later pair may produce a target for FLUX training.
-The collated source sequence retains the view through the assistant header of
-its final selected target. It omits that target's output suffix because no
-later conditioning prefix can use it.
+A buffer holds inputs that are waiting for work. A batch is the subset removed
+from a buffer for one model execution or optimizer update. Bucketing is only
+the strategy used to select compatible inputs; it is not another pipeline
+object.
 
-One source sequence can therefore produce multiple target exposures. If a
-sequence contains four pairs, for example, it may provide three targets:
+| Term | Meaning |
+| --- | --- |
+| `ArcTokenizedTrainingSample` | One tokenized ARC sequence with all recorded target positions and target grids. |
+| `NvarcInputBuffer` | ARC sequences waiting to be selected for NVARC execution. |
+| `NvarcBatch` | A physical batch of complete NVARC sequences, normally grouped by similar length. |
+| `NvarcBatchOutput` | One independent, unpadded hidden-state tensor for each sequence in an `NvarcBatch`. |
+| `NvarcSequenceState` | The owner of one sequence tensor and the prefix ends that still need it. |
+| `FluxInput` | One target containing a shared sequence-state reference, relative `prefix_end`, and clean VAE latent. |
+| `FluxInputBuffer` | Prepared FLUX inputs waiting to be selected for training. |
+| `OptimizerBatch` | The complete logical set of FLUX inputs contributing to one local optimizer update. |
+| `FluxMicrobatch` | Independently allocated padded text and stacked image tensors for one physical FLUX forward/backward. |
+| `GlobalOptimizerBatch` | The union of all per-rank `OptimizerBatch` objects for one distributed update. |
 
-```text
-prefix through the assistant header for pair 2 -> output image for pair 2
-prefix through the assistant header for pair 3 -> output image for pair 3
-prefix through the assistant header for pair 4 -> output image for pair 4
-```
+`NvarcBatch` is not called a microbatch because NVARC is frozen and has no
+optimizer accumulation boundary. `FluxMicrobatch` is a true microbatch because
+several of them accumulate into one `OptimizerBatch`.
 
-### Target exposure
+Buffer capacity and batch capacity are separate settings. Buffer capacity
+limits waiting state and determines how much choice bucketing has. Batch
+capacity limits one execution. For example, 32 sequences may wait in the
+`NvarcInputBuffer` while only four similar-length sequences form the next
+`NvarcBatch`. The NVARC buffer is unnecessary while `NvarcBatch` size remains
+one and no lookahead selection is used. Likewise, FLUX buffer capacity limits
+staged inputs, FLUX microbatch capacity limits one forward, and optimizer batch
+size defines one parameter update.
 
-A target exposure is one conditioning prefix paired with one rendered target
-image. It is the semantic unit on which FLUX predicts a velocity field and
-receives a flow-matching loss.
-
-Multiple target exposures from the same source sequence share an NVARC
-forward pass in the intended implementation, but they remain separate FLUX
-training cases because they have different conditioning lengths, target
-images, noise tensors, and possibly flow timesteps.
-
-### Physical microbatch
-
-A physical microbatch is a collection of source sequences or target exposures
-executed together because they fit within a bounded device workload. NVARC and
-FLUX need not use the same physical grouping:
-
-- NVARC can group collated source sequences by their actual token lengths.
-- FLUX can regroup the resulting target exposures by their prefix lengths.
-
-The physical microbatch is an execution detail and may contain a variable
-number of source sequences and target exposures.
-
-### Optimizer batch
-
-An optimizer batch is the complete set of target exposures contributing to one
-optimizer update across all ranks and gradient-accumulation microsteps. Its
-normalization is defined in target-exposure weight, not in source-sequence
-count or padded token count.
-
-In the initial reference implementation, every target exposure has weight
-`1`. Its flow loss is the mean squared error over its `900x128` velocity
-elements, and the optimizer-batch loss is the arithmetic mean of those
-per-exposure losses. Non-unit target weights are deferred and would require an
-explicitly documented sidecar and normalization rule rather than an implicit
-change to the tensor contract.
-
-These distinctions prevent device scheduling decisions from silently changing
-the statistical weighting of the training objective.
-
-## Contract and execution layout
-
-[`PackedTrainingBatch`](../../src/diffusion_arc/model/contracts.py) is a host-side
-transport contract. Its flat `input_ids` and `sequence_offsets` preserve
-unpadded logical source sequences, but they do not require or authorize one
-concatenated attention operation. A runner handling more than one source must
-either execute the sources separately or convert them to a correctly masked
-padded or true variable-length NVARC layout.
-
-The implemented dataset-to-collator reference path and every public batch field
-are documented in
-[`training-data-assembly.md`](../data/training-data-assembly.md). This roadmap starts
-from that reference contract and describes only later execution and scheduling
-stages.
-
-The implemented target-blind padded NVARC execution boundary is documented in
-[`nvarc-batch-runner.md`](nvarc-batch-runner.md). It provides the correctness
-primitive used before adding length buckets or target-aware staging.
-
-The implemented target-aware text boundary is documented in
-[`flux-text-conditioning.md`](flux-text-conditioning.md). It derives exact
-prefixes, dynamically right-pads a physical FLUX text microbatch, and builds the
-text portion of a joint attention mask. It does not yet execute FLUX.
-
-The implemented target-image boundary is documented in
-[`flux-image-encoding.md`](flux-image-encoding.md). It deterministically encodes
-each fixed canvas with the frozen VAE, produces normalized `[900,128]` clean
-latents, and constructs the matching FLUX image position IDs.
-
-The implemented flow-matching boundary is documented in
-[`flow-matching.md`](flow-matching.md). It independently samples standard
-Gaussian noise and a uniform normalized timestep for each target exposure,
-constructs the noisy FLUX state and velocity target, and provides the
-unweighted FP32 velocity MSE. Alternative timestep densities and loss weights
-remain later training-recipe experiments.
-
-The public target metadata is source-major so it can be validated against the
-source boundaries. Later staging pools may build an internal reordered view for
-FLUX execution without changing the canonical contract. Task IDs,
-augmentation keys, split identities, and other non-tensor audit metadata stay
-in a sidecar owned by the dataset or runner and must remain aligned with every
-source and target exposure.
-
-The initial `TrainingCollator` is the CPU-side adapter that creates this
-contract and its `TrainingBatchMetadata` sidecar from tokenized ARC samples. It
-keeps training-view pair selection independent from target selection. It takes
-at most the configured number of suffix targets, renders only their canvases,
-and truncates each packed source at its final selected prefix. It trusts the
-immutable samples produced by the validated dataset and the offsets, tensor
-layouts, and palette values it constructs itself. The complete public tensor
-validator remains available to diagnostics, tests, and alternate batch
-producers, which must establish the contract before entering the hot path. The
-collator does not sample data, pad tokens, create an attention mask, move
-tensors to an accelerator, or draw flow noise or timesteps.
-
-## Variable structure and cost signals
-
-For source sequence `s`, define:
-
-- `L_s`: the collated NVARC source length after terminal-output truncation;
-- `K_s`: the number of target exposures produced by the sequence;
-- `p_sj`: the conditioning-prefix length for target `j`;
-- `q_sj = p_sj + 900`: the joint FLUX length for that target, including the
-  fixed 900 image tokens.
-
-No single scalar fully describes the cost of a physical microbatch. Useful
-first-order signals include:
-
-| Component | Approximate variable cost signal |
-| --- | ---: |
-| NVARC activation storage | `sum_s L_s` |
-| NVARC attention compute | `sum_s L_s^2` |
-| FLUX activation storage | `sum_s sum_j q_sj` |
-| FLUX attention compute | `sum_s sum_j q_sj^2` |
-| VAE work | total target exposures `sum_s K_s` |
-| Loss weighting | total target-exposure weight |
-
-These expressions are planning signals, not a substitute for measurements.
-Actual memory and runtime depend on attention kernels, precision, activation
-checkpointing, distributed strategy, and hardware. The fixed memory occupied
-by model parameters, gradients, and optimizer state is separate from the
-variable costs above.
-
-Packing only by source-sequence count ignores both token length and target
-count. Packing only by text tokens ignores the 900 image tokens and repeated
-FLUX use of different prefixes. Packing only by target count ignores context
-length. The later optimized scheduler should therefore enforce multiple
-resource limits or use an empirically fitted cost model.
-
-## Correct reference strategy
-
-The first implementation deliberately favors transparency over utilization.
-
-### Bounded suffix targets per source sequence
-
-The training-view `max_pairs` and `max_cells` settings determine which ordered
-pairs enter a source independently of its FLUX target budget. Every pair after
-the first remains an available target candidate.
-
-The initial run configuration may declare `max_targets_per_source`. The
-collator selects the last `min(max_targets_per_source, available_targets)`
-candidates while preserving their source order. A view with fewer candidates
-is accepted, and `None` selects all available targets. Earlier unselected pairs
-remain useful because their teacher-forced outputs condition the selected
-suffix targets.
-
-Suffix selection ensures that the retained source context contributes to at
-least one selected target, but it biases a single fixed view toward later pair
-positions and longer-context predictions. Sampled pair-order augmentations can
-move original pairs into the selected suffix across views. Runs that require
-complete per-view target coverage should select all candidates instead.
-
-The packed contract therefore represents variable target counts from the
-start. Physical FLUX batching and optimizer-batch normalization must use the
-actual number of selected target exposures rather than assuming an exact count
-per source.
-
-### NVARC execution
-
-Collated source sequences may be bucketed by actual token length. Within an
-NVARC microbatch, shorter sequences may be padded only when NVARC receives a
-correct attention mask. The mask makes padding semantically safe; whether the
-selected kernel also avoids computing padded positions must be measured.
-
-NVARC remains frozen and runs in evaluation mode. The intended reuse path is:
-
-1. run the collated causal source sequence through NVARC once;
-2. concatenate the selected hidden layers;
-3. retain only the real, unpadded hidden states;
-4. create a conditioning view for every recorded target-prefix boundary.
-
-`NvarcBatchRunner` implements steps 1 through 3 for one physical NVARC
-batch. It right-pads complete sources, supplies the attention mask, performs one
-batch forward, and returns only real positions in packed source-major order.
-`prepare_flux_text_inputs` implements step 4 outside the runner so target
-metadata cannot enter the NVARC abstraction. It trusts the collator-produced
-target mapping and the packed NVARC output rather than rescanning both on every
-microbatch. Length bucketing and explicit real-checkpoint numerical comparisons
-remain later work; they are not triggered or remembered by a first-forward
-branch in either component.
-
-This reuse is valid only if a prefix computed as part of the full causal
-sequence agrees with the same prefix computed in isolation. The real
-checkpoint validation must compare
+## Object and execution model
 
 ```text
-full_sequence_hidden_states[:prefix_end]
+ArcTokenizedTrainingSample
+    |
+    | prepare_flux_inputs(...)
+    |
+    +-- input_ids + sequence_offsets
+    |       -> NvarcBatchRunner
+    |       -> NvarcBatchOutput
+    |       -> NvarcSequenceState
+    |
+    `-- target grids -> target image Tensor
+            -> FluxVaeEncoder
+            -> clean latent Tensor
+                    |
+                    v
+              tuple[FluxInput, ...]
+                    |
+                    v
+              [future FluxInputBuffer]
+                    |
+                    v
+              build_flux_microbatch(...)
+                    |
+                    +-- exact prefixes -> FluxTextInputs
+                    +-- stacked clean latents
+                    `-- generated image position IDs
+                    |
+                    v
+              FluxMicrobatch
+                    |
+                    v
+              flow sampling + FLUX forward/backward
 ```
 
-with
+Preparation and FLUX training interleave throughout the run. Neither buffer is
+an offline cache or persists across runs. The `NvarcInputBuffer` and
+`FluxInputBuffer` may have different capacities and selection strategies.
+
+## Initial single-GPU scheduling policy
+
+The first implementation is consumer-first and uses the simplest physical
+execution:
 
 ```text
-truncated_sequence_hidden_states
+NvarcInputBuffer selection = FIFO
+NvarcBatch size            = 1 sequence
+FluxMicrobatch size        = 1 input
+OptimizerBatch size        = configured target count B
 ```
 
-under the same precision and attention backend. If they do not agree within a
-predeclared tolerance, separately evaluating each prefix remains the required
-correctness fallback.
+The trainer always prefers a parameter update over producing more staged
+inputs:
 
-### FLUX execution
+```python
+while training_not_finished:
+    if flux_input_buffer.has_complete_optimizer_batch():
+        train_one_optimizer_batch()
+    elif nvarc_work_remains:
+        fill_nvarc_input_buffer()
+        run_one_nvarc_batch_and_prepare_flux_inputs()
+    elif flux_input_buffer:
+        train_final_optimizer_batch()
+    else:
+        break
+```
 
-The reference FLUX path processes one target exposure at a time:
+`fill_nvarc_input_buffer` reads ARC sequences up to its configured capacity.
+Because the initial `NvarcBatch` size is one, it removes the oldest sequence.
+One frozen NVARC forward and the required frozen VAE work then append all of
+that sequence's eligible inputs to the `FluxInputBuffer`. The loop immediately
+checks again whether a complete `OptimizerBatch` can be trained.
+
+For example, let `S1`, `S2`, and `S3` produce two, three, and one FLUX inputs,
+respectively. With optimizer batch size four and FLUX microbatch size one:
+
+| Action | `NvarcInputBuffer` | `FluxInputBuffer` |
+| --- | --- | --- |
+| Initial fill | `S1, S2, S3` | empty |
+| Prepare `S1` | `S2, S3` | `S1-T1, S1-T2` |
+| Prepare `S2` | `S3` | `S1-T1, S1-T2, S2-T1, S2-T2, S2-T3` |
+| Select update | `S3` | retain `S2-T3` |
+
+The selected `OptimizerBatch` is
+`[S1-T1, S1-T2, S2-T1, S2-T2]`. It runs as four size-one
+`FluxMicrobatch` objects, each scaled by `1 / 4`, followed by one
+`optimizer.step()`. Preparation then resumes because only `S2-T3` remains.
+
+At epoch exhaustion, any remaining inputs form a smaller final
+`OptimizerBatch` and use its actual size as the loss denominator. The
+correctness reference never drops eligible inputs.
+
+## Which FLUX inputs are trained
+
+The training configuration defines:
 
 ```text
-one exact conditioning prefix + 900 image tokens -> one flow loss
+min_context_pairs_before_target = M
 ```
 
-It uses no text padding, no cross-sample attention, and no unverified masking
-behavior. Losses are accumulated until the configured optimizer-batch target
-weight has been reached. Each microbatch contribution must be scaled by its
-actual target weight so that differently sized microbatches are not weighted
-equally by accident.
+A target is eligible when at least `M` complete augmented pairs precede it.
+The default `M = 1` makes every pair after the first one a FLUX input. Changing
+`M` changes the training distribution and is not a batching optimization.
 
-This single-target FLUX path is expected to be inefficient. Its purpose is to
-provide a simple numerical reference for every later batching optimization.
+Every eligible FLUX input has weight `1`. ARC tasks or augmentations producing
+more eligible targets therefore contribute more total weight. Alternative
+task-balanced weighting is outside the initial design and would be a separate
+training experiment.
 
-## Staged efficiency roadmap
+Eligibility is applied before model execution. The run records the number of
+accepted ARC sequences, eligible FLUX inputs, and excluded targets.
 
-Every stage must preserve the experiment and be compared with the preceding
-validated reference. A stage is useful only if it improves an end-to-end
-measurement or provides a clearly documented engineering finding.
+## Input order and physical reordering
 
-### Stage 0 - Single-target correctness reference
+The seeded sampler and the target positions inside each
+`ArcTokenizedTrainingSample` define the stable logical input order. The initial
+FIFO scheduler preserves that order outside the model objects; `FluxInput`
+does not duplicate sampler, epoch, task, or augmentation metadata.
 
-- Process exact NVARC prefixes or validate full-sequence prefix reuse.
-- Execute FLUX separately for every target exposure.
-- Use no FLUX padding and no packed cross-sample attention.
-- Verify shapes, dtypes, finite values, loss scaling, and gradient boundaries.
-- Establish deterministic tiny tests and a real-checkpoint smoke report.
+The next `OptimizerBatch` is selected from this order before any FLUX backward
+call. NVARC and VAE preparation may run in a different physical order. The
+selected inputs may also be sorted by prefix length when splitting that already
+fixed optimizer batch into `FluxMicrobatch` objects.
 
-### Stage 1 - NVARC length bucketing
+If later checkpointing, exact per-input randomness, or diagnostics require a
+stable occurrence key, the scheduler must retain it in a separate sidecar. It
+does not belong to the tensor-bearing `FluxInput` contract.
 
-- Group complete source sequences by similar full token length.
-- Use a correct NVARC attention mask for any padding.
-- Remove padded positions before producing target conditioning.
-- Measure padded-token fraction, NVARC throughput, peak memory, and total step
-  time rather than assuming bucketing improves the full training step.
+This reordering may reduce padding, but it must not change which inputs
+contribute to an update. Selecting cheaper inputs from a larger buffer would
+change the training schedule and must be treated as a separately configured
+experiment rather than a transparent optimization.
 
-### Stage 2 - Bounded target-exposure pool
+## NVARC preparation and prefix reuse
 
-- Collect detached conditioning prefixes from one or more frozen-NVARC
-  microbatches in a bounded staging pool.
-- Preserve the mapping from each prefix to its source sequence, target image,
-  augmentation identity, and initial unit target weight.
-- Regroup target exposures for FLUX independently of the original NVARC
-  microbatches.
-- Bound the pool so that retained conditioning states cannot cause unmeasured
-  host or device memory growth.
+The correctness oracle executes every conditioning prefix separately and
+without padding through NVARC. It establishes the expected downstream FLUX
+output, loss, gradients, and parameter update.
 
-### Stage 3 - Masked dynamic-length FLUX batching
+The intended optimized path executes each complete retained NVARC sequence
+once, stores its unpadded hidden states, and lets all inputs from that
+sequence reference their `prefix_end`. Full-sequence reuse is accepted only if
+it passes a predefined real-checkpoint comparison against the exact-prefix
+oracle under the selected precision and attention backend.
 
-- Right-pad target prefixes only to the longest prefix in their physical FLUX
-  microbatch.
-- Concatenate the boolean text key mask with valid keys for all 900 image
-  tokens and pass the resulting joint mask through FLUX double- and
-  single-stream attention.
-- Compare masked batched outputs, losses, gradients, and parameter updates with
-  the unpadded sequential reference.
-- Record padded-token fractions and measure end-to-end throughput rather than
-  assuming that larger physical batches are faster.
+`NvarcBatchRunner` may receive similarly sized complete sequences. It
+right-pads them, creates the NVARC attention mask, runs one frozen forward, and
+removes padded positions. Its `NvarcBatchOutput.sequence_hidden_states` tuple
+contains one independent owning `[L_s, 7680]` tensor per source in input order.
+The temporary packed input offsets do not remain part of the output contract.
 
-Exact-length groups are the no-padding special case. Dense masked attention can
-be semantically correct while still computing padded query and key positions.
-Its utility depends on measured batch utilization and the selected backend.
+Target prefixes are not copied eagerly. A `FluxInput` stores a reference to its
+`NvarcSequenceState` and its exact relative `prefix_end`. The owner stores the
+source tensor once and tracks every pending prefix end. Prefix ends are unique
+within one source and therefore need no additional identity. The prefix is
+copied only when `build_flux_microbatch` creates the physical batch.
 
-### Stage 4 - Variable-length FLUX attention
+## VAE preparation and the FLUX input buffer
 
-- Evaluate a true variable-length kernel or block-diagonal attention path.
-- Keep each target's text and 900 image tokens isolated from every other
-  target.
-- Support per-target timesteps and all timestep-dependent modulation without
-  broadcasting one target's state into another target.
-- Demonstrate numerical agreement with the single-target reference before
-  using the path for learning experiments.
+The frozen VAE encodes every eligible fixed-size target image to one clean
+`[900, 128]` latent. Its physical batch size is independent of both
+`NvarcBatch` and `FluxMicrobatch` sizes.
 
-A dense block-diagonal mask can be semantically correct while still computing
-the full concatenated attention matrix. It must not be described as an
-efficiency improvement unless profiling confirms a benefit.
+`FluxInputBuffer` entries retain:
 
-### Stage 5 - Measured cost-based packing
+- the NVARC sequence-state reference and `prefix_end`;
+- the clean VAE latent.
 
-- Replace simple length buckets with hard resource limits or an empirically
-  fitted cost estimator.
-- Consider FLUX token volume, FLUX attention cost, NVARC token volume, NVARC
-  attention cost, target count, and staging-pool memory.
-- Keep the optimizer-batch target weight fixed even when physical microbatch
-  composition varies.
-- Randomize within bounded planning windows so that length-aware scheduling
-  does not turn the training curriculum into a global length sort.
+Flow noise and timesteps are not buffered. They are created when the input
+enters FLUX execution.
 
-### Stage 6 - Distributed workload balancing
+All buffered inputs from one source share exactly one `NvarcSequenceState`.
+Its pending-prefix set provides explicit ownership accounting without storing
+references back to the inputs. `build_flux_microbatch` first validates every
+requested prefix, copies exact prefixes into the independent padded text
+tensor, stacks all clean latents, and generates fixed image position IDs for
+the physical batch. Only after every allocation succeeds does it commit
+consumption. A failed build consumes nothing; the final successful commit sets
+the owner's hidden-state reference to `None`.
 
-- Build complete optimizer-step plans with equal target weight across ranks.
-- Balance estimated compute as a separate objective to reduce stragglers.
-- Keep rank microstep counts and synchronization points compatible with DDP or
-  FSDP2 requirements.
-- Compare numerical behavior and learning curves with the validated
-  single-process reference.
+The small owner object can remain reachable from an already-consumed
+`FluxInput`, but it no longer retains the large tensor. Python later collects
+the owner itself when the buffer, inputs, and local variables no longer refer
+to it. CUDA may retain released blocks in its caching allocator, so allocator
+reservation is not the same as live tensor allocation.
 
-## Correctness invariants
+The `FluxInputBuffer` has explicit count, token, and byte limits. Backpressure
+pauses preparation before staged state grows without bound. Configuration must
+prove that at least one complete optimizer batch can be formed within these
+limits. An unusually large single sequence needs an explicit one-source
+oversize rule; it must not deadlock the producer and consumer.
 
-Every batching implementation must preserve the following invariants:
+## FLUX execution and loss normalization
 
-- A target conditions only on the end-exclusive prefix recorded for it.
-- Future assistant outputs cannot influence an earlier target's conditioning.
-- Padded NVARC positions are masked and discarded before FLUX conditioning.
-- FLUX never treats padding as real conditioning.
-- Tokens belonging to different target exposures cannot attend to one another.
-- Every target retains its own target image, flow noise, timestep, and source
-  metadata.
-- Initial loss normalization gives every target exposure one unit of weight
-  across the complete global optimizer batch.
-- Task-level train/validation separation and augmentation leakage protections
-  remain unchanged by length-aware scheduling.
-- Any optimized path matches reference losses, gradients, and parameter
-  updates within tolerances fixed before the comparison.
+One `OptimizerBatch` contains total target weight `B`. It is divided into one
+or more prefix-length-aware `FluxMicrobatch` objects. For a microbatch with
+`K_i` unit-weight inputs and mean loss `L_i`, backward uses:
 
-## Measurement protocol
+```python
+scaled_loss = L_i * K_i / B
+scaled_loss.backward()
+```
 
-Each stage should report at least:
+Summing the microbatch gradients therefore produces the mean over all inputs
+in the optimizer batch. Dividing each microbatch loss only by the number of
+microbatches is wrong when their sizes differ.
 
-- target exposures per second;
-- real NVARC tokens per second;
-- real FLUX text tokens per second;
-- padded NVARC token count and fraction;
-- median and p95 microstep and optimizer-step time;
-- peak allocated and reserved device memory;
-- staging-pool host and device memory where applicable;
-- per-rank workload and straggler measurements for distributed runs;
-- loss, gradient, and parameter-update differences from the reference;
-- short overfitting-run behavior after a material optimization.
+`build_flux_microbatch` selects and right-pads exact NVARC prefixes through the
+pure `pad_flux_text_prefixes` operation, builds text position IDs and the text
+mask, stacks clean latents, and creates the fixed image position IDs. Joint-mask
+construction, flow sampling, and the trainable FLUX forward/backward happen
+when that microbatch is executed.
 
-The run record must include the batching strategy, bucket or budget settings,
-cost-model revision, seeds, data split and augmentation identities, precision,
-attention backend, hardware, and distributed configuration.
+Image length remains fixed at 900 tokens. The variable length relevant to FLUX
+grouping is the NVARC conditioning prefix.
 
-Throughput improvements must be reported end to end. A faster isolated
-attention kernel is not sufficient if NVARC execution, target staging, VAE
-work, synchronization, or optimizer steps erase the gain.
+## Randomness
 
-## Deferred decisions and non-goals
+The initial single-GPU reference uses a recorded sequential generator together
+with the fixed FIFO input order. Physical regrouping can change generator draw
+order. If later numerical comparisons require randomness to be independent of
+grouping, the scheduler must bind noise and timesteps to external occurrence
+keys stored in its sidecar rather than adding metadata to `FluxInput`.
 
-This document intentionally does not yet select:
+## Later distributed extension
 
-- a permanent maximum targets-per-source value;
-- final NVARC bucket boundaries;
-- a maximum token or compute budget;
-- a production CUDA attention backend or true variable-length kernel;
-- a fixed analytical cost model;
-- non-unit target weighting;
-- a final DDP or FSDP2 scheduling policy.
+Distributed planning is deferred until the single-GPU policy is validated.
+Its primary setting will be `global_optimizer_batch_size`; all ranks must agree
+on target weight, synchronization points, tail handling, and loss scaling. DDP
+and FSDP2 must preserve the validated global FLUX input order without sampler
+duplicates or silently dropped inputs.
 
-Offline conditioning caches are outside the approved training path. The
-remaining decisions require measurements from the correct reference pipeline.
-This roadmap also does not authorize changes to the frozen/trainable component
-boundaries, the flow-only objective, the 30x30 target representation, the
-task-level split, or the primary evaluation protocol.
+## Implementation order
+
+The implementation follows the authoritative milestones in the root
+[`README.md`](../../README.md):
+
+1. exact single-GPU execution with one NVARC prefix and one FLUX input;
+2. the consumer-first buffered reference defined above;
+3. DDP and then FSDP2 correctness with the same global input order;
+4. checkpoint and resume at optimizer-step boundaries;
+5. measured NVARC, VAE, and padded FLUX batching optimizations; and
+6. optional variable-length FLUX attention only after profiling justifies it.
+
+Each change is accepted only after loss, gradient, parameter-update, memory,
+and end-to-end throughput comparisons with the preceding validated path.
+
+## Required invariants
+
+- NVARC and the VAE remain frozen; the complete FLUX transformer is trainable.
+- A FLUX input sees only its recorded end-exclusive conditioning prefix.
+- Every eligible input is consumed exactly once under the configured epoch
+  policy.
+- Physical grouping never changes optimizer target membership or weight.
+- Padded NVARC and FLUX text positions are masked and excluded from stored
+  sequence states.
+- Inputs in one FLUX microbatch cannot attend across batch rows.
+- NVARC prefixes share source storage instead of holding eager copies.
+- A failed FLUX microbatch build does not consume any pending prefix.
+- A source tensor is released immediately after its final dependent input has
+  been copied into an independent physical microbatch.
+- Buffer limits create backpressure, not silent target loss.
+- Optimized execution must pass predefined numerical gates before training.
+- Task-level train/validation separation remains unchanged.
+
+## Measurements and open performance choices
+
+Every stage records complete-path throughput, real and padded tokens, buffer
+occupancy and bytes, component timings, peak memory, loss, gradient norm, and
+numerical differences from its reference. Buffer limits, physical batch sizes,
+device placement, attention backend, activation checkpointing, and later
+cost-based selection remain measurement-driven settings.
+
+Dense padded attention scales with physical batch maxima, and planning must
+also account for the transient `[batch_size, max_prefix, 7680]` conditioning
+tensor.
+
+Token-length eligibility must be checked in an explicit run preflight before
+model work. None of these choices may appear as a silent runtime fallback.
+
+## Current implementation boundary
+
+The repository now implements the independent `NvarcBatchOutput` tensors,
+single-source `prepare_flux_inputs`, explicit `NvarcSequenceState` ownership,
+pure `pad_flux_text_prefixes`, and transactional `build_flux_microbatch`
+assembly. `compute_flux_microbatch_loss` now composes flow sampling, joint-mask
+construction, one trainable FLUX forward, and the unscaled velocity loss. The
+old fused step, loop, and training entrypoint are not part of this path.
+`FluxInputBuffer`, optimizer-batch selection, loss scaling, backward and
+optimizer execution, and the consumer-first scheduler remain the next
+implementation layers. A separate `NvarcInputBuffer` remains unnecessary while
+NVARC batch size is one and no lookahead bucketing is used.

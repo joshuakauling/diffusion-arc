@@ -12,10 +12,17 @@ corresponding velocity target.
 FP32. Neither function executes the FLUX transformer, chooses an optimizer, or
 performs an update.
 
+The training-side `compute_flux_microbatch_loss` operation composes these
+helpers with one prepared `FluxMicrobatch`: it constructs the joint attention
+mask, executes the injected FLUX transformer, and returns the unscaled mean
+loss.
+
 The implementation lives in
 [`src/diffusion_arc/model/flow.py`](../../src/diffusion_arc/model/flow.py). Its
 immutable `FlowMatchingBatch` output contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
+The complete microbatch composition lives in
+[`src/diffusion_arc/training/flux_forward.py`](../../src/diffusion_arc/training/flux_forward.py).
 
 ## Input and per-target sampling
 
@@ -71,8 +78,9 @@ transformer without pre-scaling. Its forward method performs the internal
 factor-of-1000 conversion used by the timestep embedding.
 
 The sampled noise is not retained as a separate public field because training
-needs only `z_t`, `t`, and `u_t` after construction. Clean latents and image
-position IDs remain owned by `EncodedTargetLatents`.
+needs only `z_t`, `t`, and `u_t` after construction. The `FluxMicrobatch`
+retains the clean latents and independently generated image position IDs needed
+by the later FLUX execution.
 
 ## Velocity loss
 
@@ -91,6 +99,23 @@ transformer. The frozen VAE and NVARC outputs do not require gradients.
 There is no timestep weighting, auxiliary target, color loss, shape loss, or
 per-target weighting in this baseline.
 
+## Complete microbatch computation
+
+`compute_flux_microbatch_loss(transformer, microbatch, generator=...)` performs:
+
+```text
+FluxMicrobatch.clean_latents
+    -> flow noise, timesteps, noisy latents, and target velocity
+    -> joint text-and-image attention mask
+    -> FLUX velocity prediction
+    -> unweighted FP32 mean squared error
+```
+
+The transformer receives the noisy latents, padded NVARC conditioning, flow
+timesteps, text and image position IDs, and the joint key mask already carried
+or derivable from the microbatch. The function returns one scalar loss. It does
+not scale that loss for an optimizer batch and does not call `backward()`.
+
 ## Validation boundaries
 
 The hot path checks only the narrow structural contract needed to avoid silent
@@ -107,14 +132,16 @@ Unit tests establish:
 - deterministic outputs from identically seeded generators;
 - latent dtype and device preservation with FP32 timesteps;
 - immutable output contracts; and
-- unweighted FP32 MSE with finite prediction gradients.
+- unweighted FP32 MSE with finite prediction gradients; and
+- one complete two-target, 900-image-token tiny FLUX forward and backward.
 
 ## Explicit non-goals
 
-This component does not:
+The complete microbatch computation does not:
 
-- execute or load the FLUX transformer;
+- load or select a FLUX checkpoint;
 - choose a non-uniform timestep density or loss weighting;
-- build text conditioning, image coordinates, or attention masks;
-- perform gradient accumulation, optimization, or distributed RNG setup; or
+- select or build `FluxInput` objects or physical microbatches;
+- scale losses, call `backward()`, accumulate gradients, or update parameters;
+- configure autocast, gradient checkpointing, or distributed execution; or
 - define the inference-time ODE schedule.
