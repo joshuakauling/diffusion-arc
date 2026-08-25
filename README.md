@@ -142,6 +142,8 @@ an assumption or show no benefit are documented and treated as valid outcomes.
 
 ### Milestone 1 — Data Handling and Model Setup
 
+**Status: Complete.**
+
 - Load and validate the NVARC, FLUX, and VAE checkpoints.
 - Implement ARC task loading, task augmentation, and reproducible dataset
   generation.
