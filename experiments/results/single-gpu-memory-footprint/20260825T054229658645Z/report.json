@@ -1,0 +1,1429 @@
+{
+  "artifacts": {
+    "checks": {
+      "flux_repo_id": true,
+      "flux_requested_revision": true,
+      "flux_resolved_revision": true,
+      "nvarc_actual_weight_sizes": true,
+      "nvarc_handle": true,
+      "nvarc_version": true,
+      "nvarc_weight_sizes": true,
+      "paths": true,
+      "project_file_sha256": true
+    },
+    "manifest_sha256": "8c4c11e042bd766849b74946bdbad1761ebe38b88ce0992f18e8b9acbfefd9f4",
+    "nvarc_actual_weight_sizes": {
+      "model-00001-of-00002.safetensors": 4996836472,
+      "model-00002-of-00002.safetensors": 2270397024
+    }
+  },
+  "cases": [
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.462740421295166,
+        "device_free_gib": 88.268798828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l128-b1",
+        "peak_allocated_gib": 50.46512317657471,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.001110290000013947,
+      "case_peak_allocated_gib": 65.67462396621704,
+      "case_peak_reserved_gib": 73.26953125,
+      "conditioning_tensor_gib": 0.0018310546875,
+      "joint_tokens_per_microbatch": 1028,
+      "loss": 0.2737070620059967,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 128,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.90118646621704,
+        "device_free_gib": 65.780517578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l128-b1",
+        "peak_allocated_gib": 65.67462396621704,
+        "peak_reserved_gib": 73.26953125,
+        "reserved_gib": 73.26953125
+      },
+      "step_seconds": 0.6330285660000072,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.464882373809814,
+        "device_free_gib": 88.268798828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l128-b2",
+        "peak_allocated_gib": 50.46964740753174,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0012125849999904403,
+      "case_peak_allocated_gib": 66.88457727432251,
+      "case_peak_reserved_gib": 77.98828125,
+      "conditioning_tensor_gib": 0.003662109375,
+      "joint_tokens_per_microbatch": 2056,
+      "loss": 0.6177759766578674,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 128,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.90424585342407,
+        "device_free_gib": 61.061767578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l128-b2",
+        "peak_allocated_gib": 66.88457727432251,
+        "peak_reserved_gib": 77.98828125,
+        "reserved_gib": 77.98828125
+      },
+      "step_seconds": 2.383618046999999,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.47002077102661,
+        "device_free_gib": 88.268798828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l128-b4",
+        "peak_allocated_gib": 50.4793062210083,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0016266860000087036,
+      "case_peak_allocated_gib": 75.9457654953003,
+      "case_peak_reserved_gib": 84.35546875,
+      "conditioning_tensor_gib": 0.00732421875,
+      "joint_tokens_per_microbatch": 4112,
+      "loss": 0.4601610004901886,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 4,
+      "sequence_length": 128,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.91017389297485,
+        "device_free_gib": 54.690673828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l128-b4",
+        "peak_allocated_gib": 75.9457654953003,
+        "peak_reserved_gib": 84.35546875,
+        "reserved_gib": 84.35546875
+      },
+      "step_seconds": 0.7761064800000099,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.47846698760986,
+        "device_free_gib": 88.264892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l128-b8",
+        "peak_allocated_gib": 50.497403621673584,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0024677300000064406,
+      "case_peak_allocated_gib": 94.12741756439209,
+      "case_peak_reserved_gib": 96.984375,
+      "conditioning_tensor_gib": 0.0146484375,
+      "joint_tokens_per_microbatch": 8224,
+      "loss": 0.3651163876056671,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 8,
+      "sequence_length": 128,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.91973400115967,
+        "device_free_gib": 42.061767578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l128-b8",
+        "peak_allocated_gib": 94.12741756439209,
+        "peak_reserved_gib": 96.984375,
+        "reserved_gib": 96.984375
+      },
+      "step_seconds": 1.104179930000015,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.49658012390137,
+        "device_free_gib": 88.260986328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l128-b16",
+        "peak_allocated_gib": 50.53445291519165,
+        "peak_reserved_gib": 50.78515625,
+        "reserved_gib": 50.78515625
+      },
+      "assembly_seconds": 0.007223968999994668,
+      "case_peak_allocated_gib": 130.66931056976318,
+      "case_peak_reserved_gib": 133.9140625,
+      "conditioning_tensor_gib": 0.029296875,
+      "joint_tokens_per_microbatch": 16448,
+      "loss": 0.7349145412445068,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 16,
+      "sequence_length": 128,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.94216537475586,
+        "device_free_gib": 5.132080078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l128-b16",
+        "peak_allocated_gib": 130.66931056976318,
+        "peak_reserved_gib": 133.9140625,
+        "reserved_gib": 133.9140625
+      },
+      "step_seconds": 1.3960083919999988,
+      "within_safe_reserved_fraction": false
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 137.02875137329102,
+        "device_free_gib": 0.007080078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l128-b32",
+        "peak_allocated_gib": 137.82880020141602,
+        "peak_reserved_gib": 139.0390625,
+        "reserved_gib": 139.0390625
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 386.00 MiB. GPU 0 has a total capacity of 139.80 GiB of which 7.25 MiB is free. Process 1 has 139.79 GiB memory in use. Of the allocated memory 137.83 GiB is allocated by PyTorch, and 1.21 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 32896,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 32,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.264892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l128-b32",
+        "peak_allocated_gib": 137.82880020141602,
+        "peak_reserved_gib": 139.0390625,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 128,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.46445322036743,
+        "device_free_gib": 88.264892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l256-b1",
+        "peak_allocated_gib": 50.46854496002197,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0011425819999999476,
+      "case_peak_allocated_gib": 65.6768250465393,
+      "case_peak_reserved_gib": 73.69921875,
+      "conditioning_tensor_gib": 0.003662109375,
+      "joint_tokens_per_microbatch": 1156,
+      "loss": 1.1473439931869507,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 256,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.9033875465393,
+        "device_free_gib": 65.346923828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l256-b1",
+        "peak_allocated_gib": 65.6768250465393,
+        "peak_reserved_gib": 73.69921875,
+        "reserved_gib": 73.69921875
+      },
+      "step_seconds": 0.8926637100000221,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.468552112579346,
+        "device_free_gib": 88.264892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l256-b2",
+        "peak_allocated_gib": 50.47673511505127,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.001549328000010064,
+      "case_peak_allocated_gib": 68.08015727996826,
+      "case_peak_reserved_gib": 79.048828125,
+      "conditioning_tensor_gib": 0.00732421875,
+      "joint_tokens_per_microbatch": 2312,
+      "loss": 0.5407742857933044,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 256,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.9079155921936,
+        "device_free_gib": 59.995361328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l256-b2",
+        "peak_allocated_gib": 68.08015727996826,
+        "peak_reserved_gib": 79.048828125,
+        "reserved_gib": 79.048828125
+      },
+      "step_seconds": 0.7309176659999821,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.4769868850708,
+        "device_free_gib": 88.262939453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l256-b4",
+        "peak_allocated_gib": 50.49335241317749,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0028120339999873067,
+      "case_peak_allocated_gib": 78.23472261428833,
+      "case_peak_reserved_gib": 86.744140625,
+      "conditioning_tensor_gib": 0.0146484375,
+      "joint_tokens_per_microbatch": 4624,
+      "loss": 0.8299959897994995,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 4,
+      "sequence_length": 256,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.91677379608154,
+        "device_free_gib": 52.300048828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l256-b4",
+        "peak_allocated_gib": 78.23472261428833,
+        "peak_reserved_gib": 86.744140625,
+        "reserved_gib": 86.744140625
+      },
+      "step_seconds": 0.8054250249999768,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.493146896362305,
+        "device_free_gib": 88.262939453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l256-b8",
+        "peak_allocated_gib": 50.525877475738525,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.004061976999992112,
+      "case_peak_allocated_gib": 98.68976879119873,
+      "case_peak_reserved_gib": 101.634765625,
+      "conditioning_tensor_gib": 0.029296875,
+      "joint_tokens_per_microbatch": 9248,
+      "loss": 0.3918476402759552,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 8,
+      "sequence_length": 256,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.9348258972168,
+        "device_free_gib": 37.409423828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l256-b8",
+        "peak_allocated_gib": 98.68976879119873,
+        "peak_reserved_gib": 101.634765625,
+        "reserved_gib": 101.634765625
+      },
+      "step_seconds": 0.8782902609999894,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 136.9056372642517,
+        "device_free_gib": 0.157470703125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l256-b16",
+        "peak_allocated_gib": 136.9527564048767,
+        "peak_reserved_gib": 138.88671875,
+        "reserved_gib": 138.88671875
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 218.00 MiB. GPU 0 has a total capacity of 139.80 GiB of which 161.25 MiB is free. Process 1 has 139.63 GiB memory in use. Of the allocated memory 136.95 GiB is allocated by PyTorch, and 1.93 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 18496,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 16,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.262939453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l256-b16",
+        "peak_allocated_gib": 136.9527564048767,
+        "peak_reserved_gib": 138.88671875,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 256,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.46812295913696,
+        "device_free_gib": 88.260986328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l512-b1",
+        "peak_allocated_gib": 50.475876808166504,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0015812429999755295,
+      "case_peak_allocated_gib": 65.68049478530884,
+      "case_peak_reserved_gib": 74.9375,
+      "conditioning_tensor_gib": 0.00732421875,
+      "joint_tokens_per_microbatch": 1412,
+      "loss": 0.6273671388626099,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 512,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.90705728530884,
+        "device_free_gib": 64.104736328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l512-b1",
+        "peak_allocated_gib": 65.68049478530884,
+        "peak_reserved_gib": 74.9375,
+        "reserved_gib": 74.9375
+      },
+      "step_seconds": 0.6639400730000489,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.475892066955566,
+        "device_free_gib": 88.260986328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l512-b2",
+        "peak_allocated_gib": 50.49139928817749,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0024418059999788966,
+      "case_peak_allocated_gib": 70.32094240188599,
+      "case_peak_reserved_gib": 81.41015625,
+      "conditioning_tensor_gib": 0.0146484375,
+      "joint_tokens_per_microbatch": 2824,
+      "loss": 0.793949544429779,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 512,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.91476726531982,
+        "device_free_gib": 57.630126953125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l512-b2",
+        "peak_allocated_gib": 70.32094240188599,
+        "peak_reserved_gib": 81.41015625,
+        "reserved_gib": 81.41015625
+      },
+      "step_seconds": 0.9353895000000421,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.49166679382324,
+        "device_free_gib": 88.259033203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l512-b4",
+        "peak_allocated_gib": 50.52268075942993,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.005415663999997378,
+      "case_peak_allocated_gib": 82.77070569992065,
+      "case_peak_reserved_gib": 91.595703125,
+      "conditioning_tensor_gib": 0.029296875,
+      "joint_tokens_per_microbatch": 5648,
+      "loss": 0.7867528200149536,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 4,
+      "sequence_length": 512,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.93194198608398,
+        "device_free_gib": 47.444580078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l512-b4",
+        "peak_allocated_gib": 82.77070569992065,
+        "peak_reserved_gib": 91.595703125,
+        "reserved_gib": 91.595703125
+      },
+      "step_seconds": 1.0023377559999744,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.52250671386719,
+        "device_free_gib": 88.200439453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l512-b8",
+        "peak_allocated_gib": 50.58453416824341,
+        "peak_reserved_gib": 50.83984375,
+        "reserved_gib": 50.83984375
+      },
+      "assembly_seconds": 0.0071523359999901,
+      "case_peak_allocated_gib": 107.83151245117188,
+      "case_peak_reserved_gib": 111.4921875,
+      "conditioning_tensor_gib": 0.05859375,
+      "joint_tokens_per_microbatch": 11296,
+      "loss": 0.5361316204071045,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 8,
+      "sequence_length": 512,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.96444511413574,
+        "device_free_gib": 27.548095703125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l512-b8",
+        "peak_allocated_gib": 107.83151245117188,
+        "peak_reserved_gib": 111.4921875,
+        "reserved_gib": 111.4921875
+      },
+      "step_seconds": 1.153472192000038,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 136.51688432693481,
+        "device_free_gib": 0.833251953125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l512-b16",
+        "peak_allocated_gib": 136.56400346755981,
+        "peak_reserved_gib": 138.34765625,
+        "reserved_gib": 138.20703125
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 1.04 GiB. GPU 0 has a total capacity of 139.80 GiB of which 853.25 MiB is free. Process 1 has 138.96 GiB memory in use. Of the allocated memory 136.56 GiB is allocated by PyTorch, and 1.64 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 22592,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 16,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.259033203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l512-b16",
+        "peak_allocated_gib": 136.56400346755981,
+        "peak_reserved_gib": 138.34765625,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 512,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.475462913513184,
+        "device_free_gib": 88.259033203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l1024-b1",
+        "peak_allocated_gib": 50.490540981292725,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.0024294940000118004,
+      "case_peak_allocated_gib": 66.31011152267456,
+      "case_peak_reserved_gib": 77.16796875,
+      "conditioning_tensor_gib": 0.0146484375,
+      "joint_tokens_per_microbatch": 1924,
+      "loss": 0.3276493549346924,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 1024,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.91439723968506,
+        "device_free_gib": 61.872314453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l1024-b1",
+        "peak_allocated_gib": 66.31011152267456,
+        "peak_reserved_gib": 77.16796875,
+        "reserved_gib": 77.16796875
+      },
+      "step_seconds": 1.1150158149999925,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.49057197570801,
+        "device_free_gib": 88.259033203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l1024-b2",
+        "peak_allocated_gib": 50.52072763442993,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "assembly_seconds": 0.004155803000003289,
+      "case_peak_allocated_gib": 74.91001081466675,
+      "case_peak_reserved_gib": 86.734375,
+      "conditioning_tensor_gib": 0.029296875,
+      "joint_tokens_per_microbatch": 3848,
+      "loss": 0.4793547987937927,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 1024,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.92993545532227,
+        "device_free_gib": 52.305908203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l1024-b2",
+        "peak_allocated_gib": 74.91001081466675,
+        "peak_reserved_gib": 86.734375,
+        "reserved_gib": 86.734375
+      },
+      "step_seconds": 1.117931155000008,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.521026611328125,
+        "device_free_gib": 88.200439453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l1024-b4",
+        "peak_allocated_gib": 50.581337451934814,
+        "peak_reserved_gib": 50.83984375,
+        "reserved_gib": 50.83984375
+      },
+      "assembly_seconds": 0.009897760999990624,
+      "case_peak_allocated_gib": 91.87454414367676,
+      "case_peak_reserved_gib": 94.5546875,
+      "conditioning_tensor_gib": 0.05859375,
+      "joint_tokens_per_microbatch": 7696,
+      "loss": 0.7809837460517883,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 4,
+      "sequence_length": 1024,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.96130180358887,
+        "device_free_gib": 44.483642578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l1024-b4",
+        "peak_allocated_gib": 91.87454414367676,
+        "peak_reserved_gib": 94.5546875,
+        "reserved_gib": 94.5546875
+      },
+      "step_seconds": 1.1832677559999638,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.58122634887695,
+        "device_free_gib": 88.139892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l1024-b8",
+        "peak_allocated_gib": 50.701847553253174,
+        "peak_reserved_gib": 50.8984375,
+        "reserved_gib": 50.8984375
+      },
+      "assembly_seconds": 0.011949103999995714,
+      "case_peak_allocated_gib": 126.03892517089844,
+      "case_peak_reserved_gib": 128.640625,
+      "conditioning_tensor_gib": 0.1171875,
+      "joint_tokens_per_microbatch": 15392,
+      "loss": 0.9639659523963928,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 8,
+      "sequence_length": 1024,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 65.02334785461426,
+        "device_free_gib": 10.397705078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l1024-b8",
+        "peak_allocated_gib": 126.03892517089844,
+        "peak_reserved_gib": 128.640625,
+        "reserved_gib": 128.640625
+      },
+      "step_seconds": 1.3037028489999898,
+      "within_safe_reserved_fraction": false
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 136.97266817092896,
+        "device_free_gib": 0.343017578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l1024-b16",
+        "peak_allocated_gib": 137.19691133499146,
+        "peak_reserved_gib": 138.6953125,
+        "reserved_gib": 138.6953125
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 362.00 MiB. GPU 0 has a total capacity of 139.80 GiB of which 351.25 MiB is free. Process 1 has 139.45 GiB memory in use. Of the allocated memory 137.20 GiB is allocated by PyTorch, and 1.50 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 30784,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 16,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.257080078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l1024-b16",
+        "peak_allocated_gib": 137.19691133499146,
+        "peak_reserved_gib": 138.6953125,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 1024,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.490142822265625,
+        "device_free_gib": 88.227783203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l2048-b1",
+        "peak_allocated_gib": 50.519869327545166,
+        "peak_reserved_gib": 50.810546875,
+        "reserved_gib": 50.810546875
+      },
+      "assembly_seconds": 0.007187149000003501,
+      "case_peak_allocated_gib": 70.8416657447815,
+      "case_peak_reserved_gib": 81.8984375,
+      "conditioning_tensor_gib": 0.029296875,
+      "joint_tokens_per_microbatch": 2948,
+      "loss": 0.9734299182891846,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 2048,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.9290771484375,
+        "device_free_gib": 57.137939453125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l2048-b1",
+        "peak_allocated_gib": 70.8416657447815,
+        "peak_reserved_gib": 81.8984375,
+        "reserved_gib": 81.8984375
+      },
+      "step_seconds": 1.273110153999994,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.51993179321289,
+        "device_free_gib": 88.167236328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l2048-b2",
+        "peak_allocated_gib": 50.579384326934814,
+        "peak_reserved_gib": 50.869140625,
+        "reserved_gib": 50.869140625
+      },
+      "assembly_seconds": 0.039274100999989514,
+      "case_peak_allocated_gib": 83.96894836425781,
+      "case_peak_reserved_gib": 92.888671875,
+      "conditioning_tensor_gib": 0.05859375,
+      "joint_tokens_per_microbatch": 5896,
+      "loss": 1.0222690105438232,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 2048,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.95929527282715,
+        "device_free_gib": 46.147705078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l2048-b2",
+        "peak_allocated_gib": 83.96894836425781,
+        "peak_reserved_gib": 92.888671875,
+        "reserved_gib": 92.888671875
+      },
+      "step_seconds": 1.4263949030000163,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.57974624633789,
+        "device_free_gib": 88.050048828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l2048-b4",
+        "peak_allocated_gib": 50.69865083694458,
+        "peak_reserved_gib": 50.986328125,
+        "reserved_gib": 50.986328125
+      },
+      "assembly_seconds": 0.043494550999980675,
+      "case_peak_allocated_gib": 110.12078714370728,
+      "case_peak_reserved_gib": 114.462890625,
+      "conditioning_tensor_gib": 0.1171875,
+      "joint_tokens_per_microbatch": 11792,
+      "loss": 0.8057640194892883,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 4,
+      "sequence_length": 2048,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 65.02002143859863,
+        "device_free_gib": 24.571533203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l2048-b4",
+        "peak_allocated_gib": 110.12078714370728,
+        "peak_reserved_gib": 114.462890625,
+        "reserved_gib": 114.462890625
+      },
+      "step_seconds": 1.3515444999999886,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 135.99710369110107,
+        "device_free_gib": 0.870361328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l2048-b8",
+        "peak_allocated_gib": 136.04422283172607,
+        "peak_reserved_gib": 138.1640625,
+        "reserved_gib": 138.1640625
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 1.08 GiB. GPU 0 has a total capacity of 139.80 GiB of which 891.25 MiB is free. Process 1 has 138.92 GiB memory in use. Of the allocated memory 136.04 GiB is allocated by PyTorch, and 2.12 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 23584,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 8,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.253173828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l2048-b8",
+        "peak_allocated_gib": 136.04422283172607,
+        "peak_reserved_gib": 138.1640625,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 2048,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.51950263977051,
+        "device_free_gib": 88.135986328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l4096-b1",
+        "peak_allocated_gib": 50.57852602005005,
+        "peak_reserved_gib": 50.8984375,
+        "reserved_gib": 50.8984375
+      },
+      "assembly_seconds": 0.03795663699997931,
+      "case_peak_allocated_gib": 79.93592691421509,
+      "case_peak_reserved_gib": 88.3203125,
+      "conditioning_tensor_gib": 0.05859375,
+      "joint_tokens_per_microbatch": 4996,
+      "loss": 0.4827773869037628,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 4096,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 64.95843696594238,
+        "device_free_gib": 50.714111328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l4096-b1",
+        "peak_allocated_gib": 79.93592691421509,
+        "peak_reserved_gib": 88.3203125,
+        "reserved_gib": 88.3203125
+      },
+      "step_seconds": 1.1100679930000297,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.578651428222656,
+        "device_free_gib": 88.018798828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l4096-b2",
+        "peak_allocated_gib": 50.69669771194458,
+        "peak_reserved_gib": 51.015625,
+        "reserved_gib": 51.015625
+      },
+      "assembly_seconds": 0.017479361999960474,
+      "case_peak_allocated_gib": 102.18278884887695,
+      "case_peak_reserved_gib": 104.732421875,
+      "conditioning_tensor_gib": 0.1171875,
+      "joint_tokens_per_microbatch": 9992,
+      "loss": 0.7650392651557922,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 2,
+      "sequence_length": 4096,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 65.01801490783691,
+        "device_free_gib": 34.302001953125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l4096-b2",
+        "peak_allocated_gib": 102.18278884887695,
+        "peak_reserved_gib": 104.732421875,
+        "reserved_gib": 104.732421875
+      },
+      "step_seconds": 1.7452348269999902,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 137.05688571929932,
+        "device_free_gib": 0.194580078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l4096-b4",
+        "peak_allocated_gib": 137.33172702789307,
+        "peak_reserved_gib": 138.93359375,
+        "reserved_gib": 138.83984375
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 236.00 MiB. GPU 0 has a total capacity of 139.80 GiB of which 199.25 MiB is free. Process 1 has 139.60 GiB memory in use. Of the allocated memory 137.33 GiB is allocated by PyTorch, and 1.51 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 19984,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 4,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.253173828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l4096-b4",
+        "peak_allocated_gib": 137.33172702789307,
+        "peak_reserved_gib": 138.93359375,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 4096,
+      "stage": "training-step",
+      "status": "OOM"
+    },
+    {
+      "activation_checkpointing": false,
+      "assembly_cuda_memory": {
+        "allocated_gib": 50.57822227478027,
+        "device_free_gib": 88.018798828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "assembly-l8192-b1",
+        "peak_allocated_gib": 50.695839405059814,
+        "peak_reserved_gib": 51.015625,
+        "reserved_gib": 51.015625
+      },
+      "assembly_seconds": 0.023929897000016354,
+      "case_peak_allocated_gib": 98.1540298461914,
+      "case_peak_reserved_gib": 101.328125,
+      "conditioning_tensor_gib": 0.1171875,
+      "joint_tokens_per_microbatch": 9092,
+      "loss": 0.9245184063911438,
+      "optimizer_learning_rate": 0.0,
+      "parameter_unchanged": true,
+      "physical_microbatch_size": 1,
+      "sequence_length": 8192,
+      "status": "PASS",
+      "step_cuda_memory": {
+        "allocated_gib": 65.01715660095215,
+        "device_free_gib": 37.706298828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "training-step-l8192-b1",
+        "peak_allocated_gib": 98.1540298461914,
+        "peak_reserved_gib": 101.328125,
+        "reserved_gib": 101.328125
+      },
+      "step_seconds": 1.2809523260000333,
+      "within_safe_reserved_fraction": true
+    },
+    {
+      "activation_checkpointing": false,
+      "cuda_memory_at_oom": {
+        "allocated_gib": 137.3882474899292,
+        "device_free_gib": 0.116455078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "oom-training-step-l8192-b2",
+        "peak_allocated_gib": 137.4353666305542,
+        "peak_reserved_gib": 138.921875,
+        "reserved_gib": 138.91796875
+      },
+      "cuda_recovered_to_baseline": true,
+      "error": "CUDA out of memory. Tried to allocate 854.00 MiB. GPU 0 has a total capacity of 139.80 GiB of which 119.25 MiB is free. Process 1 has 139.68 GiB memory in use. Of the allocated memory 137.44 GiB is allocated by PyTorch, and 1.48 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)",
+      "joint_tokens_per_microbatch": 18184,
+      "optimizer_learning_rate": 0.0,
+      "physical_microbatch_size": 2,
+      "recovery_cuda_memory": {
+        "allocated_gib": 50.46032667160034,
+        "device_free_gib": 88.253173828125,
+        "device_total_gib": 139.80084228515625,
+        "label": "post-oom-recovery-l8192-b2",
+        "peak_allocated_gib": 137.4353666305542,
+        "peak_reserved_gib": 138.921875,
+        "reserved_gib": 50.78125
+      },
+      "sequence_length": 8192,
+      "stage": "training-step",
+      "status": "OOM"
+    }
+  ],
+  "completed_at_utc": "2026-08-25T05:47:04.478870+00:00",
+  "conditioning": [
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.46227979660034,
+        "device_free_gib": 88.243408203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l128",
+        "peak_allocated_gib": 50.4905424118042,
+        "peak_reserved_gib": 50.806640625,
+        "reserved_gib": 50.806640625
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.0018310546875,
+      "output_shape": [
+        128,
+        7680
+      ],
+      "seconds": 0.060068210999986604,
+      "sequence_length": 128,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.46398878097534,
+        "device_free_gib": 88.264892578125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l256",
+        "peak_allocated_gib": 50.5253963470459,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.003662109375,
+      "output_shape": [
+        256,
+        7680
+      ],
+      "seconds": 0.07623677200001566,
+      "sequence_length": 256,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.46765089035034,
+        "device_free_gib": 88.257080078125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l512",
+        "peak_allocated_gib": 50.5836296081543,
+        "peak_reserved_gib": 50.78515625,
+        "reserved_gib": 50.78515625
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.00732421875,
+      "output_shape": [
+        512,
+        7680
+      ],
+      "seconds": 0.08430913199998713,
+      "sequence_length": 512,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.47497510910034,
+        "device_free_gib": 88.259033203125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l1024",
+        "peak_allocated_gib": 50.70497941970825,
+        "peak_reserved_gib": 50.78125,
+        "reserved_gib": 50.78125
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.0146484375,
+      "output_shape": [
+        1024,
+        7680
+      ],
+      "seconds": 0.07902979499999674,
+      "sequence_length": 1024,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.48962354660034,
+        "device_free_gib": 88.001220703125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l2048",
+        "peak_allocated_gib": 50.94377279281616,
+        "peak_reserved_gib": 51.037109375,
+        "reserved_gib": 51.037109375
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.029296875,
+      "output_shape": [
+        2048,
+        7680
+      ],
+      "seconds": 0.09573318600001812,
+      "sequence_length": 2048,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.51892042160034,
+        "device_free_gib": 87.380126953125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l4096",
+        "peak_allocated_gib": 51.42721891403198,
+        "peak_reserved_gib": 51.654296875,
+        "reserved_gib": 51.654296875
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.05859375,
+      "output_shape": [
+        4096,
+        7680
+      ],
+      "seconds": 0.13612596100000474,
+      "sequence_length": 4096,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    {
+      "cuda_memory": {
+        "allocated_gib": 50.57751417160034,
+        "device_free_gib": 85.876220703125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l8192",
+        "peak_allocated_gib": 52.39411115646362,
+        "peak_reserved_gib": 53.158203125,
+        "reserved_gib": 53.158203125
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.1171875,
+      "output_shape": [
+        8192,
+        7680
+      ],
+      "seconds": 0.22659512799998538,
+      "sequence_length": 8192,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    }
+  ],
+  "configuration": {
+    "activation_checkpointing": false,
+    "flux_microbatch_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64
+    ],
+    "minimum_vram_gib": 120.0,
+    "optimizer_learning_rate_override": 0.0,
+    "safe_reserved_fraction": 0.9,
+    "seed": 167,
+    "sequence_lengths": [
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096,
+      8192
+    ]
+  },
+  "environment": {
+    "bf16_supported": true,
+    "compute_capability": [
+      9,
+      0
+    ],
+    "cuda_runtime": "13.0",
+    "gpu_name": "NVIDIA H200",
+    "gpu_vram_gib": 139.80084228515625,
+    "nvidia_smi": "580.95.05, NVIDIA H200, 143771 MiB",
+    "python": "3.12.6",
+    "sdpa_policy": {
+      "flash_enabled": true,
+      "math_enabled": true,
+      "memory_efficient_enabled": true
+    },
+    "torch": "2.13.0+cu130"
+  },
+  "failures": [],
+  "memory": {
+    "after_model_load": {
+      "allocated_gib": 21.522281169891357,
+      "device_free_gib": 117.721923828125,
+      "device_total_gib": 139.80084228515625,
+      "label": "after-model-load",
+      "peak_allocated_gib": 21.522281169891357,
+      "peak_reserved_gib": 21.564453125,
+      "reserved_gib": 21.564453125
+    },
+    "runtime_baseline": {
+      "allocated_gib": 0.0,
+      "device_free_gib": 139.286376953125,
+      "device_total_gib": 139.80084228515625,
+      "label": "runtime-baseline",
+      "peak_allocated_gib": 0.0,
+      "peak_reserved_gib": 0.0,
+      "reserved_gib": 0.0
+    },
+    "steady_state_adam_baseline": {
+      "allocated_gib": 50.46032667160034,
+      "device_free_gib": 88.268798828125,
+      "device_total_gib": 139.80084228515625,
+      "label": "steady-state-adam-baseline",
+      "peak_allocated_gib": 50.46032667160034,
+      "peak_reserved_gib": 50.78125,
+      "reserved_gib": 50.78125
+    }
+  },
+  "models": {
+    "checks": {
+      "activation_checkpointing_disabled": true,
+      "flux_compute_bfloat16": true,
+      "flux_float32": true,
+      "flux_fully_trainable": true,
+      "nvarc_bfloat16": true,
+      "nvarc_frozen": true,
+      "vae_float32": true,
+      "vae_frozen": true
+    },
+    "load_seconds": 27.06000290999998,
+    "summaries": {
+      "flux": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.float32"
+        ],
+        "parameter_tensors": 169,
+        "parameters": 3875544576,
+        "trainable_parameters": 3875544576
+      },
+      "nvarc": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.bfloat16"
+        ],
+        "parameter_tensors": 399,
+        "parameters": 3633593856,
+        "trainable_parameters": 0
+      },
+      "vae": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.float32"
+        ],
+        "parameter_tensors": 248,
+        "parameters": 84046115,
+        "trainable_parameters": 0
+      }
+    }
+  },
+  "notebook_procedure_version": 1,
+  "packages": {
+    "Pillow": "11.3.0",
+    "accelerate": "1.12.0",
+    "diffusers": "0.39.0",
+    "einops": "0.8.1",
+    "safetensors": "0.8.0",
+    "torch": "2.13.0",
+    "transformers": "4.56.1"
+  },
+  "paths": {
+    "download_manifest": "/mnt/diffusion-arc-models/download-manifest.json",
+    "flux_checkpoint": "/mnt/diffusion-arc-models/flux2-klein-base-4b",
+    "nvarc_checkpoint": "/mnt/diffusion-arc-models/nvarc-qwen3-4b-grids15-sft139",
+    "report": "/mnt/diffusion-arc-models/results/single-gpu-memory-footprint/20260825T054229658645Z/report.json",
+    "volume_root": "/mnt/diffusion-arc-models"
+  },
+  "question": "How do exact NVARC conditioning length and physical FLUX microbatch size affect steady-state H200 peak memory without activation checkpointing?",
+  "run_id": "20260825T054229658645Z",
+  "schema_version": 1,
+  "source": {
+    "authentication": "github_pat_basic_header",
+    "package_path": "/root/diffusion-arc/src/diffusion_arc/__init__.py",
+    "path": "/root/diffusion-arc",
+    "repository": "https://github.com/joshuakauling/diffusion-arc.git",
+    "requested_commit": "00c978ff4bddef8a7f1ca0bbc224c0d88cd972d1",
+    "resolved_commit": "00c978ff4bddef8a7f1ca0bbc224c0d88cd972d1"
+  },
+  "status": "COMPLETE",
+  "summary_by_length": [
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 32,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 16,
+      "largest_safe_microbatch": 8,
+      "sequence_length": 128
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 16,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 8,
+      "largest_safe_microbatch": 8,
+      "sequence_length": 256
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 16,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 8,
+      "largest_safe_microbatch": 8,
+      "sequence_length": 512
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 16,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 8,
+      "largest_safe_microbatch": 4,
+      "sequence_length": 1024
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 8,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 4,
+      "largest_safe_microbatch": 4,
+      "sequence_length": 2048
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 4,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 2,
+      "largest_safe_microbatch": 2,
+      "sequence_length": 4096
+    },
+    {
+      "capacity_is_lower_bound": false,
+      "first_oom_microbatch": 2,
+      "largest_configured_batch_was_tested": false,
+      "largest_passing_microbatch": 1,
+      "largest_safe_microbatch": 1,
+      "sequence_length": 8192
+    }
+  ],
+  "sweep_aborted": false,
+  "target_latent": {
+    "cuda_memory": {
+      "allocated_gib": 21.55396032333374,
+      "device_free_gib": 116.778564453125,
+      "device_total_gib": 139.80084228515625,
+      "label": "target-latent-preparation",
+      "peak_allocated_gib": 22.186831951141357,
+      "peak_reserved_gib": 22.34375,
+      "reserved_gib": 22.34375
+    },
+    "dtype": "torch.float32",
+    "shape": [
+      900,
+      128
+    ]
+  },
+  "unit_tests": {
+    "output_tail": "Flax classes are deprecated and will be removed in Diffusers v0.40.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.\nFlax classes are deprecated and will be removed in Diffusers v0.40.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.\n..................................................................................................................../usr/local/lib/python3.12/site-packages/torch/nn/functional.py:3006: UserWarning: Mismatch dtype between input and weight: input dtype = c10::BFloat16, weight dtype = float, Cannot dispatch to fused implementation. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/layer_norm.cpp:346.)\n  return torch.rms_norm(input, normalized_shape, weight, eps)\n...........................\n----------------------------------------------------------------------\nRan 143 tests in 7.054s\n\nOK",
+    "returncode": 0,
+    "seconds": 35.10956435700001
+  },
+  "warmup": {
+    "adam_moment_dtype": "torch.float32",
+    "adam_moment_tensors": 338,
+    "conditioning": {
+      "cuda_memory": {
+        "allocated_gib": 21.555484294891357,
+        "device_free_gib": 117.417236328125,
+        "device_total_gib": 139.80084228515625,
+        "label": "nvarc-conditioning-l128",
+        "peak_allocated_gib": 21.583746910095215,
+        "peak_reserved_gib": 21.705078125,
+        "reserved_gib": 21.705078125
+      },
+      "output_dtype": "torch.bfloat16",
+      "output_gib": 0.0018310546875,
+      "output_shape": [
+        128,
+        7680
+      ],
+      "seconds": 3.1309570249999865,
+      "sequence_length": 128,
+      "status": "PASS",
+      "token_pattern": "repeated_valid_token_id_0"
+    },
+    "cuda_memory": {
+      "allocated_gib": 64.9019570350647,
+      "device_free_gib": 68.010986328125,
+      "device_total_gib": 139.80084228515625,
+      "label": "adam-state-initialization",
+      "peak_allocated_gib": 65.6753945350647,
+      "peak_reserved_gib": 71.0390625,
+      "reserved_gib": 71.0390625
+    },
+    "loss": 0.2256624698638916,
+    "optimizer_parameter_states": 169,
+    "parameter_after": -0.0002231597900390625,
+    "parameter_before": -0.0002231597900390625,
+    "parameter_unchanged": true,
+    "seconds": 3.395352874999986,
+    "tracked_parameter": "time_guidance_embed.timestep_embedder.linear_1.weight",
+    "tracked_parameter_index": 0
+  }
+}
