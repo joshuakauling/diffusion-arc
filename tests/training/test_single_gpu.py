@@ -190,6 +190,98 @@ class SingleGpuTrainingTests(unittest.TestCase):
         torch.testing.assert_close(updates[0][0], torch.tensor(1.5))
         self.assertEqual(updates[0][1:], (2, 2))
 
+    def test_reports_and_clips_accumulated_gradient_before_update(self) -> None:
+        nvarc = RecordingNvarcRunner()
+        vae = NumberedVaeEncoder()
+        transformer = ScalarTransformer()
+        optimizer = torch.optim.SGD(transformer.parameters(), lr=1.0)
+        metrics = []
+        recording_loss = RecordingLoss()
+
+        with patch(
+            "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+            side_effect=recording_loss,
+        ):
+            run_single_gpu_training(
+                (_sample(2),),
+                nvarc_runner=nvarc,  # type: ignore[arg-type]
+                vae_encoder=vae,  # type: ignore[arg-type]
+                transformer=transformer,
+                optimizer=optimizer,
+                flux_compute_dtype=torch.bfloat16,
+                max_optimizer_steps=1,
+                optimizer_batch_size=2,
+                flux_microbatch_size=1,
+                max_grad_norm=0.5,
+                on_optimizer_step_metrics=metrics.append,
+            )
+
+        self.assertEqual(len(metrics), 1)
+        step = metrics[0]
+        torch.testing.assert_close(step.loss, torch.tensor(1.5))
+        self.assertEqual(step.target_count, 2)
+        self.assertEqual(step.microbatch_count, 2)
+        self.assertAlmostEqual(step.gradient_norm, 1.5)
+        self.assertTrue(step.gradient_clipped)
+        self.assertEqual(step.learning_rates, (1.0,))
+        self.assertGreaterEqual(step.step_seconds, 0.0)
+        torch.testing.assert_close(transformer.weight.detach(), torch.tensor(0.5))
+
+    def test_rejects_non_finite_loss_before_optimizer_update(self) -> None:
+        nvarc = RecordingNvarcRunner()
+        vae = NumberedVaeEncoder()
+        transformer = ScalarTransformer()
+        optimizer = torch.optim.SGD(transformer.parameters(), lr=1.0)
+
+        with (
+            patch(
+                "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+                return_value=transformer.weight * torch.tensor(float("nan")),
+            ),
+            self.assertRaisesRegex(FloatingPointError, "non-finite"),
+        ):
+            run_single_gpu_training(
+                (_sample(1),),
+                nvarc_runner=nvarc,  # type: ignore[arg-type]
+                vae_encoder=vae,  # type: ignore[arg-type]
+                transformer=transformer,
+                optimizer=optimizer,
+                flux_compute_dtype=torch.bfloat16,
+                max_optimizer_steps=1,
+                optimizer_batch_size=1,
+            )
+
+        torch.testing.assert_close(transformer.weight.detach(), torch.tensor(1.0))
+
+    def test_rejects_non_finite_accumulated_gradient_before_update(self) -> None:
+        nvarc = RecordingNvarcRunner()
+        vae = NumberedVaeEncoder()
+        transformer = ScalarTransformer()
+        with torch.no_grad():
+            transformer.weight.zero_()
+        optimizer = torch.optim.SGD(transformer.parameters(), lr=1.0)
+
+        with (
+            patch(
+                "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+                side_effect=lambda model, *_args, **_kwargs: torch.sqrt(model.weight),
+            ),
+            self.assertRaisesRegex(RuntimeError, "non-finite"),
+        ):
+            run_single_gpu_training(
+                (_sample(1),),
+                nvarc_runner=nvarc,  # type: ignore[arg-type]
+                vae_encoder=vae,  # type: ignore[arg-type]
+                transformer=transformer,
+                optimizer=optimizer,
+                flux_compute_dtype=torch.bfloat16,
+                max_optimizer_steps=1,
+                optimizer_batch_size=1,
+                max_grad_norm=1.0,
+            )
+
+        torch.testing.assert_close(transformer.weight.detach(), torch.tensor(0.0))
+
     def test_rejects_invalid_run_configuration_before_model_work(self) -> None:
         nvarc = RecordingNvarcRunner()
         vae = NumberedVaeEncoder()
@@ -227,6 +319,19 @@ class SingleGpuTrainingTests(unittest.TestCase):
                 generator=object(),  # type: ignore[arg-type]
                 **base_arguments,
             )
+
+        for invalid_norm in (0.0, -1.0, float("inf"), float("nan"), True):
+            with self.subTest(max_grad_norm=invalid_norm), self.assertRaises(ValueError):
+                run_single_gpu_training(
+                    (),
+                    nvarc_runner=nvarc,  # type: ignore[arg-type]
+                    vae_encoder=vae,  # type: ignore[arg-type]
+                    transformer=transformer,
+                    optimizer=optimizer,
+                    flux_compute_dtype=torch.bfloat16,
+                    max_grad_norm=invalid_norm,
+                    **base_arguments,
+                )
 
         self.assertEqual(nvarc.calls, [])
         self.assertEqual(vae.calls, [])

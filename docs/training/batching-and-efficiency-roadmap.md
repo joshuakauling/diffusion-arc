@@ -357,6 +357,10 @@ unnecessary while NVARC batch size is one and no lookahead bucketing is used.
 The initial offline `train_single_gpu.py` entrypoint and strict JSON run
 configuration now compose these pieces without changing their ownership. The
 single-GPU path keeps persistent FLUX parameters, gradients, and AdamW state in
-FP32 while executing the FLUX forward under BF16 autocast. A real CUDA
-end-to-end precision and memory preflight, logging system, gradient diagnostics,
-and checkpointing remain subsequent implementation layers.
+FP32 while executing the FLUX forward under BF16 autocast. The optimizer loop
+can report the accumulated loss, pre-clip global gradient norm, clipping state,
+learning rate, target count, physical microbatch count, and synchronized step
+time through an optional structured callback. Scalar loss and global gradient
+non-finites fail before an optimizer update. A real CUDA end-to-end precision
+and memory preflight has passed; the complete logging, profiling, and
+checkpoint/resume systems remain subsequent implementation layers.

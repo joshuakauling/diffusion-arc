@@ -29,3 +29,4 @@ details.
 
 - [FLUX.2 VAE smoke test](experiments/flux2-vae-smoke-test.md)
 - [FLUX.2 VAE ARC palette experiments](experiments/vae-palette-experiments.md)
+- [Single-GPU overfitting pilot](experiments/single-gpu-overfitting-pilot.md)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import math
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
@@ -16,6 +19,19 @@ from diffusion_arc.model.nvarc import NvarcBatchRunner
 from .flux_forward import compute_flux_microbatch_loss
 from .flux_input import FluxInput, prepare_flux_inputs
 from .flux_microbatch import build_flux_microbatch
+
+
+@dataclass(frozen=True)
+class OptimizerStepMetrics:
+    """Measurements captured for one completed optimizer update."""
+
+    loss: Tensor
+    target_count: int
+    microbatch_count: int
+    gradient_norm: float
+    gradient_clipped: bool
+    learning_rates: tuple[float, ...]
+    step_seconds: float
 
 
 def _require_positive_integer(value: int, *, name: str) -> None:
@@ -32,9 +48,16 @@ def _train_optimizer_batch(
     flux_microbatch_size: int,
     generator: torch.Generator | None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None,
+    max_grad_norm: float | None,
+    on_optimizer_step_metrics: Callable[[OptimizerStepMetrics], None] | None,
 ) -> None:
     """Train one fixed optimizer batch through one or more FLUX microbatches."""
 
+    if on_optimizer_step_metrics is not None:
+        _synchronize_transformer_device(transformer)
+        step_started = time.perf_counter()
+    else:
+        step_started = None
     optimizer_target_count = len(flux_inputs)
     optimizer.zero_grad(set_to_none=True)
     reported_loss: Tensor | None = None
@@ -50,27 +73,80 @@ def _train_optimizer_batch(
             compute_dtype=flux_compute_dtype,
             generator=generator,
         )
+        if loss.ndim != 0:
+            raise RuntimeError("FLUX microbatch loss must be a scalar")
+        if not bool(torch.isfinite(loss.detach()).item()):
+            raise FloatingPointError("FLUX microbatch loss is non-finite")
         weight = microbatch.target_count / optimizer_target_count
-        if on_optimizer_step is not None:
-            loss_contribution = loss.detach() * weight
-            if reported_loss is None:
-                reported_loss = loss_contribution
-            else:
-                reported_loss = reported_loss + loss_contribution
+        loss_contribution = loss.detach() * weight
+        if reported_loss is None:
+            reported_loss = loss_contribution
+        else:
+            reported_loss = reported_loss + loss_contribution
 
         (loss * weight).backward()
         microbatch_count += 1
 
+    gradient_norm: float | None = None
+    gradient_clipped = False
+    if max_grad_norm is not None or on_optimizer_step_metrics is not None:
+        trainable_parameters = tuple(
+            parameter
+            for parameter in transformer.parameters()
+            if parameter.requires_grad
+        )
+        gradient_norm_tensor = torch.nn.utils.clip_grad_norm_(
+            trainable_parameters,
+            max_norm=math.inf if max_grad_norm is None else max_grad_norm,
+            error_if_nonfinite=True,
+            foreach=False,
+        )
+        gradient_norm = float(gradient_norm_tensor.detach().item())
+        gradient_clipped = bool(
+            max_grad_norm is not None and gradient_norm > max_grad_norm
+        )
     optimizer.step()
+    if on_optimizer_step_metrics is not None:
+        _synchronize_transformer_device(transformer)
+        if step_started is None:
+            raise AssertionError("metrics timing did not record a start")
+        step_seconds = time.perf_counter() - step_started
 
+    if reported_loss is None:
+        raise AssertionError("non-empty optimizer batch produced no loss")
     if on_optimizer_step is not None:
-        if reported_loss is None:
-            raise AssertionError("non-empty optimizer batch produced no loss")
         on_optimizer_step(
             reported_loss,
             optimizer_target_count,
             microbatch_count,
         )
+    if on_optimizer_step_metrics is not None:
+        if gradient_norm is None:
+            raise AssertionError("metrics callback requires a gradient norm")
+        on_optimizer_step_metrics(
+            OptimizerStepMetrics(
+                loss=reported_loss,
+                target_count=optimizer_target_count,
+                microbatch_count=microbatch_count,
+                gradient_norm=gradient_norm,
+                gradient_clipped=gradient_clipped,
+                learning_rates=tuple(
+                    float(group["lr"]) for group in optimizer.param_groups
+                ),
+                step_seconds=step_seconds,
+            )
+        )
+
+
+def _synchronize_transformer_device(transformer: nn.Module) -> None:
+    """Synchronize CUDA timing while remaining a no-op for CPU tests."""
+
+    try:
+        parameter = next(transformer.parameters())
+    except StopIteration:
+        return
+    if parameter.device.type == "cuda":
+        torch.cuda.synchronize(parameter.device)
 
 
 def run_single_gpu_training(
@@ -87,6 +163,8 @@ def run_single_gpu_training(
     min_context_pairs_before_target: int = 1,
     generator: torch.Generator | None = None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None = None,
+    max_grad_norm: float | None = None,
+    on_optimizer_step_metrics: Callable[[OptimizerStepMetrics], None] | None = None,
 ) -> None:
     """Train from one sample stream until its end or an exact step limit.
 
@@ -106,6 +184,19 @@ def run_single_gpu_training(
         raise TypeError("generator must be a torch.Generator")
     if on_optimizer_step is not None and not callable(on_optimizer_step):
         raise TypeError("on_optimizer_step must be callable")
+    if max_grad_norm is not None:
+        if (
+            isinstance(max_grad_norm, bool)
+            or not isinstance(max_grad_norm, (int, float))
+            or not math.isfinite(max_grad_norm)
+            or max_grad_norm <= 0
+        ):
+            raise ValueError("max_grad_norm must be a finite positive number or None")
+        max_grad_norm = float(max_grad_norm)
+    if on_optimizer_step_metrics is not None and not callable(
+        on_optimizer_step_metrics
+    ):
+        raise TypeError("on_optimizer_step_metrics must be callable")
 
     transformer.train()
     flux_input_buffer: deque[FluxInput] = deque()
@@ -137,6 +228,8 @@ def run_single_gpu_training(
                 flux_microbatch_size=flux_microbatch_size,
                 generator=generator,
                 on_optimizer_step=on_optimizer_step,
+                max_grad_norm=max_grad_norm,
+                on_optimizer_step_metrics=on_optimizer_step_metrics,
             )
             optimizer_steps += 1
 
@@ -152,7 +245,9 @@ def run_single_gpu_training(
                 flux_microbatch_size=flux_microbatch_size,
                 generator=generator,
                 on_optimizer_step=on_optimizer_step,
+                max_grad_norm=max_grad_norm,
+                on_optimizer_step_metrics=on_optimizer_step_metrics,
             )
 
 
-__all__ = ["run_single_gpu_training"]
+__all__ = ["OptimizerStepMetrics", "run_single_gpu_training"]

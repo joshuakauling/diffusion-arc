@@ -48,6 +48,25 @@ data/splits/<split_name>/
 `train.json` and `validation.json` contain source task IDs. Their intersection
 must be empty, so augmented variants of a held-out task cannot enter training.
 
+### Modal Volume mirror
+
+[`experiments/download_arc_agi_2_to_modal.ipynb`](../../experiments/download_arc_agi_2_to_modal.ipynb)
+installs the complete public ARC-AGI-2 raw dataset once at:
+
+```text
+/mnt/diffusion-arc-models/data/raw/arc-agi-2/
+├── training/    # 1,000 task JSON files
+└── evaluation/  # 120 task JSON files
+```
+
+The setup pins official repository commit
+`f3283f727488ad98fe575ea6a5ac981e4a188e49`, verifies the downloaded archive
+SHA-256, validates every task JSON, and writes a durable per-file hash manifest
+at `/mnt/diffusion-arc-models/data/arc-agi-2-manifest.json`. A matching install
+is reused; an incomplete or differently identified target is not overwritten.
+Training notebooks consume this Volume mirror through an ephemeral canonical
+data layout and perform no implicit dataset download.
+
 ## Core data types
 
 All core data objects are frozen dataclasses containing immutable tuples.
