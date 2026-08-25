@@ -89,6 +89,9 @@ class _FakeVae(nn.Module):
     def encode(self, _images: torch.Tensor) -> None:
         raise AssertionError("model loading must not execute the VAE")
 
+    def decode(self, _latents: torch.Tensor) -> None:
+        raise AssertionError("model loading must not execute the VAE")
+
 
 class _FakeFluxTransformer(nn.Module):
     def __init__(self) -> None:
@@ -221,10 +224,12 @@ class SingleGpuSetupTests(unittest.TestCase):
         self.assertIs(models.tokenizer, tokenizer)
         self.assertIs(models.nvarc_runner.model, nvarc)
         self.assertIs(models.vae_encoder.vae, vae)
+        self.assertIs(models.vae_decoder.vae, vae)
         self.assertIs(models.transformer, transformer)
         self.assertEqual(models.flux_compute_dtype, torch.bfloat16)
         self.assertFalse(models.nvarc_runner.training)
         self.assertFalse(models.vae_encoder.training)
+        self.assertFalse(models.vae_decoder.training)
         self.assertTrue(all(not parameter.requires_grad for parameter in nvarc.parameters()))
         self.assertTrue(all(not parameter.requires_grad for parameter in vae.parameters()))
         self.assertTrue(all(parameter.requires_grad for parameter in transformer.parameters()))

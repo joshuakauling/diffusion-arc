@@ -15,6 +15,7 @@ from diffusion_arc.model import (
     TARGET_LATENT_SHAPE,
     TARGET_LATENT_TOKEN_COUNT,
     TARGET_LATENT_WIDTH,
+    FluxVaeDecoder,
     FluxVaeEncoder,
 )
 
@@ -60,10 +61,14 @@ class FakeFluxVae(nn.Module):
             )
 
         self.encode_calls = 0
+        self.decode_calls = 0
         self.posterior_mode_calls = 0
         self.seen_training_modes: list[bool] = []
         self.seen_grad_modes: list[bool] = []
+        self.decode_training_modes: list[bool] = []
+        self.decode_grad_modes: list[bool] = []
         self.last_images: Tensor | None = None
+        self.last_decode_latents: Tensor | None = None
 
     def encode(self, images: Tensor) -> SimpleNamespace:
         self.encode_calls += 1
@@ -73,6 +78,15 @@ class FakeFluxVae(nn.Module):
         return SimpleNamespace(
             latent_dist=_FakePosterior(self, images.shape[0]),
         )
+
+    def decode(self, latents: Tensor) -> SimpleNamespace:
+        self.decode_calls += 1
+        self.decode_training_modes.append(self.training)
+        self.decode_grad_modes.append(torch.is_grad_enabled())
+        self.last_decode_latents = latents.detach().clone()
+        values = latents.mean(dim=(1, 2, 3), keepdim=True)
+        images = values.expand(latents.shape[0], *TARGET_IMAGE_SHAPE)
+        return SimpleNamespace(sample=images)
 
 
 def _target_images(
@@ -105,6 +119,38 @@ def _reference_clean_latents(vae: FakeFluxVae, batch_size: int) -> Tensor:
         TARGET_LATENT_CHANNELS,
         TARGET_LATENT_TOKEN_COUNT,
     ).transpose(1, 2).contiguous()
+
+
+def _reference_vae_decode_latents(
+    vae: FakeFluxVae,
+    packed_latents: Tensor,
+) -> Tensor:
+    packed_grid = packed_latents.to(dtype=vae.anchor.dtype).transpose(1, 2).reshape(
+        packed_latents.shape[0],
+        TARGET_LATENT_CHANNELS,
+        TARGET_LATENT_HEIGHT,
+        TARGET_LATENT_WIDTH,
+    )
+    mean = vae.bn.running_mean.reshape(1, -1, 1, 1)
+    std = torch.sqrt(
+        vae.bn.running_var.reshape(1, -1, 1, 1)
+        + vae.config.batch_norm_eps
+    )
+    denormalized = packed_grid * std + mean
+    unpatched = denormalized.reshape(
+        packed_latents.shape[0],
+        32,
+        2,
+        2,
+        TARGET_LATENT_HEIGHT,
+        TARGET_LATENT_WIDTH,
+    ).permute(0, 1, 4, 2, 5, 3)
+    return unpatched.reshape(
+        packed_latents.shape[0],
+        32,
+        TARGET_LATENT_HEIGHT * 2,
+        TARGET_LATENT_WIDTH * 2,
+    )
 
 
 class FluxVaeEncoderTests(unittest.TestCase):
@@ -173,6 +219,56 @@ class FluxVaeEncoderTests(unittest.TestCase):
             FluxVaeEncoder(object())  # type: ignore[arg-type]
         with self.assertRaisesRegex(RuntimeError, "encode"):
             FluxVaeEncoder(nn.Identity())
+
+
+class FluxVaeDecoderTests(unittest.TestCase):
+    def test_denormalizes_unpatches_and_decodes_once(self) -> None:
+        vae = FakeFluxVae(batch_size=1, dtype=torch.float64)
+        decoder = FluxVaeDecoder(vae)
+        packed_latents = torch.linspace(
+            -1.0,
+            1.0,
+            steps=TARGET_LATENT_TOKEN_COUNT * TARGET_LATENT_CHANNELS,
+            dtype=torch.float32,
+        ).reshape(1, *TARGET_LATENT_SHAPE)
+
+        result = decoder(packed_latents)
+
+        self.assertEqual(vae.decode_calls, 1)
+        self.assertIsNotNone(vae.last_decode_latents)
+        torch.testing.assert_close(
+            vae.last_decode_latents,
+            _reference_vae_decode_latents(vae, packed_latents),
+        )
+        self.assertEqual(result.shape, (1, *TARGET_IMAGE_SHAPE))
+        self.assertEqual(result.dtype, torch.float64)
+
+    def test_freezes_vae_decodes_without_grad_and_stays_in_eval_mode(self) -> None:
+        vae = FakeFluxVae().train()
+        decoder = FluxVaeDecoder(vae)
+        packed_latents = torch.zeros(
+            (1, *TARGET_LATENT_SHAPE),
+            requires_grad=True,
+        )
+
+        decoder.train(True)
+        result = decoder(packed_latents)
+
+        self.assertFalse(decoder.training)
+        self.assertFalse(vae.training)
+        self.assertFalse(any(parameter.requires_grad for parameter in vae.parameters()))
+        self.assertEqual(vae.decode_training_modes, [False])
+        self.assertEqual(vae.decode_grad_modes, [False])
+        self.assertFalse(result.requires_grad)
+        self.assertIsNone(result.grad_fn)
+
+    def test_rejects_invalid_latents_and_decoder_interfaces(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "decode"):
+            FluxVaeDecoder(nn.Identity())
+        with self.assertRaisesRegex(ValueError, "packed_latents"):
+            FluxVaeDecoder(FakeFluxVae())(
+                torch.zeros((1, TARGET_LATENT_TOKEN_COUNT - 1, TARGET_LATENT_CHANNELS))
+            )
 
 
 if __name__ == "__main__":

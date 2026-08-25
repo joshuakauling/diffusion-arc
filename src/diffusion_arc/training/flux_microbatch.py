@@ -8,38 +8,11 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from diffusion_arc.model.contracts import (
-    TARGET_LATENT_HEIGHT,
-    TARGET_LATENT_TOKEN_COUNT,
-    TARGET_LATENT_WIDTH,
-    FluxTextInputs,
-)
+from diffusion_arc.model.contracts import FluxTextInputs
+from diffusion_arc.model.flux_execution import build_flux_image_position_ids
 from diffusion_arc.model.flux_text import pad_flux_text_prefixes
 
 from .flux_input import FluxInput, NvarcSequenceState
-
-
-def _build_image_position_ids(batch_size: int, device: torch.device) -> Tensor:
-    """Build fixed ``(0, h, w, 0)`` coordinates for one FLUX microbatch."""
-
-    position_ids = torch.zeros(
-        (TARGET_LATENT_HEIGHT, TARGET_LATENT_WIDTH, 4),
-        dtype=torch.int64,
-        device=device,
-    )
-    position_ids[:, :, 1] = torch.arange(
-        TARGET_LATENT_HEIGHT,
-        device=device,
-    ).unsqueeze(1)
-    position_ids[:, :, 2] = torch.arange(
-        TARGET_LATENT_WIDTH,
-        device=device,
-    ).unsqueeze(0)
-    return position_ids.reshape(1, TARGET_LATENT_TOKEN_COUNT, 4).expand(
-        batch_size,
-        -1,
-        -1,
-    )
 
 
 @dataclass(frozen=True)
@@ -90,7 +63,7 @@ def build_flux_microbatch(flux_inputs: Sequence[FluxInput]) -> FluxMicrobatch:
     clean_latents = torch.stack(
         tuple(flux_input.clean_latent for flux_input in inputs)
     )
-    image_position_ids = _build_image_position_ids(
+    image_position_ids = build_flux_image_position_ids(
         len(inputs),
         clean_latents.device,
     )

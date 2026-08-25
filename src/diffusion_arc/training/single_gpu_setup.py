@@ -24,7 +24,7 @@ from diffusion_arc.model.contracts import (
     NVARC_VOCAB_SIZE,
     TARGET_LATENT_CHANNELS,
 )
-from diffusion_arc.model.flux_image import FluxVaeEncoder
+from diffusion_arc.model.flux_image import FluxVaeDecoder, FluxVaeEncoder
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
 from diffusion_arc.model.nvarc import NvarcBatchRunner
 
@@ -44,6 +44,7 @@ class SingleGpuModels:
 
     tokenizer: PreTrainedTokenizerBase
     nvarc_runner: NvarcBatchRunner
+    vae_decoder: FluxVaeDecoder
     vae_encoder: FluxVaeEncoder
     transformer: Flux2Transformer2DModel
     flux_compute_dtype: torch.dtype
@@ -144,6 +145,7 @@ def load_single_gpu_models(
         expected_dtype=vae_dtype,
     )
     vae_encoder = FluxVaeEncoder(vae)
+    vae_decoder = FluxVaeDecoder(vae)
 
     transformer = Flux2Transformer2DModel.from_pretrained(
         config.models.flux_checkpoint,
@@ -167,12 +169,15 @@ def load_single_gpu_models(
         raise RuntimeError("NVARC must remain frozen")
     if any(parameter.requires_grad for parameter in vae_encoder.parameters()):
         raise RuntimeError("the FLUX VAE must remain frozen")
+    if any(parameter.requires_grad for parameter in vae_decoder.parameters()):
+        raise RuntimeError("the FLUX VAE must remain frozen")
     if not all(parameter.requires_grad for parameter in transformer.parameters()):
         raise RuntimeError("every FLUX transformer parameter must remain trainable")
 
     return SingleGpuModels(
         tokenizer=tokenizer,
         nvarc_runner=nvarc_runner,
+        vae_decoder=vae_decoder,
         vae_encoder=vae_encoder,
         transformer=transformer,
         flux_compute_dtype=flux_compute_dtype,

@@ -20,6 +20,12 @@ from .canvas import (
     render_grid_canvas,
     render_training_target_canvases,
 )
+from .decoding import (
+    ArcGridPrediction,
+    classify_arc_cells,
+    decode_arc_grid,
+    decode_arc_grids,
+)
 from .loading import (
     align_evaluation_targets,
     load_evaluation_targets,
@@ -69,6 +75,7 @@ __all__ = [
     "ArcEvaluationTargets",
     "ArcEvaluationTask",
     "ArcGeometry",
+    "ArcGridPrediction",
     "ArcPair",
     "ArcPromptTarget",
     "ArcQuery",
@@ -91,6 +98,9 @@ __all__ = [
     "align_evaluation_targets",
     "apply_training_augmentation",
     "augment_grid",
+    "classify_arc_cells",
+    "decode_arc_grid",
+    "decode_arc_grids",
     "format_augmentation_key",
     "generate_augmented_key_files",
     "load_evaluation_targets",

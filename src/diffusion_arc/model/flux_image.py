@@ -6,8 +6,12 @@ import torch
 from torch import Tensor, nn
 
 from .contracts import (
+    TARGET_IMAGE_SHAPE,
     TARGET_LATENT_CHANNELS,
+    TARGET_LATENT_HEIGHT,
+    TARGET_LATENT_SHAPE,
     TARGET_LATENT_TOKEN_COUNT,
+    TARGET_LATENT_WIDTH,
 )
 
 
@@ -23,11 +27,8 @@ def _module_input_device_and_dtype(module: nn.Module) -> tuple[torch.device, tor
     return parameter.device, parameter.dtype
 
 
-def _validate_vae_interface(vae: nn.Module) -> None:
-    """Validate stable FLUX.2 VAE structure once at module construction."""
-
-    if not callable(getattr(vae, "encode", None)):
-        raise RuntimeError("FLUX VAE must expose an encode() method")
+def _validate_vae_normalization_interface(vae: nn.Module) -> None:
+    """Validate shared FLUX.2 VAE normalization state once at construction."""
 
     batch_norm = getattr(vae, "bn", None)
     running_mean = getattr(batch_norm, "running_mean", None)
@@ -53,6 +54,22 @@ def _validate_vae_interface(vae: nn.Module) -> None:
     _module_input_device_and_dtype(vae)
 
 
+def _validate_vae_interface(vae: nn.Module) -> None:
+    """Validate the stable FLUX.2 VAE encoder interface."""
+
+    if not callable(getattr(vae, "encode", None)):
+        raise RuntimeError("FLUX VAE must expose an encode() method")
+    _validate_vae_normalization_interface(vae)
+
+
+def _validate_vae_decoder_interface(vae: nn.Module) -> None:
+    """Validate the stable FLUX.2 VAE decoder interface."""
+
+    if not callable(getattr(vae, "decode", None)):
+        raise RuntimeError("FLUX VAE must expose a decode() method")
+    _validate_vae_normalization_interface(vae)
+
+
 def _patchify_latents(latents: Tensor) -> Tensor:
     """Move each spatial 2x2 VAE patch into the channel dimension."""
 
@@ -72,6 +89,47 @@ def _patchify_latents(latents: Tensor) -> Tensor:
         height // 2,
         width // 2,
     )
+
+
+def _unpatchify_latents(latents: Tensor) -> Tensor:
+    """Move packed channel groups back into spatial 2x2 VAE patches."""
+
+    batch_size, channels, height, width = latents.shape
+    latents = latents.reshape(
+        batch_size,
+        channels // 4,
+        2,
+        2,
+        height,
+        width,
+    )
+    latents = latents.permute(0, 1, 4, 2, 5, 3)
+    return latents.reshape(
+        batch_size,
+        channels // 4,
+        height * 2,
+        width * 2,
+    )
+
+
+def _normalization_statistics(
+    vae: nn.Module,
+    reference: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Return broadcast FLUX VAE BatchNorm statistics on a tensor's placement."""
+
+    running_mean = vae.bn.running_mean.reshape(1, -1, 1, 1).to(
+        device=reference.device,
+        dtype=reference.dtype,
+    )
+    running_std = torch.sqrt(
+        vae.bn.running_var.reshape(1, -1, 1, 1)
+        + vae.config.batch_norm_eps
+    ).to(
+        device=reference.device,
+        dtype=reference.dtype,
+    )
+    return running_mean, running_std
 
 
 class FluxVaeEncoder(nn.Module):
@@ -113,17 +171,9 @@ class FluxVaeEncoder(nn.Module):
             vae_latents = posterior_mode()
             packed_latents = _patchify_latents(vae_latents)
 
-            batch_norm = self.vae.bn
-            running_mean = batch_norm.running_mean.reshape(1, -1, 1, 1).to(
-                device=packed_latents.device,
-                dtype=packed_latents.dtype,
-            )
-            running_std = torch.sqrt(
-                batch_norm.running_var.reshape(1, -1, 1, 1)
-                + self.vae.config.batch_norm_eps
-            ).to(
-                device=packed_latents.device,
-                dtype=packed_latents.dtype,
+            running_mean, running_std = _normalization_statistics(
+                self.vae,
+                packed_latents,
             )
             normalized_latents = (packed_latents - running_mean) / running_std
             clean_latents = normalized_latents.reshape(
@@ -135,4 +185,77 @@ class FluxVaeEncoder(nn.Module):
         return clean_latents
 
 
-__all__ = ["FluxVaeEncoder"]
+class FluxVaeDecoder(nn.Module):
+    """Decode packed FLUX states through a permanently frozen FLUX.2 VAE."""
+
+    def __init__(self, vae: nn.Module) -> None:
+        super().__init__()
+        if not isinstance(vae, nn.Module):
+            raise TypeError("vae must be a torch.nn.Module")
+        _validate_vae_decoder_interface(vae)
+
+        self.vae = vae
+        self.vae.requires_grad_(False)
+        self.train(False)
+
+    def train(self, mode: bool = True) -> FluxVaeDecoder:
+        """Keep both the decoder and its frozen VAE in evaluation mode."""
+
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        super().train(False)
+        self.vae.eval()
+        return self
+
+    def forward(self, packed_latents: Tensor) -> Tensor:
+        """Decode trusted packed FLUX latents into normalized RGB images."""
+
+        if not isinstance(packed_latents, Tensor):
+            raise TypeError("packed_latents must be a torch.Tensor")
+        if (
+            packed_latents.ndim != 3
+            or tuple(packed_latents.shape[1:]) != TARGET_LATENT_SHAPE
+        ):
+            raise ValueError(
+                f"packed_latents must have shape [B, {TARGET_LATENT_TOKEN_COUNT}, "
+                f"{TARGET_LATENT_CHANNELS}]"
+            )
+        if packed_latents.shape[0] == 0:
+            raise ValueError("packed_latents must contain at least one sample")
+        if not packed_latents.dtype.is_floating_point:
+            raise TypeError("packed_latents must use a floating-point dtype")
+
+        device, dtype = _module_input_device_and_dtype(self.vae)
+        packed_grid = packed_latents.to(device=device, dtype=dtype).transpose(1, 2)
+        packed_grid = packed_grid.reshape(
+            packed_latents.shape[0],
+            TARGET_LATENT_CHANNELS,
+            TARGET_LATENT_HEIGHT,
+            TARGET_LATENT_WIDTH,
+        )
+
+        with torch.no_grad():
+            running_mean, running_std = _normalization_statistics(
+                self.vae,
+                packed_grid,
+            )
+            vae_latents = _unpatchify_latents(
+                packed_grid * running_std + running_mean
+            )
+            decoder_output = self.vae.decode(vae_latents)
+            images = getattr(decoder_output, "sample", None)
+
+        if not isinstance(images, Tensor):
+            raise RuntimeError("FLUX VAE decode() output must expose a tensor sample")
+        expected_shape = (packed_latents.shape[0], *TARGET_IMAGE_SHAPE)
+        if tuple(images.shape) != expected_shape:
+            raise RuntimeError(
+                f"decoded images must have shape {expected_shape}, "
+                f"received {tuple(images.shape)}"
+            )
+        if not images.dtype.is_floating_point:
+            raise RuntimeError("decoded images must use a floating-point dtype")
+        return images
+
+
+__all__ = ["FluxVaeDecoder", "FluxVaeEncoder"]
