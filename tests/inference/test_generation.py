@@ -19,7 +19,12 @@ from diffusion_arc.inference import (
     generate_arc_batch,
     linear_timestep_schedule,
 )
-from diffusion_arc.model import TARGET_LATENT_SHAPE, FluxTextInputs
+from diffusion_arc.model import (
+    TARGET_LATENT_CHANNELS,
+    TARGET_LATENT_SHAPE,
+    FluxSpatialShape,
+    FluxTextInputs,
+)
 
 
 class ConstantVelocityTransformer(nn.Module):
@@ -51,16 +56,25 @@ class ConstantVelocityTransformer(nn.Module):
 class PaletteImageDecoder(nn.Module):
     def __init__(self, grid: tuple[tuple[int, ...], ...]) -> None:
         super().__init__()
-        self.register_buffer("image", render_grid_canvas(grid))
+        self.grid = grid
         self.calls = 0
         self.grad_modes: list[bool] = []
         self.last_latents: torch.Tensor | None = None
 
-    def forward(self, latents: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        latents: torch.Tensor,
+        *,
+        spatial_shape: FluxSpatialShape,
+    ) -> torch.Tensor:
         self.calls += 1
         self.grad_modes.append(torch.is_grad_enabled())
         self.last_latents = latents.detach().clone()
-        return self.image.unsqueeze(0).expand(latents.shape[0], -1, -1, -1)
+        image = render_grid_canvas(
+            self.grid,
+            canvas_size=spatial_shape.height,
+        ).to(device=latents.device)
+        return image.unsqueeze(0).expand(latents.shape[0], -1, -1, -1)
 
 
 def _text_inputs(batch_size: int = 1) -> FluxTextInputs:
@@ -152,6 +166,32 @@ class GenerationTests(unittest.TestCase):
         torch.testing.assert_close(first.final_latents, second.final_latents)
         torch.testing.assert_close(first.rgb_images, second.rgb_images)
         self.assertEqual(first.predictions[0].grid, second.predictions[0].grid)
+
+    def test_generates_known_full_compact_grid_without_pad_inference(self) -> None:
+        spatial_shape = FluxSpatialShape(height=3, width=3)
+        grid = ((1, 2, 3), (4, 5, 6), (7, 8, 9))
+        transformer = ConstantVelocityTransformer(velocity=0.0)
+        decoder = PaletteImageDecoder(grid)
+
+        result = generate_arc_batch(
+            transformer,
+            decoder,
+            _text_inputs(),
+            timestep_schedule=(1.0, 0.0),
+            compute_dtype=torch.bfloat16,
+            generator=torch.Generator().manual_seed(17),
+            spatial_shape=spatial_shape,
+            infer_padding_boundary=False,
+        )
+
+        self.assertEqual(
+            result.final_latents.shape,
+            (1, 9, TARGET_LATENT_CHANNELS),
+        )
+        self.assertEqual(result.rgb_images.shape, (1, 3, 48, 48))
+        self.assertEqual(result.class_canvases.shape, (1, 3, 3))
+        self.assertTrue(result.predictions[0].valid)
+        self.assertEqual(result.predictions[0].grid, grid)
 
     def test_requires_strict_one_to_zero_schedule(self) -> None:
         torch.testing.assert_close(

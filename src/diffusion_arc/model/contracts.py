@@ -45,6 +45,48 @@ TARGET_LATENT_SHAPE = (
 
 
 @dataclass(frozen=True)
+class FluxSpatialShape:
+    """Explicit packed FLUX image-token geometry for one experiment.
+
+    The primary ARC path remains the fixed ``30x30`` token grid.  Diagnostic
+    experiments may pass another explicitly validated geometry without
+    changing the default contract used by training and inference.
+    """
+
+    height: int
+    width: int
+
+    def __post_init__(self) -> None:
+        for name, value in (("height", self.height), ("width", self.width)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+
+    @property
+    def token_count(self) -> int:
+        """Return the number of packed image tokens."""
+
+        return self.height * self.width
+
+    @property
+    def image_height(self) -> int:
+        """Return the corresponding VAE image height in pixels."""
+
+        return self.height * 16
+
+    @property
+    def image_width(self) -> int:
+        """Return the corresponding VAE image width in pixels."""
+
+        return self.width * 16
+
+
+DEFAULT_FLUX_SPATIAL_SHAPE = FluxSpatialShape(
+    height=TARGET_LATENT_HEIGHT,
+    width=TARGET_LATENT_WIDTH,
+)
+
+
+@dataclass(frozen=True)
 class PackedTrainingBatch:
     """Packed source sequences and their aligned training target exposures.
 
@@ -254,7 +296,9 @@ __all__ = [
     "TARGET_LATENT_SHAPE",
     "TARGET_LATENT_TOKEN_COUNT",
     "TARGET_LATENT_WIDTH",
+    "DEFAULT_FLUX_SPATIAL_SHAPE",
     "FlowMatchingBatch",
+    "FluxSpatialShape",
     "FluxTextInputs",
     "NvarcBatchOutput",
     "PackedTrainingBatch",

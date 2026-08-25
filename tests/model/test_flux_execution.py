@@ -14,6 +14,7 @@ from diffusion_arc.model import (
     TARGET_LATENT_SHAPE,
     TARGET_LATENT_TOKEN_COUNT,
     TARGET_LATENT_WIDTH,
+    FluxSpatialShape,
     FluxTextInputs,
     build_flux_image_position_ids,
     predict_flux_velocity,
@@ -123,6 +124,30 @@ class FluxExecutionTests(unittest.TestCase):
         self.assertTrue(
             bool(transformer.attention_mask[:, 0, 0, 3:].all().item())
         )
+
+    def test_runs_compact_nine_token_grid(self) -> None:
+        transformer = RecordingTransformer()
+        spatial_shape = FluxSpatialShape(height=3, width=3)
+        latents = torch.randn(2, spatial_shape.token_count, TARGET_LATENT_CHANNELS)
+        image_ids = build_flux_image_position_ids(
+            2,
+            torch.device("cpu"),
+            spatial_shape=spatial_shape,
+        )
+
+        result = predict_flux_velocity(
+            transformer,
+            latents,
+            _text_inputs(),
+            image_ids,
+            torch.tensor((1.0, 0.25)),
+            compute_dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(result.shape, latents.shape)
+        self.assertEqual(image_ids.shape, (2, 9, 4))
+        self.assertEqual(tuple(image_ids[0, -1].tolist()), (0, 2, 2, 0))
+        self.assertEqual(transformer.attention_mask.shape, (2, 1, 1, 12))
 
     def test_rejects_wrong_image_token_shape_before_transformer_work(self) -> None:
         transformer = RecordingTransformer()

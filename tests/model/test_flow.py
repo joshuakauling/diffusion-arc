@@ -90,7 +90,8 @@ class FlowMatchingTests(unittest.TestCase):
 
     def test_rejects_invalid_clean_latent_contract(self) -> None:
         invalid_latents = (
-            torch.zeros((1, TARGET_LATENT_SHAPE[0] - 1, TARGET_LATENT_SHAPE[1])),
+            torch.zeros((1, TARGET_LATENT_SHAPE[0], TARGET_LATENT_SHAPE[1] - 1)),
+            torch.zeros((1, 0, TARGET_LATENT_SHAPE[1])),
             torch.zeros((0, *TARGET_LATENT_SHAPE)),
             torch.zeros((1, *TARGET_LATENT_SHAPE), dtype=torch.int64),
         )
@@ -108,6 +109,19 @@ class FlowMatchingTests(unittest.TestCase):
                 _clean_latents(1),
                 generator=object(),
             )
+
+    def test_compact_token_grid_uses_the_same_flow_objective(self) -> None:
+        clean_latents = torch.randn(2, 9, TARGET_LATENT_SHAPE[1])
+
+        result = sample_flow_matching_batch(
+            clean_latents,
+            generator=torch.Generator().manual_seed(23),
+        )
+        loss = flow_matching_loss(result.target_velocity, result.target_velocity)
+
+        self.assertEqual(result.noisy_latents.shape, clean_latents.shape)
+        self.assertEqual(result.target_velocity.shape, clean_latents.shape)
+        self.assertEqual(loss.item(), 0.0)
 
     def test_output_contract_is_frozen(self) -> None:
         result = sample_flow_matching_batch(

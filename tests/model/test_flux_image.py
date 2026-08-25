@@ -9,6 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from diffusion_arc.model import (
+    DEFAULT_FLUX_SPATIAL_SHAPE,
     TARGET_IMAGE_SHAPE,
     TARGET_LATENT_CHANNELS,
     TARGET_LATENT_HEIGHT,
@@ -17,17 +18,21 @@ from diffusion_arc.model import (
     TARGET_LATENT_WIDTH,
     FluxVaeDecoder,
     FluxVaeEncoder,
+    FluxSpatialShape,
 )
 
 
+COMPACT_SPATIAL_SHAPE = FluxSpatialShape(height=3, width=3)
+
+
 class _FakePosterior:
-    def __init__(self, vae: FakeFluxVae, batch_size: int) -> None:
+    def __init__(self, vae: FakeFluxVae, latents: Tensor) -> None:
         self._vae = vae
-        self._batch_size = batch_size
+        self._latents = latents
 
     def mode(self) -> Tensor:
         self._vae.posterior_mode_calls += 1
-        return self._vae.encoded_latents[: self._batch_size]
+        return self._latents
 
 
 class FakeFluxVae(nn.Module):
@@ -47,11 +52,6 @@ class FakeFluxVae(nn.Module):
         ).to(dtype=dtype)
         self.config = SimpleNamespace(batch_norm_eps=batch_norm_eps)
 
-        values = torch.arange(
-            batch_size * 32 * 60 * 60,
-            dtype=dtype,
-        ).reshape(batch_size, 32, 60, 60)
-        self.register_buffer("encoded_latents", values.div(1000.0))
         with torch.no_grad():
             self.bn.running_mean.copy_(
                 torch.linspace(-0.5, 0.5, TARGET_LATENT_CHANNELS, dtype=dtype)
@@ -68,6 +68,7 @@ class FakeFluxVae(nn.Module):
         self.decode_training_modes: list[bool] = []
         self.decode_grad_modes: list[bool] = []
         self.last_images: Tensor | None = None
+        self.last_encoded_latents: Tensor | None = None
         self.last_decode_latents: Tensor | None = None
 
     def encode(self, images: Tensor) -> SimpleNamespace:
@@ -75,8 +76,16 @@ class FakeFluxVae(nn.Module):
         self.seen_training_modes.append(self.training)
         self.seen_grad_modes.append(torch.is_grad_enabled())
         self.last_images = images.detach().clone()
+        latent_height = images.shape[2] // 8
+        latent_width = images.shape[3] // 8
+        values = torch.arange(
+            images.shape[0] * 32 * latent_height * latent_width,
+            dtype=images.dtype,
+            device=images.device,
+        ).reshape(images.shape[0], 32, latent_height, latent_width)
+        self.last_encoded_latents = values.div(1000.0)
         return SimpleNamespace(
-            latent_dist=_FakePosterior(self, images.shape[0]),
+            latent_dist=_FakePosterior(self, self.last_encoded_latents),
         )
 
     def decode(self, latents: Tensor) -> SimpleNamespace:
@@ -85,7 +94,12 @@ class FakeFluxVae(nn.Module):
         self.decode_grad_modes.append(torch.is_grad_enabled())
         self.last_decode_latents = latents.detach().clone()
         values = latents.mean(dim=(1, 2, 3), keepdim=True)
-        images = values.expand(latents.shape[0], *TARGET_IMAGE_SHAPE)
+        images = values.expand(
+            latents.shape[0],
+            3,
+            latents.shape[2] * 8,
+            latents.shape[3] * 8,
+        )
         return SimpleNamespace(sample=images)
 
 
@@ -93,12 +107,24 @@ def _target_images(
     batch_size: int = 1,
     *,
     dtype: torch.dtype = torch.float32,
+    spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
 ) -> Tensor:
-    return torch.zeros((batch_size, *TARGET_IMAGE_SHAPE), dtype=dtype)
+    return torch.zeros(
+        (
+            batch_size,
+            3,
+            spatial_shape.image_height,
+            spatial_shape.image_width,
+        ),
+        dtype=dtype,
+    )
 
 
 def _reference_clean_latents(vae: FakeFluxVae, batch_size: int) -> Tensor:
-    latents = vae.encoded_latents[:batch_size]
+    latents = vae.last_encoded_latents
+    if latents is None:
+        raise AssertionError("fake VAE has not encoded images")
+    latents = latents[:batch_size]
     packed = torch.stack(
         tuple(
             latents[:, channel, row_offset::2, column_offset::2]
@@ -117,19 +143,20 @@ def _reference_clean_latents(vae: FakeFluxVae, batch_size: int) -> Tensor:
     return normalized.reshape(
         batch_size,
         TARGET_LATENT_CHANNELS,
-        TARGET_LATENT_TOKEN_COUNT,
+        packed.shape[2] * packed.shape[3],
     ).transpose(1, 2).contiguous()
 
 
 def _reference_vae_decode_latents(
     vae: FakeFluxVae,
     packed_latents: Tensor,
+    spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
 ) -> Tensor:
     packed_grid = packed_latents.to(dtype=vae.anchor.dtype).transpose(1, 2).reshape(
         packed_latents.shape[0],
         TARGET_LATENT_CHANNELS,
-        TARGET_LATENT_HEIGHT,
-        TARGET_LATENT_WIDTH,
+        spatial_shape.height,
+        spatial_shape.width,
     )
     mean = vae.bn.running_mean.reshape(1, -1, 1, 1)
     std = torch.sqrt(
@@ -142,14 +169,14 @@ def _reference_vae_decode_latents(
         32,
         2,
         2,
-        TARGET_LATENT_HEIGHT,
-        TARGET_LATENT_WIDTH,
+        spatial_shape.height,
+        spatial_shape.width,
     ).permute(0, 1, 4, 2, 5, 3)
     return unpatched.reshape(
         packed_latents.shape[0],
         32,
-        TARGET_LATENT_HEIGHT * 2,
-        TARGET_LATENT_WIDTH * 2,
+        spatial_shape.height * 2,
+        spatial_shape.width * 2,
     )
 
 
@@ -169,6 +196,21 @@ class FluxVaeEncoderTests(unittest.TestCase):
 
         self.assertIsInstance(result, Tensor)
         self.assertEqual(result.shape, (2, *TARGET_LATENT_SHAPE))
+        torch.testing.assert_close(
+            result,
+            _reference_clean_latents(vae, batch_size=2),
+        )
+
+    def test_encodes_explicit_compact_spatial_shape(self) -> None:
+        vae = FakeFluxVae(batch_size=2)
+        encoder = FluxVaeEncoder(vae)
+
+        result = encoder(
+            _target_images(batch_size=2, spatial_shape=COMPACT_SPATIAL_SHAPE),
+            spatial_shape=COMPACT_SPATIAL_SHAPE,
+        )
+
+        self.assertEqual(result.shape, (2, 9, TARGET_LATENT_CHANNELS))
         torch.testing.assert_close(
             result,
             _reference_clean_latents(vae, batch_size=2),
@@ -242,6 +284,31 @@ class FluxVaeDecoderTests(unittest.TestCase):
         )
         self.assertEqual(result.shape, (1, *TARGET_IMAGE_SHAPE))
         self.assertEqual(result.dtype, torch.float64)
+
+    def test_decodes_explicit_compact_spatial_shape(self) -> None:
+        vae = FakeFluxVae(batch_size=1, dtype=torch.float64)
+        decoder = FluxVaeDecoder(vae)
+        packed_latents = torch.linspace(
+            -1.0,
+            1.0,
+            steps=COMPACT_SPATIAL_SHAPE.token_count * TARGET_LATENT_CHANNELS,
+            dtype=torch.float32,
+        ).reshape(1, COMPACT_SPATIAL_SHAPE.token_count, TARGET_LATENT_CHANNELS)
+
+        result = decoder(
+            packed_latents,
+            spatial_shape=COMPACT_SPATIAL_SHAPE,
+        )
+
+        torch.testing.assert_close(
+            vae.last_decode_latents,
+            _reference_vae_decode_latents(
+                vae,
+                packed_latents,
+                COMPACT_SPATIAL_SHAPE,
+            ),
+        )
+        self.assertEqual(result.shape, (1, 3, 48, 48))
 
     def test_freezes_vae_decodes_without_grad_and_stays_in_eval_mode(self) -> None:
         vae = FakeFluxVae().train()

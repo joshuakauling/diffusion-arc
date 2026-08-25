@@ -24,12 +24,21 @@ class ArcGridPrediction:
     invalid_reason: str | None
 
 
-def classify_arc_cells(rgb_images: Tensor) -> Tensor:
+def classify_arc_cells(
+    rgb_images: Tensor,
+    *,
+    canvas_size: int = CANVAS_SIZE,
+    cell_size: int = CELL_SIZE,
+    include_pad: bool = True,
+) -> Tensor:
     """Classify uint8 RGB cell means against the ten ARC colors and PAD."""
 
     if not isinstance(rgb_images, Tensor):
         raise TypeError("rgb_images must be a torch.Tensor")
-    image_size = CANVAS_SIZE * CELL_SIZE
+    _validate_decode_geometry(canvas_size=canvas_size, cell_size=cell_size)
+    if not isinstance(include_pad, bool):
+        raise TypeError("include_pad must be a boolean")
+    image_size = canvas_size * cell_size
     expected_suffix = (3, image_size, image_size)
     if rgb_images.ndim != 4 or tuple(rgb_images.shape[1:]) != expected_suffix:
         raise ValueError(
@@ -43,12 +52,13 @@ def classify_arc_cells(rgb_images: Tensor) -> Tensor:
     cell_means = rgb_images.to(dtype=torch.float32).reshape(
         rgb_images.shape[0],
         3,
-        CANVAS_SIZE,
-        CELL_SIZE,
-        CANVAS_SIZE,
-        CELL_SIZE,
+        canvas_size,
+        cell_size,
+        canvas_size,
+        cell_size,
     ).mean(dim=(3, 5)).permute(0, 2, 3, 1)
-    prototypes = TARGET_PALETTE_RGB.to(
+    prototype_count = PAD_CLASS + 1 if include_pad else PAD_CLASS
+    prototypes = TARGET_PALETTE_RGB[:prototype_count].to(
         device=rgb_images.device,
         dtype=torch.float32,
     )
@@ -58,10 +68,14 @@ def classify_arc_cells(rgb_images: Tensor) -> Tensor:
     return squared_distances.argmin(dim=-1)
 
 
-def decode_arc_grid(class_canvas: Tensor) -> ArcGridPrediction:
+def decode_arc_grid(
+    class_canvas: Tensor,
+    *,
+    canvas_size: int = CANVAS_SIZE,
+) -> ArcGridPrediction:
     """Infer one top-left grid solely from its classified PAD boundary."""
 
-    _validate_class_canvas(class_canvas)
+    _validate_class_canvas(class_canvas, canvas_size=canvas_size)
     cpu_canvas = class_canvas.detach().to(device="cpu", dtype=torch.int64).clone()
     non_pad_positions = torch.nonzero(cpu_canvas != PAD_CLASS, as_tuple=False)
     if non_pad_positions.numel() == 0:
@@ -101,26 +115,101 @@ def decode_arc_grid(class_canvas: Tensor) -> ArcGridPrediction:
     )
 
 
-def decode_arc_grids(class_canvases: Tensor) -> tuple[ArcGridPrediction, ...]:
-    """Decode a non-empty batch of classified 30x30 ARC canvases."""
+def decode_arc_grids(
+    class_canvases: Tensor,
+    *,
+    canvas_size: int = CANVAS_SIZE,
+) -> tuple[ArcGridPrediction, ...]:
+    """Decode a non-empty batch using strict PAD-boundary inference."""
 
     if not isinstance(class_canvases, Tensor):
         raise TypeError("class_canvases must be a torch.Tensor")
     if class_canvases.ndim != 3 or tuple(class_canvases.shape[1:]) != (
-        CANVAS_SIZE,
-        CANVAS_SIZE,
+        canvas_size,
+        canvas_size,
     ):
-        raise ValueError("class_canvases must have shape [B, 30, 30]")
+        raise ValueError(
+            f"class_canvases must have shape [B, {canvas_size}, {canvas_size}]"
+        )
     if class_canvases.shape[0] == 0:
         raise ValueError("class_canvases must contain at least one canvas")
-    return tuple(decode_arc_grid(canvas) for canvas in class_canvases)
+    return tuple(
+        decode_arc_grid(canvas, canvas_size=canvas_size)
+        for canvas in class_canvases
+    )
 
 
-def _validate_class_canvas(class_canvas: Tensor) -> None:
+def decode_fixed_arc_grid(
+    class_canvas: Tensor,
+    *,
+    canvas_size: int,
+) -> ArcGridPrediction:
+    """Decode a known full square grid without consulting a PAD boundary."""
+
+    _validate_class_canvas(class_canvas, canvas_size=canvas_size)
+    cpu_canvas = class_canvas.detach().to(device="cpu", dtype=torch.int64).clone()
+    if bool((cpu_canvas == PAD_CLASS).any().item()):
+        return ArcGridPrediction(
+            class_canvas=cpu_canvas,
+            grid=None,
+            height=canvas_size,
+            width=canvas_size,
+            valid=False,
+            invalid_reason="pad_in_fixed_grid",
+        )
+    grid = tuple(tuple(int(value) for value in row) for row in cpu_canvas.tolist())
+    return ArcGridPrediction(
+        class_canvas=cpu_canvas,
+        grid=grid,
+        height=canvas_size,
+        width=canvas_size,
+        valid=True,
+        invalid_reason=None,
+    )
+
+
+def decode_fixed_arc_grids(
+    class_canvases: Tensor,
+    *,
+    canvas_size: int,
+) -> tuple[ArcGridPrediction, ...]:
+    """Decode a non-empty batch of known full square ARC grids."""
+
+    if not isinstance(class_canvases, Tensor):
+        raise TypeError("class_canvases must be a torch.Tensor")
+    if class_canvases.ndim != 3 or tuple(class_canvases.shape[1:]) != (
+        canvas_size,
+        canvas_size,
+    ):
+        raise ValueError(
+            f"class_canvases must have shape [B, {canvas_size}, {canvas_size}]"
+        )
+    if class_canvases.shape[0] == 0:
+        raise ValueError("class_canvases must contain at least one canvas")
+    return tuple(
+        decode_fixed_arc_grid(canvas, canvas_size=canvas_size)
+        for canvas in class_canvases
+    )
+
+
+def _validate_decode_geometry(*, canvas_size: int, cell_size: int) -> None:
+    for name, value in (("canvas_size", canvas_size), ("cell_size", cell_size)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+
+def _validate_class_canvas(
+    class_canvas: Tensor,
+    *,
+    canvas_size: int,
+) -> None:
     if not isinstance(class_canvas, Tensor):
         raise TypeError("class_canvas must be a torch.Tensor")
-    if tuple(class_canvas.shape) != (CANVAS_SIZE, CANVAS_SIZE):
-        raise ValueError("class_canvas must have shape [30, 30]")
+    _validate_decode_geometry(canvas_size=canvas_size, cell_size=CELL_SIZE)
+    if tuple(class_canvas.shape) != (canvas_size, canvas_size):
+        raise ValueError(
+            f"class_canvas must have shape [{canvas_size}, {canvas_size}]"
+        )
     if class_canvas.dtype != torch.int64:
         raise TypeError("class_canvas must have dtype torch.int64")
     if bool(((class_canvas < 0) | (class_canvas > PAD_CLASS)).any().item()):
@@ -132,4 +221,6 @@ __all__ = [
     "classify_arc_cells",
     "decode_arc_grid",
     "decode_arc_grids",
+    "decode_fixed_arc_grid",
+    "decode_fixed_arc_grids",
 ]

@@ -6,11 +6,9 @@ import torch
 from torch import Tensor, nn
 
 from .contracts import (
+    DEFAULT_FLUX_SPATIAL_SHAPE,
     TARGET_LATENT_CHANNELS,
-    TARGET_LATENT_HEIGHT,
-    TARGET_LATENT_SHAPE,
-    TARGET_LATENT_TOKEN_COUNT,
-    TARGET_LATENT_WIDTH,
+    FluxSpatialShape,
     FluxTextInputs,
 )
 from .flux_text import build_flux_joint_attention_mask
@@ -33,8 +31,10 @@ def flux_transformer_device(transformer: nn.Module) -> torch.device:
 def build_flux_image_position_ids(
     batch_size: int,
     device: torch.device,
+    *,
+    spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
 ) -> Tensor:
-    """Build fixed ``(0, h, w, 0)`` coordinates for ARC image tokens."""
+    """Build ``(0, h, w, 0)`` coordinates for an explicit image-token grid."""
 
     if (
         isinstance(batch_size, bool)
@@ -44,21 +44,23 @@ def build_flux_image_position_ids(
         raise ValueError("batch_size must be a positive integer")
     if not isinstance(device, torch.device):
         raise TypeError("device must be a torch.device")
+    if not isinstance(spatial_shape, FluxSpatialShape):
+        raise TypeError("spatial_shape must be a FluxSpatialShape")
 
     position_ids = torch.zeros(
-        (TARGET_LATENT_HEIGHT, TARGET_LATENT_WIDTH, 4),
+        (spatial_shape.height, spatial_shape.width, 4),
         dtype=torch.int64,
         device=device,
     )
     position_ids[:, :, 1] = torch.arange(
-        TARGET_LATENT_HEIGHT,
+        spatial_shape.height,
         device=device,
     ).unsqueeze(1)
     position_ids[:, :, 2] = torch.arange(
-        TARGET_LATENT_WIDTH,
+        spatial_shape.width,
         device=device,
     ).unsqueeze(0)
-    return position_ids.reshape(1, TARGET_LATENT_TOKEN_COUNT, 4).expand(
+    return position_ids.reshape(1, spatial_shape.token_count, 4).expand(
         batch_size,
         -1,
         -1,
@@ -91,7 +93,7 @@ def predict_flux_velocity(
     transformer_device = flux_transformer_device(transformer)
     joint_attention_mask = build_flux_joint_attention_mask(
         text_inputs.text_attention_mask,
-        image_token_count=TARGET_LATENT_TOKEN_COUNT,
+        image_token_count=latents.shape[1],
     )
     with torch.autocast(
         device_type=transformer_device.type,
@@ -115,7 +117,7 @@ def predict_flux_velocity(
     predicted_velocity = getattr(output, "sample", None)
     if not isinstance(predicted_velocity, Tensor):
         raise RuntimeError("FLUX transformer output must expose a tensor sample")
-    expected_shape = (batch_size, *TARGET_LATENT_SHAPE)
+    expected_shape = tuple(latents.shape)
     if tuple(predicted_velocity.shape) != expected_shape:
         raise RuntimeError(
             f"FLUX velocity must have shape {expected_shape}, "
@@ -135,13 +137,14 @@ def _validate_execution_inputs(
 ) -> int:
     if not isinstance(latents, Tensor):
         raise TypeError("latents must be a torch.Tensor")
-    if latents.ndim != 3 or tuple(latents.shape[1:]) != TARGET_LATENT_SHAPE:
+    if latents.ndim != 3 or latents.shape[2] != TARGET_LATENT_CHANNELS:
         raise ValueError(
-            f"latents must have shape [B, {TARGET_LATENT_TOKEN_COUNT}, "
-            f"{TARGET_LATENT_CHANNELS}]"
+            f"latents must have shape [B, T, {TARGET_LATENT_CHANNELS}]"
         )
     if latents.shape[0] == 0:
         raise ValueError("latents must contain at least one sample")
+    if latents.shape[1] == 0:
+        raise ValueError("latents must contain at least one image token")
     if not latents.dtype.is_floating_point:
         raise TypeError("latents must use a floating-point dtype")
 
@@ -165,7 +168,7 @@ def _validate_execution_inputs(
     if text_attention_mask.dtype != torch.bool:
         raise TypeError("text_attention_mask must have dtype torch.bool")
 
-    expected_image_ids_shape = (batch_size, TARGET_LATENT_TOKEN_COUNT, 4)
+    expected_image_ids_shape = (batch_size, latents.shape[1], 4)
     if tuple(image_position_ids.shape) != expected_image_ids_shape:
         raise ValueError(
             f"image_position_ids must have shape {expected_image_ids_shape}"

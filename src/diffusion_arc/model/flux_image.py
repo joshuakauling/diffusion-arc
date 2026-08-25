@@ -6,12 +6,10 @@ import torch
 from torch import Tensor, nn
 
 from .contracts import (
-    TARGET_IMAGE_SHAPE,
+    DEFAULT_FLUX_SPATIAL_SHAPE,
+    TARGET_IMAGE_CHANNELS,
     TARGET_LATENT_CHANNELS,
-    TARGET_LATENT_HEIGHT,
-    TARGET_LATENT_SHAPE,
-    TARGET_LATENT_TOKEN_COUNT,
-    TARGET_LATENT_WIDTH,
+    FluxSpatialShape,
 )
 
 
@@ -154,8 +152,35 @@ class FluxVaeEncoder(nn.Module):
         self.vae.eval()
         return self
 
-    def forward(self, target_images: Tensor) -> Tensor:
+    def forward(
+        self,
+        target_images: Tensor,
+        *,
+        spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
+    ) -> Tensor:
         """Encode trusted target canvases into clean packed FLUX latents."""
+
+        if not isinstance(target_images, Tensor):
+            raise TypeError("target_images must be a torch.Tensor")
+        if not isinstance(spatial_shape, FluxSpatialShape):
+            raise TypeError("spatial_shape must be a FluxSpatialShape")
+        expected_image_shape = (
+            TARGET_IMAGE_CHANNELS,
+            spatial_shape.image_height,
+            spatial_shape.image_width,
+        )
+        if (
+            target_images.ndim != 4
+            or tuple(target_images.shape[1:]) != expected_image_shape
+        ):
+            raise ValueError(
+                f"target_images must have shape [B, {expected_image_shape[0]}, "
+                f"{expected_image_shape[1]}, {expected_image_shape[2]}]"
+            )
+        if target_images.shape[0] == 0:
+            raise ValueError("target_images must contain at least one image")
+        if not target_images.dtype.is_floating_point:
+            raise TypeError("target_images must use a floating-point dtype")
 
         device, dtype = _module_input_device_and_dtype(self.vae)
         images = target_images.to(device=device, dtype=dtype)
@@ -170,6 +195,17 @@ class FluxVaeEncoder(nn.Module):
                 )
             vae_latents = posterior_mode()
             packed_latents = _patchify_latents(vae_latents)
+            expected_packed_shape = (
+                images.shape[0],
+                TARGET_LATENT_CHANNELS,
+                spatial_shape.height,
+                spatial_shape.width,
+            )
+            if tuple(packed_latents.shape) != expected_packed_shape:
+                raise RuntimeError(
+                    "packed VAE latents must have shape "
+                    f"{expected_packed_shape}, received {tuple(packed_latents.shape)}"
+                )
 
             running_mean, running_std = _normalization_statistics(
                 self.vae,
@@ -179,7 +215,7 @@ class FluxVaeEncoder(nn.Module):
             clean_latents = normalized_latents.reshape(
                 images.shape[0],
                 TARGET_LATENT_CHANNELS,
-                TARGET_LATENT_TOKEN_COUNT,
+                spatial_shape.token_count,
             ).transpose(1, 2).contiguous()
 
         return clean_latents
@@ -207,17 +243,25 @@ class FluxVaeDecoder(nn.Module):
         self.vae.eval()
         return self
 
-    def forward(self, packed_latents: Tensor) -> Tensor:
+    def forward(
+        self,
+        packed_latents: Tensor,
+        *,
+        spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
+    ) -> Tensor:
         """Decode trusted packed FLUX latents into normalized RGB images."""
 
         if not isinstance(packed_latents, Tensor):
             raise TypeError("packed_latents must be a torch.Tensor")
+        if not isinstance(spatial_shape, FluxSpatialShape):
+            raise TypeError("spatial_shape must be a FluxSpatialShape")
         if (
             packed_latents.ndim != 3
-            or tuple(packed_latents.shape[1:]) != TARGET_LATENT_SHAPE
+            or tuple(packed_latents.shape[1:])
+            != (spatial_shape.token_count, TARGET_LATENT_CHANNELS)
         ):
             raise ValueError(
-                f"packed_latents must have shape [B, {TARGET_LATENT_TOKEN_COUNT}, "
+                f"packed_latents must have shape [B, {spatial_shape.token_count}, "
                 f"{TARGET_LATENT_CHANNELS}]"
             )
         if packed_latents.shape[0] == 0:
@@ -230,8 +274,8 @@ class FluxVaeDecoder(nn.Module):
         packed_grid = packed_grid.reshape(
             packed_latents.shape[0],
             TARGET_LATENT_CHANNELS,
-            TARGET_LATENT_HEIGHT,
-            TARGET_LATENT_WIDTH,
+            spatial_shape.height,
+            spatial_shape.width,
         )
 
         with torch.no_grad():
@@ -247,7 +291,12 @@ class FluxVaeDecoder(nn.Module):
 
         if not isinstance(images, Tensor):
             raise RuntimeError("FLUX VAE decode() output must expose a tensor sample")
-        expected_shape = (packed_latents.shape[0], *TARGET_IMAGE_SHAPE)
+        expected_shape = (
+            packed_latents.shape[0],
+            TARGET_IMAGE_CHANNELS,
+            spatial_shape.image_height,
+            spatial_shape.image_width,
+        )
         if tuple(images.shape) != expected_shape:
             raise RuntimeError(
                 f"decoded images must have shape {expected_shape}, "

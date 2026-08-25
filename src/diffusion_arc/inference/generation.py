@@ -13,9 +13,15 @@ from diffusion_arc.arc_data.decoding import (
     ArcGridPrediction,
     classify_arc_cells,
     decode_arc_grids,
+    decode_fixed_arc_grids,
 )
 from diffusion_arc.arc_data.types import Grid
-from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE, FluxTextInputs
+from diffusion_arc.model.contracts import (
+    DEFAULT_FLUX_SPATIAL_SHAPE,
+    TARGET_LATENT_CHANNELS,
+    FluxSpatialShape,
+    FluxTextInputs,
+)
 from diffusion_arc.model.flux_execution import (
     build_flux_image_position_ids,
     flux_transformer_device,
@@ -75,6 +81,8 @@ def generate_arc_batch(
     timestep_schedule: Tensor | Sequence[float],
     compute_dtype: torch.dtype,
     generator: torch.Generator,
+    spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
+    infer_padding_boundary: bool = True,
 ) -> ArcGenerationBatch:
     """Generate one batch from cached NVARC conditioning and decode it once."""
 
@@ -89,6 +97,12 @@ def generate_arc_batch(
         raise ValueError("text_inputs must contain at least one sample")
     if not isinstance(generator, torch.Generator):
         raise TypeError("generator must be a torch.Generator")
+    if not isinstance(spatial_shape, FluxSpatialShape):
+        raise TypeError("spatial_shape must be a FluxSpatialShape")
+    if spatial_shape.height != spatial_shape.width:
+        raise ValueError("ARC generation requires a square spatial_shape")
+    if not isinstance(infer_padding_boundary, bool):
+        raise TypeError("infer_padding_boundary must be a boolean")
 
     transformer_device = flux_transformer_device(transformer)
     schedule = _prepare_timestep_schedule(
@@ -98,6 +112,7 @@ def generate_arc_batch(
     image_position_ids = build_flux_image_position_ids(
         batch_size,
         transformer_device,
+        spatial_shape=spatial_shape,
     )
 
     previous_training_mode = transformer.training
@@ -105,7 +120,11 @@ def generate_arc_batch(
     try:
         with torch.inference_mode():
             latents = torch.randn(
-                (batch_size, *TARGET_LATENT_SHAPE),
+                (
+                    batch_size,
+                    spatial_shape.token_count,
+                    TARGET_LATENT_CHANNELS,
+                ),
                 device=transformer_device,
                 dtype=torch.float32,
                 generator=generator,
@@ -127,13 +146,29 @@ def generate_arc_batch(
                 delta = (next_timestep - timestep).to(dtype=latents.dtype)
                 latents = latents + delta * velocity.to(dtype=latents.dtype)
 
-            decoded_images = vae_decoder(latents)
+            decoded_images = vae_decoder(
+                latents,
+                spatial_shape=spatial_shape,
+            )
     finally:
         transformer.train(previous_training_mode)
 
     rgb_images = _normalized_images_to_uint8(decoded_images)
-    class_canvases = classify_arc_cells(rgb_images)
-    predictions = decode_arc_grids(class_canvases)
+    class_canvases = classify_arc_cells(
+        rgb_images,
+        canvas_size=spatial_shape.height,
+        include_pad=infer_padding_boundary,
+    )
+    if infer_padding_boundary:
+        predictions = decode_arc_grids(
+            class_canvases,
+            canvas_size=spatial_shape.height,
+        )
+    else:
+        predictions = decode_fixed_arc_grids(
+            class_canvases,
+            canvas_size=spatial_shape.height,
+        )
     return ArcGenerationBatch(
         timestep_schedule=schedule.detach().to(device="cpu"),
         final_latents=(

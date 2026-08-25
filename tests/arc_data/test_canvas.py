@@ -78,6 +78,19 @@ class ArcCanvasTest(unittest.TestCase):
         torch.testing.assert_close(images[0, :, 0, 0], normalized_color(1))
         torch.testing.assert_close(images[1, :, 0, 0], normalized_color(2))
 
+    def test_renders_compact_three_by_three_canvas_without_padding(self) -> None:
+        grid = ((1, 2, 3), (4, 5, 6), (7, 8, 9))
+
+        image = render_grid_canvas(grid, canvas_size=3)
+
+        self.assertEqual(image.shape, (3, 48, 48))
+        torch.testing.assert_close(image[:, 0, 0], normalized_color(1))
+        torch.testing.assert_close(image[:, 47, 47], normalized_color(9))
+
+    def test_rejects_grid_larger_than_explicit_compact_canvas(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exceeds canvas"):
+            render_grid_canvas(((1, 2, 3, 4),), canvas_size=3)
+
     def test_rejects_grids_larger_than_the_canvas(self) -> None:
         oversized_grids = (
             tuple((0,) for _ in range(31)),

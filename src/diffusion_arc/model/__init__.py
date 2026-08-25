@@ -1,6 +1,7 @@
 """Public model-layer contracts for Diffusion-ARC."""
 
 from .contracts import (
+    DEFAULT_FLUX_SPATIAL_SHAPE,
     NVARC_CONTEXT_WIDTH,
     NVARC_HIDDEN_SIZE,
     NVARC_HIDDEN_STATE_INDICES,
@@ -17,6 +18,7 @@ from .contracts import (
     TARGET_LATENT_TOKEN_COUNT,
     TARGET_LATENT_WIDTH,
     FlowMatchingBatch,
+    FluxSpatialShape,
     FluxTextInputs,
     NvarcBatchOutput,
     PackedTrainingBatch,
@@ -34,6 +36,7 @@ from .flux_text import build_flux_joint_attention_mask, pad_flux_text_prefixes
 from .nvarc import NvarcBatchRunner
 
 __all__ = [
+    "DEFAULT_FLUX_SPATIAL_SHAPE",
     "NVARC_CONTEXT_WIDTH",
     "NVARC_HIDDEN_SIZE",
     "NVARC_HIDDEN_STATE_INDICES",
@@ -50,6 +53,7 @@ __all__ = [
     "TARGET_LATENT_TOKEN_COUNT",
     "TARGET_LATENT_WIDTH",
     "FlowMatchingBatch",
+    "FluxSpatialShape",
     "FluxTextInputs",
     "FluxVaeDecoder",
     "FluxVaeEncoder",

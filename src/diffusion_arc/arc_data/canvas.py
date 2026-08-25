@@ -15,23 +15,45 @@ CANVAS_SIZE = ARC_GRID_SIZE
 CELL_SIZE = 16
 
 
-def render_grid_canvas(grid: Grid) -> Tensor:
-    """Render one top-left-aligned ARC grid as ``[3, 480, 480]`` in ``[-1, 1]``."""
+def render_grid_canvas(
+    grid: Grid,
+    *,
+    canvas_size: int = CANVAS_SIZE,
+) -> Tensor:
+    """Render one top-left-aligned ARC grid on an explicit square canvas."""
 
     validate_arc_grid(grid)
-    return _render_valid_grid_canvas(grid)
+    return _render_valid_grid_canvas(grid, canvas_size=canvas_size)
 
 
-def _render_valid_grid_canvas(grid: Grid) -> Tensor:
+def _render_valid_grid_canvas(
+    grid: Grid,
+    *,
+    canvas_size: int = CANVAS_SIZE,
+) -> Tensor:
     """Render a grid whose ARC shape and palette were validated at ingestion."""
 
+    if (
+        isinstance(canvas_size, bool)
+        or not isinstance(canvas_size, int)
+        or canvas_size <= 0
+        or canvas_size > CANVAS_SIZE
+    ):
+        raise ValueError(f"canvas_size must lie in [1, {CANVAS_SIZE}]")
+
+    height = len(grid)
+    width = len(grid[0])
+    if height > canvas_size or width > canvas_size:
+        raise ValueError(
+            f"grid shape {(height, width)} exceeds canvas size {canvas_size}"
+        )
+
     class_canvas = torch.full(
-        (CANVAS_SIZE, CANVAS_SIZE),
+        (canvas_size, canvas_size),
         PAD_CLASS,
         dtype=torch.int64,
     )
     grid_tensor = torch.tensor(grid, dtype=torch.int64)
-    height, width = grid_tensor.shape
     class_canvas[:height, :width] = grid_tensor
 
     rgb = TARGET_PALETTE_RGB[class_canvas]
@@ -44,6 +66,8 @@ def _render_valid_grid_canvas(grid: Grid) -> Tensor:
 
 def render_training_target_canvases(
     sample: ArcRenderedTrainingSample,
+    *,
+    canvas_size: int = CANVAS_SIZE,
 ) -> Tensor:
     """Render the training targets in the same order as their prompt cuts."""
 
@@ -51,7 +75,13 @@ def render_training_target_canvases(
         raise ValueError("a rendered training sample must contain at least one target")
 
     return torch.stack(
-        tuple(_render_valid_grid_canvas(target.target_grid) for target in sample.targets)
+        tuple(
+            _render_valid_grid_canvas(
+                target.target_grid,
+                canvas_size=canvas_size,
+            )
+            for target in sample.targets
+        )
     )
 
 

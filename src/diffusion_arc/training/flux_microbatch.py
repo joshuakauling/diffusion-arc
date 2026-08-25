@@ -8,7 +8,11 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from diffusion_arc.model.contracts import FluxTextInputs
+from diffusion_arc.model.contracts import (
+    DEFAULT_FLUX_SPATIAL_SHAPE,
+    FluxSpatialShape,
+    FluxTextInputs,
+)
 from diffusion_arc.model.flux_execution import build_flux_image_position_ids
 from diffusion_arc.model.flux_text import pad_flux_text_prefixes
 
@@ -34,7 +38,11 @@ class FluxMicrobatch:
         return self.clean_latents.shape[0]
 
 
-def build_flux_microbatch(flux_inputs: Sequence[FluxInput]) -> FluxMicrobatch:
+def build_flux_microbatch(
+    flux_inputs: Sequence[FluxInput],
+    *,
+    spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
+) -> FluxMicrobatch:
     """Copy logical inputs into one physical batch and release consumed states.
 
     Every validation and tensor allocation completes before any pending prefix
@@ -45,6 +53,8 @@ def build_flux_microbatch(flux_inputs: Sequence[FluxInput]) -> FluxMicrobatch:
     inputs = tuple(flux_inputs)
     if not inputs:
         raise ValueError("flux_inputs must not be empty")
+    if not isinstance(spatial_shape, FluxSpatialShape):
+        raise TypeError("spatial_shape must be a FluxSpatialShape")
 
     pending_by_state: dict[NvarcSequenceState, list[int]] = {}
     for flux_input in inputs:
@@ -63,9 +73,14 @@ def build_flux_microbatch(flux_inputs: Sequence[FluxInput]) -> FluxMicrobatch:
     clean_latents = torch.stack(
         tuple(flux_input.clean_latent for flux_input in inputs)
     )
+    if clean_latents.ndim != 3 or clean_latents.shape[1] != spatial_shape.token_count:
+        raise ValueError(
+            "clean latent token count does not match the requested spatial shape"
+        )
     image_position_ids = build_flux_image_position_ids(
         len(inputs),
         clean_latents.device,
+        spatial_shape=spatial_shape,
     )
     microbatch = FluxMicrobatch(
         text_inputs=text_inputs,

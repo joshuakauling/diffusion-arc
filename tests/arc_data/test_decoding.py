@@ -14,6 +14,7 @@ from diffusion_arc.arc_data import (
     classify_arc_cells,
     decode_arc_grid,
     decode_arc_grids,
+    decode_fixed_arc_grids,
 )
 
 
@@ -54,6 +55,31 @@ class ArcDecodingTests(unittest.TestCase):
         result = classify_arc_cells(rgb_images)
 
         self.assertEqual(result[0, 0, 0].item(), 0)
+
+    def test_classifies_and_decodes_known_full_compact_grid(self) -> None:
+        compact = torch.tensor(
+            (((1, 2, 3), (4, 5, 6), (7, 8, 9)),),
+            dtype=torch.int64,
+        )
+        rgb_images = _render_class_canvases(compact)
+
+        classified = classify_arc_cells(
+            rgb_images,
+            canvas_size=3,
+            include_pad=False,
+        )
+        prediction = decode_fixed_arc_grids(
+            classified,
+            canvas_size=3,
+        )[0]
+
+        torch.testing.assert_close(classified, compact)
+        self.assertTrue(prediction.valid)
+        self.assertEqual((prediction.height, prediction.width), (3, 3))
+        self.assertEqual(
+            prediction.grid,
+            ((1, 2, 3), (4, 5, 6), (7, 8, 9)),
+        )
 
     def test_decodes_valid_top_left_grid_from_pad_boundary(self) -> None:
         canvas = torch.full(

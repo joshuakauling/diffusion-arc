@@ -6,7 +6,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .contracts import FlowMatchingBatch, TARGET_LATENT_SHAPE
+from .contracts import FlowMatchingBatch, TARGET_LATENT_CHANNELS
 
 
 def _validate_target_latents(latents: Tensor, *, name: str) -> None:
@@ -14,13 +14,14 @@ def _validate_target_latents(latents: Tensor, *, name: str) -> None:
 
     if not isinstance(latents, Tensor):
         raise TypeError(f"{name} must be a torch.Tensor")
-    if latents.ndim != 3 or tuple(latents.shape[1:]) != TARGET_LATENT_SHAPE:
+    if latents.ndim != 3 or latents.shape[2] != TARGET_LATENT_CHANNELS:
         raise ValueError(
-            f"{name} must have shape [K, {TARGET_LATENT_SHAPE[0]}, "
-            f"{TARGET_LATENT_SHAPE[1]}]"
+            f"{name} must have shape [K, T, {TARGET_LATENT_CHANNELS}]"
         )
     if latents.shape[0] == 0:
         raise ValueError(f"{name} must contain at least one target exposure")
+    if latents.shape[1] == 0:
+        raise ValueError(f"{name} must contain at least one image token")
     if not latents.dtype.is_floating_point:
         raise TypeError(f"{name} must use a floating-point dtype")
 

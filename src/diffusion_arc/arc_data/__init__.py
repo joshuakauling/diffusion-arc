@@ -25,6 +25,8 @@ from .decoding import (
     classify_arc_cells,
     decode_arc_grid,
     decode_arc_grids,
+    decode_fixed_arc_grid,
+    decode_fixed_arc_grids,
 )
 from .loading import (
     align_evaluation_targets,
@@ -101,6 +103,8 @@ __all__ = [
     "classify_arc_cells",
     "decode_arc_grid",
     "decode_arc_grids",
+    "decode_fixed_arc_grid",
+    "decode_fixed_arc_grids",
     "format_augmentation_key",
     "generate_augmented_key_files",
     "load_evaluation_targets",

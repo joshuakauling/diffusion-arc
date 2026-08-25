@@ -31,3 +31,4 @@ details.
 - [FLUX.2 VAE ARC palette experiments](experiments/vae-palette-experiments.md)
 - [Single-GPU overfitting pilot](experiments/single-gpu-overfitting-pilot.md)
 - [Single-GPU overfitting pilot v2](experiments/single-gpu-overfitting-pilot-v2.md)
+- [Single-task spatial overfitting ablation](experiments/single-task-spatial-overfitting-ablation.md)
