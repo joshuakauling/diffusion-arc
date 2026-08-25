@@ -1,0 +1,752 @@
+{
+  "checkpoint_identities": {
+    "file_count": 15,
+    "files": {
+      "flux2-klein-base-4b/flux-2-klein-base-4b.safetensors": {
+        "bytes": 7751105712,
+        "roles": [
+          "flux_transformer_anchor"
+        ],
+        "sha256": "9c5fed22b76baea749d88fc2abe3ad53245e7b21a0d353a762665eea00043b92"
+      },
+      "flux2-klein-base-4b/transformer/config.json": {
+        "bytes": 531,
+        "roles": [
+          "flux_transformer"
+        ],
+        "sha256": "c8a88c1433f24e52c01f46766c9f519e76d91d1c00bfb43fe0db2e4ed3c84d70"
+      },
+      "flux2-klein-base-4b/transformer/diffusion_pytorch_model.safetensors": {
+        "bytes": 7751109744,
+        "roles": [
+          "flux_transformer"
+        ],
+        "sha256": "e109674697ffa1a3983126e32512f5428a9442bd8df59f9c95566ee90a473bb6"
+      },
+      "flux2-klein-base-4b/vae/config.json": {
+        "bytes": 821,
+        "roles": [
+          "flux_vae"
+        ],
+        "sha256": "0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"
+      },
+      "flux2-klein-base-4b/vae/diffusion_pytorch_model.safetensors": {
+        "bytes": 168120878,
+        "roles": [
+          "diffusers_vae_anchor",
+          "flux_vae"
+        ],
+        "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/added_tokens.json": {
+        "bytes": 68,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "cf1224e6a594b51a34b8b9ca6c6dce3026683777521f361e37526b8a33258bce"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/config.json": {
+        "bytes": 1532,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "932e9430395ba3eea4087cba1769241bc7d0dc8d574846862d6983659456a2d0"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/generation_config.json": {
+        "bytes": 113,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "fd0abf1e2baa1f9407803a83486767a6e7841164481d750fcaa9b71d31a0ab02"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/model-00001-of-00002.safetensors": {
+        "bytes": 4996836472,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "379de219f74a1402a67d26fe7dcacdacadbf686947e08e41117dd9c884ee4529"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/model-00002-of-00002.safetensors": {
+        "bytes": 2270397024,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "3b8470b83355ccbc527afcb7a77664bd679e63899a80e79169c016658e6b92e0"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/model.safetensors.index.json": {
+        "bytes": 32913,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "d2d5b2bffaf2fd27bad4452dfb4d4df80c56a4a77f1ac9c40fdd634845680cd4"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/special_tokens_map.json": {
+        "bytes": 367,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "f4f79e08d97f4d1c87f8d89264f525c8789da3b73b3bb55d1e12f692f41a7b1b"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/tokenizer.json": {
+        "bytes": 1731,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "af6b9e855f9db3192bd9152607708ebd7700b40f9fc5f792a26af70150a96cd5"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/tokenizer_config.json": {
+        "bytes": 988,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "e1912aeba4050616cbfe01b34df3f3df2818207eda0056f6eb87c2336936ea90"
+      },
+      "nvarc-qwen3-4b-grids15-sft139/vocab.json": {
+        "bytes": 94,
+        "roles": [
+          "nvarc"
+        ],
+        "sha256": "8141a61e47eceec466524bc178bc9c6d5076b7d1b18b456fbd3fdf66cae57f82"
+      }
+    },
+    "seconds": 20.207971501999964,
+    "verification": {
+      "flux": "official_sha256",
+      "flux_metadata_url": "https://huggingface.co/api/models/black-forest-labs/FLUX.2-klein-base-4B/revision/8c44a2fbef88fae175da65df054db0f901aa9747?blobs=true",
+      "nvarc": "kaggle_handle_version_size_and_observed_sha256",
+      "nvarc_limitation": "Kaggle version metadata does not expose per-file digests.",
+      "nvarc_version_url": "https://www.kaggle.com/models/sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1"
+    }
+  },
+  "completed_at_utc": "2026-08-25T01:30:12.425456+00:00",
+  "configuration": {
+    "flux_microbatch_size": 1,
+    "minimum_vram_gib": 120.0,
+    "optimizer_batch_size": 1,
+    "optimizer_steps": 1,
+    "seed": 167
+  },
+  "download_manifest": {
+    "checks": {
+      "flux_repo_id": true,
+      "flux_requested_revision": true,
+      "flux_resolved_revision": true,
+      "nvarc_handle": true,
+      "nvarc_version": true,
+      "nvarc_weight_sizes": true,
+      "project_file_sha256": true
+    },
+    "payload": {
+      "created_at_utc": "2026-08-24T01:00:27.220037+00:00",
+      "downloaders": {
+        "huggingface-hub": "0.36.2",
+        "kagglehub": "1.0.2"
+      },
+      "flux": {
+        "directory_bytes": 23740010190,
+        "path": "/mnt/diffusion-arc-models/flux2-klein-base-4b",
+        "project_file_sha256": {
+          "diffusers_vae": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04",
+          "flux_transformer": "9c5fed22b76baea749d88fc2abe3ad53245e7b21a0d353a762665eea00043b92"
+        },
+        "repo_id": "black-forest-labs/FLUX.2-klein-base-4B",
+        "requested_revision": "8c44a2fbef88fae175da65df054db0f901aa9747",
+        "resolved_revision": "8c44a2fbef88fae175da65df054db0f901aa9747"
+      },
+      "nvarc": {
+        "directory_bytes": 7267271302,
+        "kaggle_handle": "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1",
+        "path": "/mnt/diffusion-arc-models/nvarc-qwen3-4b-grids15-sft139",
+        "version": 1,
+        "weight_file_bytes": {
+          "model-00001-of-00002.safetensors": 4996836472,
+          "model-00002-of-00002.safetensors": 2270397024
+        }
+      },
+      "standalone_vae": {
+        "bytes": 336211292,
+        "path": "/mnt/diffusion-arc-models/flux2-standalone-vae/ae.safetensors",
+        "repo_id": "black-forest-labs/FLUX.2-dev",
+        "requested_revision": "main",
+        "resolved_revision": "26afe3a78bb242c0a8bb181dcc8937bb16e5c66c",
+        "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+      },
+      "volume_root": "/mnt/diffusion-arc-models"
+    },
+    "sha256": "8c4c11e042bd766849b74946bdbad1761ebe38b88ce0992f18e8b9acbfefd9f4"
+  },
+  "environment": {
+    "bf16_supported": true,
+    "compute_capability": [
+      9,
+      0
+    ],
+    "cuda_runtime": "13.0",
+    "gpu_name": "NVIDIA H200",
+    "gpu_vram_gib": 139.80084228515625,
+    "nvidia_smi": "580.95.05, NVIDIA H200, 143771 MiB",
+    "python": "3.12.6",
+    "sdpa_policy": {
+      "flash_enabled": true,
+      "math_enabled": true,
+      "memory_efficient_enabled": true
+    },
+    "torch": "2.13.0+cu130"
+  },
+  "failures": [],
+  "final_step": {
+    "adam_moment_tensors": 338,
+    "adam_state_steps": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ],
+    "checks": {
+      "adam_moments_exist": true,
+      "adam_moments_finite": true,
+      "adam_moments_fp32": true,
+      "adam_state_created": true,
+      "adam_state_steps_equal_one": true,
+      "all_flux_parameters_have_gradients": true,
+      "finite_fp32_loss": true,
+      "flux_gradients_exist": true,
+      "flux_gradients_finite": true,
+      "flux_gradients_fp32": true,
+      "flux_parameters_fp32": true,
+      "nvarc_gradients_absent": true,
+      "one_microbatch": true,
+      "one_optimizer_callback": true,
+      "one_target": true,
+      "optimizer_step_attempted_once": true,
+      "optimizer_step_completed_once": true,
+      "real_bf16_autocast_observed": true,
+      "tracked_parameter_changed": true,
+      "tracked_parameter_finite": true,
+      "vae_gradients_absent": true
+    },
+    "cuda_memory": {
+      "allocated_gib": 64.90154027938843,
+      "label": "optimizer-step-complete",
+      "peak_allocated_gib": 65.67672348022461,
+      "peak_reserved_gib": 70.177734375,
+      "reserved_gib": 70.177734375
+    },
+    "gradient_tensors": 169,
+    "optimizer_callback": [
+      {
+        "loss": 0.04843596741557121,
+        "loss_dtype": "torch.float32",
+        "microbatch_count": 1,
+        "target_count": 1
+      }
+    ],
+    "optimizer_parameter_states": 169,
+    "optimizer_step_counts": {
+      "attempted": 1,
+      "completed": 1
+    },
+    "parameter_after": 2.5762788936845027e-05,
+    "parameter_before": 3.5762786865234375e-05,
+    "parameter_delta": -9.999997928389348e-06,
+    "seconds": 0.2837927340000306,
+    "source_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+    "tracked_parameter": "time_guidance_embed.timestep_embedder.linear_1.weight",
+    "tracked_parameter_index": 416001,
+    "validation_cuda_memory": {
+      "allocated_gib": 64.90154027938843,
+      "label": "after-final-validation",
+      "peak_allocated_gib": 65.67672348022461,
+      "peak_reserved_gib": 70.177734375,
+      "reserved_gib": 70.177734375
+    }
+  },
+  "hot_path_commits": [
+    "4cb97551b1bbafe7f25745d4567c6acdec37a80e"
+  ],
+  "input_preparation": {
+    "contract": {
+      "clean_latents_dtype": "torch.float32",
+      "clean_latents_shape": [
+        1,
+        900,
+        128
+      ],
+      "image_position_ids_shape": [
+        1,
+        900,
+        4
+      ],
+      "sample_key": "synthetic-modal_ID_0123456789_0,1",
+      "source_tokens": 36,
+      "target_count": 1,
+      "text_dtype": "torch.bfloat16",
+      "text_mask_shape": [
+        1,
+        30
+      ],
+      "text_shape": [
+        1,
+        30,
+        7680
+      ]
+    },
+    "seconds": 2.1922421790000044,
+    "source_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e"
+  },
+  "memory": {
+    "after_final_validation": {
+      "allocated_gib": 64.90154027938843,
+      "label": "after-final-validation",
+      "peak_allocated_gib": 65.67672348022461,
+      "peak_reserved_gib": 70.177734375,
+      "reserved_gib": 70.177734375
+    },
+    "after_input_preparation": {
+      "allocated_gib": 21.554847240447998,
+      "label": "after-input-preparation",
+      "peak_allocated_gib": 22.21851110458374,
+      "peak_reserved_gib": 22.3671875,
+      "reserved_gib": 22.3671875
+    },
+    "after_model_load": {
+      "allocated_gib": 21.522281169891357,
+      "label": "after-model-load",
+      "peak_allocated_gib": 21.522281169891357,
+      "peak_reserved_gib": 21.564453125,
+      "reserved_gib": 21.564453125
+    },
+    "optimizer_step_complete": {
+      "allocated_gib": 64.90154027938843,
+      "label": "optimizer-step-complete",
+      "peak_allocated_gib": 65.67672348022461,
+      "peak_reserved_gib": 70.177734375,
+      "reserved_gib": 70.177734375
+    },
+    "runtime_baseline": {
+      "allocated_gib": 0.0,
+      "label": "runtime-baseline",
+      "peak_allocated_gib": 0.0,
+      "peak_reserved_gib": 0.0,
+      "reserved_gib": 0.0
+    }
+  },
+  "models": {
+    "checks": {
+      "flux_compute_bfloat16": true,
+      "flux_float32": true,
+      "flux_fully_trainable": true,
+      "nvarc_bfloat16": true,
+      "nvarc_frozen": true,
+      "vae_float32": true,
+      "vae_frozen": true
+    },
+    "load_seconds": 6.205404907999991,
+    "source_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+    "summaries": {
+      "flux": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.float32"
+        ],
+        "parameter_tensors": 169,
+        "parameters": 3875544576,
+        "trainable_parameters": 3875544576
+      },
+      "nvarc": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.bfloat16"
+        ],
+        "parameter_tensors": 399,
+        "parameters": 3633593856,
+        "trainable_parameters": 0
+      },
+      "vae": {
+        "devices": [
+          "cuda:0"
+        ],
+        "dtypes": [
+          "torch.float32"
+        ],
+        "parameter_tensors": 248,
+        "parameters": 84046115,
+        "trainable_parameters": 0
+      }
+    }
+  },
+  "notebook_procedure_version": 1,
+  "packages": {
+    "Pillow": "11.3.0",
+    "accelerate": "1.12.0",
+    "diffusers": "0.39.0",
+    "einops": "0.8.1",
+    "safetensors": "0.8.0",
+    "torch": "2.13.0",
+    "transformers": "4.56.1"
+  },
+  "paths": {
+    "download_manifest": "/mnt/diffusion-arc-models/download-manifest.json",
+    "flux_checkpoint": "/mnt/diffusion-arc-models/flux2-klein-base-4b",
+    "nvarc_checkpoint": "/mnt/diffusion-arc-models/nvarc-qwen3-4b-grids15-sft139",
+    "report": "/mnt/diffusion-arc-models/results/single-gpu-training-preflight/20260825T012915701778Z/report.json",
+    "volume_root": "/mnt/diffusion-arc-models"
+  },
+  "previews": [
+    {
+      "adam_parameter_states": 0,
+      "autocast_probe": {
+        "context_embedder": {
+          "autocast_enabled": true,
+          "input_dtype": "torch.bfloat16",
+          "output_dtype": "torch.bfloat16"
+        },
+        "x_embedder": {
+          "autocast_enabled": true,
+          "input_dtype": "torch.float32",
+          "output_dtype": "torch.bfloat16"
+        }
+      },
+      "cuda_memory": {
+        "allocated_gib": 36.02518367767334,
+        "label": "preview-after-backward",
+        "peak_allocated_gib": 36.57889127731323,
+        "peak_reserved_gib": 42.76953125,
+        "reserved_gib": 42.76953125
+      },
+      "gradient_dtype": "torch.float32",
+      "gradient_norm": 2.170020227838121,
+      "gradient_tensors": 169,
+      "hot_path_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+      "loss": 0.04843596741557121,
+      "loss_dtype": "torch.float32",
+      "microbatch_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+      "model_load_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+      "seconds": 1.8285646829999678,
+      "tracked_gradient": 0.0167236328125,
+      "tracked_parameter": "time_guidance_embed.timestep_embedder.linear_1.weight",
+      "tracked_parameter_index": 416001,
+      "trainable_parameter_tensors": 169
+    }
+  ],
+  "question": "Can the current complete single-GPU path execute one numerically valid FP32-parameter/BF16-compute AdamW update on an H200?",
+  "run_id": "20260825T012915701778Z",
+  "schema_version": 1,
+  "source": {
+    "authentication": "github_pat_basic_header",
+    "kernel_import_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+    "package_path": "/root/diffusion-arc/src/diffusion_arc/__init__.py",
+    "path": "/root/diffusion-arc",
+    "repository": "https://github.com/joshuakauling/diffusion-arc.git",
+    "requested_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e",
+    "resolved_commit": "4cb97551b1bbafe7f25745d4567c6acdec37a80e"
+  },
+  "status": "PASS",
+  "synthetic_data": {
+    "augmentation_key": "synthetic-modal_ID_0123456789_0,1",
+    "file_sha256": {
+      "configs/single_gpu.json": "52d3f95f5ff4dedc5125fe83b477fed63881deb14032ef000400cff783ac5f51",
+      "data/raw/synthetic-arc/training/synthetic-modal.json": "6e2d4b0794273fbef59cfd4cc1d0bced3dfe74053956ff68d56567ea0a977062",
+      "data/splits/modal-preflight/augmented_keys/preflight.json": "14f7da725425c543b262142e8422cfe4d9dabec7cdf6513cf1c7819ca5c192d8",
+      "data/splits/modal-preflight/config.json": "676e9f81d6138c3b60d1a5c4c68820d11220637bf173bb75d34c8c954c074ae3",
+      "data/splits/modal-preflight/train.json": "b55f8f73d8da9899c7a5c699a221a8b62a757c2c30ede9ccb7459b39dcc30263",
+      "data/splits/modal-preflight/validation.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    "pair_count": 2,
+    "payload": {
+      "augmentation_keys": [
+        "synthetic-modal_ID_0123456789_0,1"
+      ],
+      "split_config": {
+        "generator_version": 1,
+        "limits": {
+          "max_cells": 16,
+          "max_pairs": 2,
+          "max_tokens": 192
+        },
+        "palette": "greedy_rgb_maximin_v1",
+        "schema_version": 1,
+        "source": {
+          "dataset": "synthetic-arc",
+          "split": "training"
+        },
+        "task_splits": {
+          "train": "train.json",
+          "validation": "validation.json"
+        },
+        "views": {
+          "preflight": {
+            "exclude": [],
+            "mode": "identity",
+            "output": "augmented_keys/preflight.json",
+            "task_split": "train"
+          }
+        }
+      },
+      "task": {
+        "test": [
+          {
+            "input": [
+              [
+                2,
+                2
+              ],
+              [
+                0,
+                2
+              ]
+            ],
+            "output": [
+              [
+                2,
+                0
+              ],
+              [
+                2,
+                2
+              ]
+            ]
+          }
+        ],
+        "train": [
+          {
+            "input": [
+              [
+                1,
+                0
+              ],
+              [
+                0,
+                1
+              ]
+            ],
+            "output": [
+              [
+                0,
+                1
+              ],
+              [
+                1,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "train_task_ids": [
+        "synthetic-modal"
+      ],
+      "validation_task_ids": []
+    },
+    "payload_sha256": "583d29e3505a6612a7c4e88eff1cb8e5f5478b171e2754ebf3d2bb18915009aa",
+    "split_root": "/tmp/diffusion-arc-preflight-20260825T012915701778Z/data/splits/modal-preflight",
+    "task_id": "synthetic-modal",
+    "training_config": "/tmp/diffusion-arc-preflight-20260825T012915701778Z/configs/single_gpu.json"
+  },
+  "training_config": {
+    "data": {
+      "num_workers": 0,
+      "shuffle": false,
+      "split_directory": "/tmp/diffusion-arc-preflight-20260825T012915701778Z/data/splits/modal-preflight",
+      "view_name": "preflight"
+    },
+    "device": "cuda:0",
+    "loop": {
+      "flux_microbatch_size": 1,
+      "max_optimizer_steps": 1,
+      "min_context_pairs_before_target": 1,
+      "optimizer_batch_size": 1
+    },
+    "models": {
+      "flux_checkpoint": "/mnt/diffusion-arc-models/flux2-klein-base-4b",
+      "flux_compute_dtype": "bfloat16",
+      "flux_parameter_dtype": "float32",
+      "nvarc_checkpoint": "/mnt/diffusion-arc-models/nvarc-qwen3-4b-grids15-sft139",
+      "nvarc_dtype": "bfloat16",
+      "vae_dtype": "float32"
+    },
+    "optimizer": {
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "epsilon": 1e-08,
+      "learning_rate": 1e-05,
+      "weight_decay": 0.01
+    },
+    "schema_version": 1,
+    "seed": 167
+  },
+  "unit_tests": {
+    "output_tail": "Flax classes are deprecated and will be removed in Diffusers v0.40.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.\nFlax classes are deprecated and will be removed in Diffusers v0.40.0. We recommend migrating to PyTorch classes or pinning your version of Diffusers.\n.................................................................................................../usr/local/lib/python3.12/site-packages/torch/nn/functional.py:3006: UserWarning: Mismatch dtype between input and weight: input dtype = c10::BFloat16, weight dtype = float, Cannot dispatch to fused implementation. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/layer_norm.cpp:346.)\n  return torch.rms_norm(input, normalized_shape, weight, eps)\n...........................\n----------------------------------------------------------------------\nRan 126 tests in 2.942s\n\nOK",
+    "returncode": 0,
+    "seconds": 11.516907468
+  }
+}
