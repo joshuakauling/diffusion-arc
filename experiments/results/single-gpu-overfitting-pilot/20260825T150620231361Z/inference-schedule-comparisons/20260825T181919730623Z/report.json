@@ -1,0 +1,4356 @@
+{
+  "checkpoint": {
+    "extra_files": [],
+    "index": "diffusion_pytorch_model.safetensors.index.json",
+    "path": "/mnt/diffusion-arc-models/results/single-gpu-overfitting-pilot/20260825T150620231361Z/.flux-transformer-step-2496.partial-c9c70c21fb254c55a9f6fcf4544df352",
+    "shards": [
+      "diffusion_pytorch_model-00001-of-00009.safetensors",
+      "diffusion_pytorch_model-00002-of-00009.safetensors",
+      "diffusion_pytorch_model-00003-of-00009.safetensors",
+      "diffusion_pytorch_model-00004-of-00009.safetensors",
+      "diffusion_pytorch_model-00005-of-00009.safetensors",
+      "diffusion_pytorch_model-00006-of-00009.safetensors",
+      "diffusion_pytorch_model-00007-of-00009.safetensors",
+      "diffusion_pytorch_model-00008-of-00009.safetensors",
+      "diffusion_pytorch_model-00009-of-00009.safetensors"
+    ],
+    "tensor_count": 169,
+    "total_bytes": 15502198744
+  },
+  "configuration": {
+    "generation_seeds": [
+      167,
+      168
+    ],
+    "image_sequence_length": 900,
+    "panels": [
+      "seen_training_augmentation"
+    ],
+    "schedule_specs": [
+      [
+        "linear",
+        50
+      ],
+      [
+        "bfl",
+        50
+      ],
+      [
+        "bfl",
+        100
+      ],
+      [
+        "bfl",
+        200
+      ]
+    ],
+    "task_ids": [
+      "3c9b0459",
+      "0d3d703e",
+      "8be77c9e",
+      "c9e6f938",
+      "00576224",
+      "0520fde7",
+      "88a62173",
+      "d631b094"
+    ]
+  },
+  "created_at_utc": "2026-08-25T18:24:06.206814+00:00",
+  "environment": {
+    "cuda_runtime": "13.0",
+    "gpu_name": "NVIDIA H200",
+    "gpu_vram_gib": 139.80084228515625,
+    "packages": {
+      "Pillow": "11.3.0",
+      "accelerate": "1.12.0",
+      "diffusers": "0.39.0",
+      "einops": "0.8.1",
+      "matplotlib": "3.10.6",
+      "safetensors": "0.8.0",
+      "torch": "2.13.0",
+      "tqdm": "4.67.1",
+      "transformers": "4.56.1"
+    },
+    "python": "3.12.6",
+    "torch": "2.13.0+cu130"
+  },
+  "evaluation_id": "20260825T181919730623Z",
+  "question": "Does a BFL-shifted or longer Euler schedule improve the saved overfitting checkpoint without retraining?",
+  "runs": [
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-linear-50-seed-167",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 50,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.1111111119389534,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              5,
+              7,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              7,
+              7,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.1666666716337204,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              2,
+              8,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              3,
+              2,
+              6,
+              3,
+              7,
+              2
+            ],
+            [
+              6,
+              3,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              2,
+              2
+            ],
+            [
+              3,
+              7,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              7,
+              2
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              7,
+              7,
+              7
+            ],
+            [
+              8,
+              7,
+              8
+            ],
+            [
+              8,
+              8,
+              8
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              6,
+              8
+            ],
+            [
+              6,
+              8
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-167-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              6,
+              6,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "linear",
+      "seconds": 8.476076854000013,
+      "seed": 167
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-linear-50-seed-168",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 50,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              3,
+              2,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              7,
+              7,
+              3,
+              7,
+              7
+            ],
+            [
+              7,
+              3,
+              3,
+              3,
+              7
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0833333358168602,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              6,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              5,
+              6,
+              5,
+              6,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              6,
+              5
+            ],
+            [
+              6,
+              5,
+              6,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              6,
+              5,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              2,
+              2,
+              2
+            ],
+            [
+              6,
+              2,
+              6
+            ],
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              9,
+              9
+            ],
+            [
+              9,
+              9
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-linear-50-seed-168-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              3,
+              3,
+              3
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "linear",
+      "seconds": 8.127239384999996,
+      "seed": 168
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-bfl-50-seed-167",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 50,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0555555559694767,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              5,
+              5,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              7,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.1666666716337204,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              2,
+              8,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              3,
+              2,
+              6,
+              3,
+              7,
+              2
+            ],
+            [
+              6,
+              3,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              2,
+              2
+            ],
+            [
+              3,
+              7,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              7,
+              2
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              7,
+              7,
+              7
+            ],
+            [
+              8,
+              7,
+              8
+            ],
+            [
+              8,
+              8,
+              8
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              6,
+              8
+            ],
+            [
+              6,
+              8
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-167-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              6,
+              6,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 8.148638874,
+      "seed": 167
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-bfl-50-seed-168",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 50,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              3,
+              2,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              7,
+              7,
+              3,
+              7,
+              7
+            ],
+            [
+              7,
+              3,
+              3,
+              3,
+              7
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0833333358168602,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              6,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              5,
+              6,
+              5,
+              6,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              6,
+              5
+            ],
+            [
+              6,
+              5,
+              6,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              6,
+              5,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              2,
+              2,
+              2
+            ],
+            [
+              6,
+              2,
+              6
+            ],
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              9,
+              5
+            ],
+            [
+              9,
+              9
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-50-seed-168-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              3,
+              3,
+              3
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 8.143044414999991,
+      "seed": 168
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-bfl-100-seed-167",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 100,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0555555559694767,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              5,
+              5,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              7,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.1666666716337204,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              2,
+              8,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              3,
+              2,
+              6,
+              3,
+              7,
+              2
+            ],
+            [
+              6,
+              3,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              2,
+              2
+            ],
+            [
+              3,
+              7,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              7,
+              2
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              7,
+              7,
+              7
+            ],
+            [
+              8,
+              7,
+              8
+            ],
+            [
+              8,
+              8,
+              8
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              6,
+              8
+            ],
+            [
+              6,
+              8
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-167-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              6,
+              6,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 16.134491580000002,
+      "seed": 167
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.572111129760742,
+        "label": "seen_training_augmentation-bfl-100-seed-168",
+        "peak_allocated_gib": 28.617595195770264,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 100,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              3,
+              2,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              7,
+              7,
+              3,
+              7,
+              7
+            ],
+            [
+              7,
+              3,
+              3,
+              3,
+              7
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0833333358168602,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              6,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              5,
+              6,
+              5,
+              6,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              6,
+              5
+            ],
+            [
+              6,
+              5,
+              6,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              6,
+              5,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              2,
+              2,
+              2
+            ],
+            [
+              6,
+              2,
+              6
+            ],
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              9,
+              5
+            ],
+            [
+              9,
+              9
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-100-seed-168-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              3,
+              3,
+              3
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 16.163463291,
+      "seed": 168
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.5721116065979,
+        "label": "seen_training_augmentation-bfl-200-seed-167",
+        "peak_allocated_gib": 28.617595672607422,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 200,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ],
+            [
+              9,
+              2,
+              7
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0555555559694767,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              5,
+              5,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              7,
+              9,
+              9,
+              5,
+              5
+            ],
+            [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.1666666716337204,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              2,
+              8,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              3,
+              2,
+              6,
+              3,
+              7,
+              2
+            ],
+            [
+              6,
+              3,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              2,
+              2
+            ],
+            [
+              3,
+              7,
+              2,
+              2,
+              8,
+              6
+            ],
+            [
+              2,
+              8,
+              6,
+              3,
+              7,
+              2
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              7,
+              7,
+              7
+            ],
+            [
+              8,
+              7,
+              8
+            ],
+            [
+              8,
+              8,
+              8
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              6,
+              7
+            ],
+            [
+              6,
+              7
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-167-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              6,
+              6,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 32.15398707299997,
+      "seed": 167
+    },
+    {
+      "memory": {
+        "allocated_gib": 21.5721116065979,
+        "label": "seen_training_augmentation-bfl-200-seed-168",
+        "peak_allocated_gib": 28.617595672607422,
+        "peak_reserved_gib": 37.59375,
+        "reserved_gib": 37.59375
+      },
+      "num_steps": 200,
+      "panel": "seen_training_augmentation",
+      "samples": [
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              5
+            ],
+            [
+              5,
+              7,
+              7
+            ],
+            [
+              5,
+              5,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-00-3c9b0459.png",
+          "key": "3c9b0459_ID_1290374658_4,1,2,3,0",
+          "prediction": [
+            [
+              3,
+              2,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ],
+            [
+              3,
+              3,
+              6
+            ]
+          ],
+          "task_id": "3c9b0459"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ],
+            [
+              3,
+              9,
+              0
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-01-0d3d703e.png",
+          "key": "0d3d703e_ID_7458913620_3,0,4,2,1",
+          "prediction": [
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ],
+            [
+              6,
+              3,
+              6
+            ]
+          ],
+          "task_id": "0d3d703e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.5555555820465088,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              9,
+              6
+            ],
+            [
+              9,
+              6,
+              9
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-02-8be77c9e.png",
+          "key": "8be77c9e_ID_6921504738_1,2,3,0",
+          "prediction": [
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ],
+            [
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "8be77c9e"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              5
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ],
+            [
+              3,
+              7,
+              7,
+              7,
+              7,
+              3
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-03-c9e6f938.png",
+          "key": "c9e6f938_ID_7809641352_0,1,3,2",
+          "prediction": [
+            [
+              7,
+              7,
+              3,
+              7,
+              7
+            ],
+            [
+              7,
+              3,
+              3,
+              3,
+              7
+            ],
+            [
+              7,
+              7,
+              7,
+              7,
+              7
+            ]
+          ],
+          "task_id": "c9e6f938"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0833333358168602,
+            "exact_grid": false,
+            "expected_shape": [
+              6,
+              6
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              6,
+              6
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ],
+            [
+              9,
+              5,
+              9,
+              5,
+              9,
+              5
+            ],
+            [
+              2,
+              8,
+              2,
+              8,
+              2,
+              8
+            ],
+            [
+              5,
+              9,
+              5,
+              9,
+              5,
+              9
+            ],
+            [
+              8,
+              2,
+              8,
+              2,
+              8,
+              2
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-04-00576224.png",
+          "key": "00576224_ID_6095374821_1,0,2",
+          "prediction": [
+            [
+              6,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              5,
+              6,
+              5,
+              6,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              5,
+              6
+            ],
+            [
+              5,
+              6,
+              5,
+              6,
+              6,
+              5
+            ],
+            [
+              6,
+              5,
+              6,
+              6,
+              5,
+              6
+            ],
+            [
+              6,
+              6,
+              5,
+              6,
+              6,
+              6
+            ]
+          ],
+          "task_id": "00576224"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              3,
+              3
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              3,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              6,
+              4,
+              6
+            ],
+            [
+              4,
+              4,
+              4
+            ],
+            [
+              4,
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-05-0520fde7.png",
+          "key": "0520fde7_ID_4960851372_2,0,1,3",
+          "prediction": [
+            [
+              2,
+              2,
+              2
+            ],
+            [
+              6,
+              2,
+              6
+            ],
+            [
+              2,
+              2,
+              2
+            ]
+          ],
+          "task_id": "0520fde7"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": 0.0,
+            "exact_grid": false,
+            "expected_shape": [
+              2,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              2,
+              2
+            ],
+            "prediction_valid": true,
+            "shape_match": true
+          },
+          "expected_grid": [
+            [
+              5,
+              1
+            ],
+            [
+              1,
+              5
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-06-88a62173.png",
+          "key": "88a62173_ID_1984750623_2,0,1,3",
+          "prediction": [
+            [
+              9,
+              5
+            ],
+            [
+              9,
+              9
+            ]
+          ],
+          "task_id": "88a62173"
+        },
+        {
+          "diagnostic": {
+            "cell_accuracy": null,
+            "exact_grid": false,
+            "expected_shape": [
+              1,
+              2
+            ],
+            "invalid_reason": null,
+            "predicted_shape": [
+              1,
+              3
+            ],
+            "prediction_valid": true,
+            "shape_match": false
+          },
+          "expected_grid": [
+            [
+              4,
+              4
+            ]
+          ],
+          "image": "generated_images/seen_training_augmentation-bfl-200-seed-168-07-d631b094.png",
+          "key": "d631b094_ID_0487193526_2,4,0,1,3",
+          "prediction": [
+            [
+              3,
+              3,
+              3
+            ]
+          ],
+          "task_id": "d631b094"
+        }
+      ],
+      "schedule": "bfl",
+      "seconds": 32.145033754999986,
+      "seed": 168
+    }
+  ],
+  "schema_version": 1,
+  "source_revision": "58c31c495be8c7fa04cc9ee29b491ba175568e81",
+  "status": "COMPLETE",
+  "summary": [
+    {
+      "cell_accuracy_tasks": 7,
+      "exact_pass1": 0,
+      "exact_passn": 0,
+      "generation_seconds": 16.60331623900001,
+      "mean_best_cell_accuracy": 0.11904762365988322,
+      "panel": "seen_training_augmentation",
+      "schedule": "linear",
+      "seeds": 2,
+      "shape_passn": 7,
+      "steps": 50,
+      "tasks": 8,
+      "valid_passn": 8
+    },
+    {
+      "cell_accuracy_tasks": 7,
+      "exact_pass1": 0,
+      "exact_passn": 0,
+      "generation_seconds": 16.29168328899999,
+      "mean_best_cell_accuracy": 0.1111111156642437,
+      "panel": "seen_training_augmentation",
+      "schedule": "bfl",
+      "seeds": 2,
+      "shape_passn": 7,
+      "steps": 50,
+      "tasks": 8,
+      "valid_passn": 8
+    },
+    {
+      "cell_accuracy_tasks": 7,
+      "exact_pass1": 0,
+      "exact_passn": 0,
+      "generation_seconds": 32.297954871,
+      "mean_best_cell_accuracy": 0.1111111156642437,
+      "panel": "seen_training_augmentation",
+      "schedule": "bfl",
+      "seeds": 2,
+      "shape_passn": 7,
+      "steps": 100,
+      "tasks": 8,
+      "valid_passn": 8
+    },
+    {
+      "cell_accuracy_tasks": 7,
+      "exact_pass1": 0,
+      "exact_passn": 0,
+      "generation_seconds": 64.29902082799995,
+      "mean_best_cell_accuracy": 0.1111111156642437,
+      "panel": "seen_training_augmentation",
+      "schedule": "bfl",
+      "seeds": 2,
+      "shape_passn": 7,
+      "steps": 200,
+      "tasks": 8,
+      "valid_passn": 8
+    }
+  ],
+  "training_report_status": "FAIL",
+  "training_run_id": "20260825T150620231361Z"
+}
