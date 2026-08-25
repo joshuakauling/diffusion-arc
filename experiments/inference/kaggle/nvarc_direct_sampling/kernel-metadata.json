@@ -1,0 +1,27 @@
+{
+  "id": "joshuakauling/nvarc-direct-sampling-proxy",
+  "title": "NVARC Direct-Sampling Proxy",
+  "code_file": "nvarc_direct_sampling_kaggle.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [
+    "arc-agi-2",
+    "nvarc",
+    "direct-sampling"
+  ],
+  "dataset_sources": [],
+  "competition_sources": [
+    "arc-prize-2026-arc-agi-2"
+  ],
+  "kernel_sources": [
+    "sorokin/pip-install-unsloth-flash-patch"
+  ],
+  "model_sources": [
+    "sorokin/qwen3_4b_grids15_sft139/Transformers/bfloat16/1"
+  ],
+  "machine_shape": "NvidiaL4"
+}
