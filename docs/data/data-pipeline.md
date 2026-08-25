@@ -50,7 +50,7 @@ must be empty, so augmented variants of a held-out task cannot enter training.
 
 ### Modal Volume mirror
 
-[`experiments/download_arc_agi_2_to_modal.ipynb`](../../experiments/download_arc_agi_2_to_modal.ipynb)
+[`experiments/setup/download_arc_agi_2_to_modal.ipynb`](../../experiments/setup/download_arc_agi_2_to_modal.ipynb)
 installs the complete public ARC-AGI-2 raw dataset once at:
 
 ```text

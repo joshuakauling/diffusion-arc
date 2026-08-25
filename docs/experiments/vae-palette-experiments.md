@@ -68,9 +68,9 @@ The experiment seed was `20260813`.
 
 The notebooks and machine-readable reports are:
 
-- [synthetic pilot notebook](../../experiments/vae_palette_experiment.ipynb)
+- [synthetic pilot notebook](../../experiments/vae/vae_palette_experiment.ipynb)
 - [synthetic pilot metrics](../../experiments/results/vae-palette-experiment/metrics.json)
-- [real-grid notebook](../../experiments/vae_palette_real_evaluation.ipynb)
+- [real-grid notebook](../../experiments/vae/vae_palette_real_evaluation.ipynb)
 - [real-grid metrics](../../experiments/results/vae-palette-real-evaluation/metrics.json)
 
 ## Candidate construction

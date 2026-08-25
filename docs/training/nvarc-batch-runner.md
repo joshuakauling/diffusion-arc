@@ -167,7 +167,7 @@ needed for variable-length text batching, while the pinned Diffusers
 implementation does. That FLUX-specific contract and its tests are documented
 in [`flux-text-conditioning.md`](flux-text-conditioning.md).
 
-[`experiments/nvarc_batch_preflight_colab.ipynb`](../../experiments/nvarc_batch_preflight_colab.ipynb)
+[`experiments/preflight/nvarc_batch_preflight_colab.ipynb`](../../experiments/preflight/nvarc_batch_preflight_colab.ipynb)
 ran both NVARC comparisons with two differently sized synthetic ARC sources and
 multiple target prefixes per source. It used the released checkpoint in BF16,
 the SDPA attention implementation, Transformers 4.56.1, and an NVIDIA A100. The

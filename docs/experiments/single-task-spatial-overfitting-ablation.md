@@ -132,7 +132,7 @@ or provide an NVARC autoregressive baseline.
 ## Notebook and outputs
 
 The executable entrypoint is
-[`experiments/single-task-spatial-overfitting-ablation-modal.ipynb`](../../experiments/single-task-spatial-overfitting-ablation-modal.ipynb).
+[`experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb`](../../experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb).
 It runs the source-controlled experiment runner, streams progress, writes a
 single comparison report, and uploads one validated Safetensors checkpoint per
 variant through the Modal Volume batch-upload API.

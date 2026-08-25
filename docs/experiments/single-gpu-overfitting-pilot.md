@@ -45,7 +45,7 @@ The source configuration is
 [`configs/training/single_gpu_overfitting_pilot.json`](../../configs/training/single_gpu_overfitting_pilot.json).
 The Modal notebook resolves only the checkpoint paths to the mounted Volume.
 The complete raw dataset is installed separately by
-[`experiments/download_arc_agi_2_to_modal.ipynb`](../../experiments/download_arc_agi_2_to_modal.ipynb)
+[`experiments/setup/download_arc_agi_2_to_modal.ipynb`](../../experiments/setup/download_arc_agi_2_to_modal.ipynb)
 and verified against its durable per-file manifest before model loading.
 
 - one H200 and one process;
@@ -106,7 +106,7 @@ current FP32 FLUX transformer when the user chooses to retain a checkpoint.
 
 ### Reusable checkpoint evaluation
 
-[`experiments/evaluate-flux-checkpoint-training-view-modal.ipynb`](../../experiments/evaluate-flux-checkpoint-training-view-modal.ipynb)
+[`experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb`](../../experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb)
 loads a standalone saved FLUX transformer while reusing the frozen NVARC and
 VAE checkpoints. It defaults to the first `train` augmentation key for each of
 the eight pilot tasks and evaluates the final target from each key. Every
