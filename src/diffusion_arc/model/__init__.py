@@ -25,7 +25,11 @@ from .contracts import (
     validate_packed_source_sequences,
     validate_packed_training_batch,
 )
-from .flow import flow_matching_loss, sample_flow_matching_batch
+from .flow import (
+    flow_matching_loss,
+    sample_flow_matching_batch,
+    sample_stratified_flow_matching_batch,
+)
 from .flux_execution import (
     build_flux_image_position_ids,
     flux_transformer_device,
@@ -67,6 +71,7 @@ __all__ = [
     "pad_flux_text_prefixes",
     "predict_flux_velocity",
     "sample_flow_matching_batch",
+    "sample_stratified_flow_matching_batch",
     "validate_packed_source_sequences",
     "validate_packed_training_batch",
 ]

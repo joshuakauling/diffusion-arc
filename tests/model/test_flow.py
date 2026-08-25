@@ -12,6 +12,7 @@ from diffusion_arc.model import (
     FlowMatchingBatch,
     flow_matching_loss,
     sample_flow_matching_batch,
+    sample_stratified_flow_matching_batch,
 )
 
 
@@ -72,6 +73,52 @@ class FlowMatchingTests(unittest.TestCase):
         torch.testing.assert_close(first.timesteps, second.timesteps)
         torch.testing.assert_close(first.noisy_latents, second.noisy_latents)
         torch.testing.assert_close(first.target_velocity, second.target_velocity)
+
+    def test_stratified_sampling_covers_every_batch_interval(self) -> None:
+        clean_latents = _clean_latents(8)
+
+        result = sample_stratified_flow_matching_batch(
+            clean_latents,
+            generator=torch.Generator().manual_seed(167),
+        )
+
+        ordered = result.timesteps.sort().values
+        lower = torch.arange(8, dtype=torch.float32) / 8
+        upper = torch.arange(1, 9, dtype=torch.float32) / 8
+        self.assertTrue(bool(torch.all(ordered >= lower)))
+        self.assertTrue(bool(torch.all(ordered < upper)))
+
+        noise = result.target_velocity + clean_latents
+        self.assertFalse(torch.equal(noise[0], noise[1]))
+        broadcast_timesteps = result.timesteps.reshape(8, 1, 1)
+        torch.testing.assert_close(
+            result.noisy_latents,
+            (1 - broadcast_timesteps) * clean_latents
+            + broadcast_timesteps * noise,
+        )
+
+    def test_stratified_sampling_is_seeded_and_handles_one_exposure(self) -> None:
+        clean_latents = _clean_latents(8)
+
+        first = sample_stratified_flow_matching_batch(
+            clean_latents,
+            generator=torch.Generator().manual_seed(72),
+        )
+        second = sample_stratified_flow_matching_batch(
+            clean_latents,
+            generator=torch.Generator().manual_seed(72),
+        )
+        single = sample_stratified_flow_matching_batch(
+            _clean_latents(1),
+            generator=torch.Generator().manual_seed(72),
+        )
+
+        torch.testing.assert_close(first.timesteps, second.timesteps)
+        torch.testing.assert_close(first.noisy_latents, second.noisy_latents)
+        torch.testing.assert_close(first.target_velocity, second.target_velocity)
+        self.assertEqual(single.timesteps.shape, (1,))
+        self.assertGreaterEqual(single.timesteps.item(), 0.0)
+        self.assertLess(single.timesteps.item(), 1.0)
 
     def test_latent_dtype_is_preserved_and_timesteps_are_float32(self) -> None:
         clean_latents = _clean_latents(dtype=torch.float64)

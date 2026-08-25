@@ -74,6 +74,67 @@ def sample_flow_matching_batch(
     )
 
 
+def sample_stratified_flow_matching_batch(
+    clean_latents: Tensor,
+    *,
+    generator: torch.Generator | None = None,
+) -> FlowMatchingBatch:
+    """Sample one uniformly jittered flow time from every batch stratum.
+
+    For ``K`` target exposures, the sampler draws one time from each interval
+    ``[i / K, (i + 1) / K)`` and randomly assigns those times to the batch
+    entries. Gaussian noise remains independent for every target exposure.
+    The random assignment prevents a fixed condition slot from being tied to
+    one particular flow-time region across optimizer steps.
+    """
+
+    _validate_target_latents(clean_latents, name="clean_latents")
+    if generator is not None and not isinstance(generator, torch.Generator):
+        raise TypeError("generator must be a torch.Generator")
+
+    target_count = clean_latents.shape[0]
+    jitter = torch.rand(
+        (target_count,),
+        device=clean_latents.device,
+        dtype=torch.float32,
+        generator=generator,
+    )
+    strata = torch.arange(
+        target_count,
+        device=clean_latents.device,
+        dtype=torch.float32,
+    )
+    ordered_timesteps = (strata + jitter) / target_count
+    assignment = torch.randperm(
+        target_count,
+        device=clean_latents.device,
+        generator=generator,
+    )
+    timesteps = ordered_timesteps.index_select(0, assignment)
+    noise = torch.randn(
+        clean_latents.shape,
+        device=clean_latents.device,
+        dtype=clean_latents.dtype,
+        generator=generator,
+    )
+    broadcast_timesteps = timesteps.to(dtype=clean_latents.dtype).reshape(
+        target_count,
+        1,
+        1,
+    )
+    noisy_latents = (
+        (1 - broadcast_timesteps) * clean_latents
+        + broadcast_timesteps * noise
+    )
+    target_velocity = noise - clean_latents
+
+    return FlowMatchingBatch(
+        noisy_latents=noisy_latents,
+        timesteps=timesteps,
+        target_velocity=target_velocity,
+    )
+
+
 def flow_matching_loss(
     predicted_velocity: Tensor,
     target_velocity: Tensor,
@@ -98,4 +159,8 @@ def flow_matching_loss(
     )
 
 
-__all__ = ["flow_matching_loss", "sample_flow_matching_batch"]
+__all__ = [
+    "flow_matching_loss",
+    "sample_flow_matching_batch",
+    "sample_stratified_flow_matching_batch",
+]
