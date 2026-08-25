@@ -234,6 +234,85 @@ class SingleGpuSetupTests(unittest.TestCase):
         self.assertTrue(all(not parameter.requires_grad for parameter in vae.parameters()))
         self.assertTrue(all(parameter.requires_grad for parameter in transformer.parameters()))
 
+    def test_loads_standalone_transformer_while_reusing_base_vae(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            transformer_checkpoint = root / "trained-transformer"
+            transformer_checkpoint.mkdir()
+
+            with (
+                patch(
+                    "diffusion_arc.training.single_gpu_setup."
+                    "AutoTokenizer.from_pretrained",
+                    return_value=_FakeTokenizer(),
+                ),
+                patch(
+                    "diffusion_arc.training.single_gpu_setup."
+                    "AutoModelForCausalLM.from_pretrained",
+                    return_value=_FakeNvarc(),
+                ),
+                patch(
+                    "diffusion_arc.training.single_gpu_setup."
+                    "AutoencoderKLFlux2.from_pretrained",
+                    return_value=_FakeVae(),
+                ) as load_vae,
+                patch(
+                    "diffusion_arc.training.single_gpu_setup."
+                    "Flux2Transformer2DModel.from_pretrained",
+                    return_value=_FakeFluxTransformer(),
+                ) as load_flux,
+            ):
+                load_single_gpu_models(
+                    config,
+                    device=torch.device("cpu"),
+                    transformer_checkpoint=transformer_checkpoint,
+                )
+
+        load_vae.assert_called_once_with(
+            config.models.flux_checkpoint,
+            subfolder="vae",
+            local_files_only=True,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            device_map={"": torch.device("cpu")},
+        )
+        load_flux.assert_called_once_with(
+            transformer_checkpoint,
+            local_files_only=True,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            device_map={"": torch.device("cpu")},
+        )
+
+    def test_missing_standalone_transformer_fails_before_model_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            missing_transformer = root / "missing-transformer"
+
+            with patch(
+                "diffusion_arc.training.single_gpu_setup."
+                "AutoTokenizer.from_pretrained"
+            ) as load_tokenizer:
+                with self.assertRaisesRegex(
+                    FileNotFoundError,
+                    "standalone FLUX transformer",
+                ):
+                    load_single_gpu_models(
+                        config,
+                        device=torch.device("cpu"),
+                        transformer_checkpoint=missing_transformer,
+                    )
+
+        load_tokenizer.assert_not_called()
+
     def test_builds_unbatched_dataloader_and_independent_generators(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             config = _config(Path(temporary_directory))

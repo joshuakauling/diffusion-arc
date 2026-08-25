@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from diffusers import AutoencoderKLFlux2
@@ -85,8 +86,14 @@ def load_single_gpu_models(
     config: SingleGpuTrainingConfig,
     *,
     device: torch.device,
+    transformer_checkpoint: str | Path | None = None,
 ) -> SingleGpuModels:
-    """Load and validate all models from local checkpoint directories only."""
+    """Load and validate all models from local checkpoint directories only.
+
+    ``transformer_checkpoint`` selects a standalone FLUX transformer saved with
+    ``save_pretrained`` while the configured base checkpoint continues to own
+    the frozen VAE. Omitting it preserves the training-time checkpoint layout.
+    """
 
     if not config.models.nvarc_checkpoint.is_dir():
         raise FileNotFoundError(
@@ -98,6 +105,17 @@ def load_single_gpu_models(
             f"FLUX checkpoint directory does not exist: "
             f"{config.models.flux_checkpoint}"
         )
+    if transformer_checkpoint is None:
+        transformer_source = config.models.flux_checkpoint
+        transformer_subfolder = "transformer"
+    else:
+        transformer_source = Path(transformer_checkpoint)
+        if not transformer_source.is_dir():
+            raise FileNotFoundError(
+                "standalone FLUX transformer checkpoint directory does not exist: "
+                f"{transformer_source}"
+            )
+        transformer_subfolder = None
 
     nvarc_dtype = _TORCH_DTYPES[config.models.nvarc_dtype]
     vae_dtype = _TORCH_DTYPES[config.models.vae_dtype]
@@ -147,14 +165,18 @@ def load_single_gpu_models(
     vae_encoder = FluxVaeEncoder(vae)
     vae_decoder = FluxVaeDecoder(vae)
 
+    transformer_load_arguments = {
+        "local_files_only": True,
+        "use_safetensors": True,
+        "low_cpu_mem_usage": True,
+        "torch_dtype": flux_parameter_dtype,
+        "device_map": device_map,
+    }
+    if transformer_subfolder is not None:
+        transformer_load_arguments["subfolder"] = transformer_subfolder
     transformer = Flux2Transformer2DModel.from_pretrained(
-        config.models.flux_checkpoint,
-        subfolder="transformer",
-        local_files_only=True,
-        use_safetensors=True,
-        low_cpu_mem_usage=True,
-        torch_dtype=flux_parameter_dtype,
-        device_map=device_map,
+        transformer_source,
+        **transformer_load_arguments,
     )
     _validate_flux_checkpoint(transformer)
     _validate_parameter_placement(

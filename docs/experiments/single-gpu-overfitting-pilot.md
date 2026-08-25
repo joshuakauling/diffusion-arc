@@ -104,6 +104,21 @@ generation metrics, and failure details. Large checkpoints are not saved
 automatically. The notebook provides a separate explicit cell that saves the
 current FP32 FLUX transformer when the user chooses to retain a checkpoint.
 
+### Reusable checkpoint evaluation
+
+[`experiments/evaluate-flux-checkpoint-training-view-modal.ipynb`](../../experiments/evaluate-flux-checkpoint-training-view-modal.ipynb)
+loads a standalone saved FLUX transformer while reusing the frozen NVARC and
+VAE checkpoints. It defaults to the first `train` augmentation key for each of
+the eight pilot tasks and evaluates the final target from each key. Every
+model-facing evaluation prompt must match the exact target-free token prefix
+used during training; expected outputs remain separate until scoring.
+
+The notebook records pass@1/pass@2 exact-grid, validity, shape, and conditional
+cell metrics in a new immutable evaluation directory beneath the originating
+training run. Its configured view may also be changed to `train_unseen` or
+`train_original` for later checkpoint comparisons. It performs no optimization
+and does not modify the selected checkpoint.
+
 ## Preregistered interpretation
 
 The pilot uses three evidence levels:
