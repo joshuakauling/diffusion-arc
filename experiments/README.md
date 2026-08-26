@@ -22,6 +22,8 @@ under [`results/`](results/) and retain their existing run-oriented layout.
 - [`single-gpu-overfitting-v2-modal.ipynb`](training/single-gpu-overfitting-v2-modal.ipynb)
 - [`single-task-conditioning-overfitting-ladder-modal.ipynb`](training/single-task-conditioning-overfitting-ladder-modal.ipynb)
 - [`single-task-spatial-overfitting-ablation-modal.ipynb`](training/single-task-spatial-overfitting-ablation-modal.ipynb)
+- [`single-task-augmentation-generalization-overfitting-modal.ipynb`](training/single-task-augmentation-generalization-overfitting-modal.ipynb)
+- [`single-task-augmentation-generalization-continuation-modal.ipynb`](training/single-task-augmentation-generalization-continuation-modal.ipynb)
 
 ## Inference and evaluation
 

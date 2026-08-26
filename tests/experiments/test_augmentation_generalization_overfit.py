@@ -5,6 +5,7 @@ from math import factorial
 from pathlib import Path
 import json
 import runpy
+import tempfile
 import unittest
 
 import torch
@@ -25,14 +26,24 @@ CONFIG = (
     / "training"
     / "single_gpu_0d3d703e_augmentation_generalization.json"
 )
+CONTINUATION_CONFIG = (
+    REPOSITORY_ROOT
+    / "configs"
+    / "training"
+    / "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
+)
 NOTEBOOK = (
     REPOSITORY_ROOT
     / "experiments"
     / "training"
     / "single-task-augmentation-generalization-overfitting-modal.ipynb"
 )
-
-
+CONTINUATION_NOTEBOOK = (
+    REPOSITORY_ROOT
+    / "experiments"
+    / "training"
+    / "single-task-augmentation-generalization-continuation-modal.ipynb"
+)
 def _indexed_permutation(index: int) -> tuple[int, ...]:
     values = list(range(10))
     result = []
@@ -219,6 +230,58 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
             self.assertEqual(len(set(item["regular_strata"])), 7)
         self.assertEqual(payload(schedule, train), payload(replay, train))
 
+    def test_continuation_schedule_uses_global_steps_and_new_flow_seeds(self) -> None:
+        train = self._views(128)
+        build = self.namespace["_build_training_schedule"]
+        audit = self.namespace["_schedule_exposure_audit"]
+
+        parent = build(train)
+        continuation = build(train, phase_start=1, phase_count=3)
+        self.assertEqual(len(continuation), 1536)
+        self.assertEqual(continuation[0].step, 513)
+        self.assertEqual(continuation[-1].step, 2048)
+        self.assertEqual(
+            [plan.step for plan in continuation if plan.kind == "shared_endpoint"],
+            list(range(513, 2049, 8)),
+        )
+        parent_flow_seeds = {
+            self.namespace["FLOW_SEED"] + plan.step for plan in parent
+        }
+        continuation_flow_seeds = {
+            self.namespace["FLOW_SEED"] + plan.step for plan in continuation
+        }
+        self.assertTrue(parent_flow_seeds.isdisjoint(continuation_flow_seeds))
+
+        continuation_audit = audit(continuation, train)
+        self.assertTrue(continuation_audit["all_exact"])
+        self.assertEqual(
+            continuation_audit["expected"],
+            {"total": 24, "shared_endpoint": 3, "stratified": 21},
+        )
+        self.assertEqual(
+            continuation_audit["expected_update_counts"],
+            {"shared_endpoint": 192, "stratified": 1344, "total": 1536},
+        )
+
+    def test_parent_and_continuation_audits_combine_to_32_contacts(self) -> None:
+        train = self._views(128)
+        build = self.namespace["_build_training_schedule"]
+        audit = self.namespace["_schedule_exposure_audit"]
+        combine = self.namespace["_combine_exposure_audits"]
+
+        combined = combine(
+            audit(build(train), train),
+            audit(build(train, phase_start=1, phase_count=3), train),
+        )
+        self.assertTrue(combined["all_exact"])
+        self.assertEqual(
+            combined["expected"],
+            {"total": 32, "shared_endpoint": 4, "stratified": 28},
+        )
+        for item in combined["items"].values():
+            counts = Counter(item["regular_strata"])
+            self.assertLessEqual(max(counts.values()) - min(counts.values()), 1)
+
     def test_planned_flow_sampling_uses_exact_shared_t1_and_prescribed_strata(
         self,
     ) -> None:
@@ -292,6 +355,95 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         )
         self.assertEqual(len(final), len(set(final)))
         self.assertTrue(set(intermediate_panels[0]).issubset(final))
+
+    def test_continuation_final_panel_matches_the_parent_final_panel(self) -> None:
+        train = self._views(128)
+        holdout = self._views(32, split=1)
+        select = self.namespace["_evaluation_indices"]
+        parent = select(512, train, holdout)
+        continuation = select(
+            2048,
+            train,
+            holdout,
+            evaluation_steps=(1024, 2048),
+            final_step=2048,
+        )
+        self.assertEqual(continuation, parent)
+
+    def test_parent_payload_validation_pins_lineage_and_volume_paths(self) -> None:
+        validate = self.namespace["_validate_parent_report_payload"]
+        with tempfile.TemporaryDirectory() as temporary:
+            volume_root = (Path(temporary) / "vo-internal-id").resolve()
+            volume_name = "diffusion-arc-models"
+            report_path = (
+                volume_root
+                / "results"
+                / self.namespace["RESULT_FAMILY"]
+                / self.namespace["CONTINUATION_PARENT_RUN_ID"]
+                / "report.json"
+            )
+            checkpoint_path = (
+                report_path.parent
+                / self.namespace["STAGE_NAME"]
+                / "flux-transformer-step-0512"
+            )
+            checkpoint_relative = "/" + str(
+                checkpoint_path.relative_to(volume_root)
+            )
+            parent = {
+                "status": "COMPLETE",
+                "run_id": self.namespace["CONTINUATION_PARENT_RUN_ID"],
+                "source": {
+                    "resolved_commit": self.namespace[
+                        "CONTINUATION_PARENT_SOURCE_COMMIT"
+                    ]
+                },
+                "durability": {"remote_content_verified": True},
+                "protocol": {
+                    "name": self.namespace["PROTOCOL"],
+                    "optimizer_steps": 512,
+                },
+                "pool": {
+                    "pool_sha256": self.namespace[
+                        "CONTINUATION_PARENT_POOL_SHA256"
+                    ],
+                    "counts": {"train": 512, "holdout": 128, "original": 1},
+                },
+                "stages": {
+                    self.namespace["STAGE_NAME"]: {
+                        "status": "COMPLETE",
+                        "training": {
+                            "completed_steps": 512,
+                            "target_exposures": 4096,
+                        },
+                        "saved_checkpoint": {
+                            "step": 512,
+                            "state_scope": "transformer_only",
+                            "remote_file_sizes_verified": True,
+                            "path": str(checkpoint_path),
+                            "volume_name": volume_name,
+                            "volume_relative_path": checkpoint_relative,
+                            "manifest": {"config.json": {"bytes": 1, "sha256": "x"}},
+                        },
+                    }
+                },
+            }
+            resolved, checkpoint = validate(
+                parent,
+                parent_report_path=report_path,
+                volume_root=volume_root,
+                volume_name=volume_name,
+            )
+            self.assertEqual(resolved, checkpoint_path.resolve())
+            self.assertEqual(checkpoint["step"], 512)
+            parent["source"]["resolved_commit"] = "0" * 40
+            with self.assertRaisesRegex(RuntimeError, "source commit"):
+                validate(
+                    parent,
+                    parent_report_path=report_path,
+                    volume_root=volume_root,
+                    volume_name=volume_name,
+                )
 
     def test_generation_noise_is_keyed_and_chunk_invariant(self) -> None:
         keyed_noise = self.namespace["_keyed_noise"]
@@ -368,13 +520,26 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
             records.append(
                 {
                     "step": plan.step,
-                    "sampling": {"kind": plan.kind},
+                    "sampling": {
+                        "kind": plan.kind,
+                        "flow_seed": self.namespace["FLOW_SEED"] + plan.step,
+                        "prescribed_timestep_strata": (
+                            None
+                            if plan.timestep_strata is None
+                            else list(plan.timestep_strata)
+                        ),
+                    },
                     "per_exposure": exposures,
                 }
             )
 
         summarize = self.namespace["_summarize_flow_sampling"]
-        summary = summarize(records, exposure_audit=audit)
+        planned_batches = self.namespace["_schedule_payload"](schedule, train)
+        summary = summarize(
+            records,
+            exposure_audit=audit,
+            planned_batches=planned_batches,
+        )
         self.assertTrue(summary["exposure_plan_matches_observed_keys"])
         self.assertEqual(
             summary["update_counts"],
@@ -386,8 +551,67 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         )
 
         records[0]["per_exposure"][0]["key"] = "unplanned"
-        with self.assertRaisesRegex(RuntimeError, "unplanned training key"):
-            summarize(records, exposure_audit=audit)
+        with self.assertRaisesRegex(RuntimeError, "training keys differ"):
+            summarize(
+                records,
+                exposure_audit=audit,
+                planned_batches=planned_batches,
+            )
+
+    def test_flow_summary_accepts_the_1536_update_continuation(self) -> None:
+        train = self._views(128)
+        schedule = self.namespace["_build_training_schedule"](
+            train,
+            phase_start=1,
+            phase_count=3,
+        )
+        audit = self.namespace["_schedule_exposure_audit"](schedule, train)
+        records = []
+        for plan in schedule:
+            exposures = []
+            for row, view_index in enumerate(plan.view_indices):
+                stratum = (
+                    None if plan.timestep_strata is None else plan.timestep_strata[row]
+                )
+                view = train[view_index]
+                exposures.append(
+                    {
+                        "key": view.serialized_key,
+                        "geometry": view.geometry.value,
+                        "sampling_kind": plan.kind,
+                        "timestep": 1.0 if stratum is None else (stratum + 0.5) / 8,
+                        "timestep_stratum": stratum,
+                        "total_loss": 1.0,
+                        "grid_loss": 2.0,
+                        "padding_loss": 0.5,
+                    }
+                )
+            records.append(
+                {
+                    "step": plan.step,
+                    "sampling": {
+                        "kind": plan.kind,
+                        "flow_seed": self.namespace["FLOW_SEED"] + plan.step,
+                        "prescribed_timestep_strata": (
+                            None
+                            if plan.timestep_strata is None
+                            else list(plan.timestep_strata)
+                        ),
+                    },
+                    "per_exposure": exposures,
+                }
+            )
+
+        summary = self.namespace["_summarize_flow_sampling"](
+            records,
+            exposure_audit=audit,
+            planned_batches=self.namespace["_schedule_payload"](schedule, train),
+        )
+        self.assertEqual(
+            summary["update_counts"],
+            {"shared_endpoint": 192, "stratified": 1344},
+        )
+        self.assertEqual(summary["exposure_counts"]["total"], 12288)
 
     def test_generation_metrics_compute_adaptive_pass2_by_group(self) -> None:
         metric = self.namespace["_generation_panel_metrics"]
@@ -433,6 +657,17 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
         self.assertEqual(config.loop.min_context_pairs_before_target, 4)
         self.assertEqual(config.optimizer.learning_rate, 1e-5)
 
+    def test_continuation_config_changes_only_the_approved_step_budget(self) -> None:
+        base = load_single_gpu_training_config(CONFIG)
+        continuation = load_single_gpu_training_config(CONTINUATION_CONFIG)
+        self.assertEqual(continuation.loop.max_optimizer_steps, 1536)
+        self.assertEqual(continuation.loop.optimizer_batch_size, 8)
+        self.assertEqual(continuation.loop.flux_microbatch_size, 8)
+        self.assertEqual(continuation.loop.min_context_pairs_before_target, 4)
+        self.assertEqual(continuation.optimizer, base.optimizer)
+        self.assertEqual(continuation.models, base.models)
+        self.assertEqual(continuation.data, base.data)
+
     def test_notebook_is_clean_and_all_code_cells_compile(self) -> None:
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         self.assertEqual(len(notebook["cells"]), 6)
@@ -442,6 +677,16 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
             self.assertEqual(cell.get("outputs", []), [])
             self.assertIsNone(cell.get("execution_count"))
             compile("".join(cell["source"]), f"notebook-cell-{index}", "exec")
+
+    def test_continuation_notebook_is_clean_and_all_code_cells_compile(self) -> None:
+        notebook = json.loads(CONTINUATION_NOTEBOOK.read_text(encoding="utf-8"))
+        self.assertEqual(len(notebook["cells"]), 6)
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            self.assertEqual(cell.get("outputs", []), [])
+            self.assertIsNone(cell.get("execution_count"))
+            compile("".join(cell["source"]), f"continuation-cell-{index}", "exec")
 
 
 if __name__ == "__main__":

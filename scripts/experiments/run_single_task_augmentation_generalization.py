@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the 512-view single-task augmentation-generalization overfit experiment."""
+"""Run or continue the 512-view augmentation-generalization experiment."""
 
 from __future__ import annotations
 
@@ -71,9 +71,13 @@ from diffusion_arc.training.single_gpu_setup import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = "augmentation-generalization-overfit"
+CONTINUATION_PROTOCOL = "augmentation-generalization-overfit-continuation"
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
+CONTINUATION_CONFIG_NAME = (
+    "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
+)
 TASK_ID = "0d3d703e"
 TARGET_ORIGINAL_PAIR_INDEX = 4
 DEMONSTRATION_INDICES = (0, 1, 2, 3)
@@ -112,6 +116,22 @@ MAX_TOKENS = 192
 
 OPTIMIZER_BATCH_SIZE = 8
 OPTIMIZER_STEPS = 512
+CONTINUATION_START_STEP = 512
+CONTINUATION_FINAL_STEP = 2048
+CONTINUATION_OPTIMIZER_STEPS = CONTINUATION_FINAL_STEP - CONTINUATION_START_STEP
+CONTINUATION_PHASE_START = CONTINUATION_START_STEP // OPTIMIZER_STEPS
+CONTINUATION_PHASE_COUNT = CONTINUATION_OPTIMIZER_STEPS // OPTIMIZER_STEPS
+CONTINUATION_PARENT_RUN_ID = "20260826T155954304798Z"
+CONTINUATION_PARENT_SOURCE_COMMIT = "6beb492787a5c2c031c8cc2004caa6a7412517f6"
+CONTINUATION_PARENT_REPORT_SHA256 = (
+    "0480c43fcf7349614a79a4da33f780dd930484cbae7cf06c8b24248d35c7d5cf"
+)
+CONTINUATION_PARENT_POOL_SHA256 = (
+    "f512b3dc4cc5f603c3c764a45b3a4086d4b4837e63a2793a7009c2505e72e0b0"
+)
+CONTINUATION_PARENT_SCHEDULE_SHA256 = (
+    "eac20d584ecb44e78ba7dc22f6fbc7033ee0c5eac12e704affe1287e30636947"
+)
 UPDATE_CYCLE_LENGTH = 8
 ENDPOINT_UPDATE_COUNT = OPTIMIZER_STEPS // UPDATE_CYCLE_LENGTH
 REGULAR_UPDATE_COUNT = OPTIMIZER_STEPS - ENDPOINT_UPDATE_COUNT
@@ -120,6 +140,8 @@ ENDPOINT_EXPOSURES_PER_VIEW = 1
 REGULAR_EXPOSURES_PER_VIEW = 7
 REGULAR_GROUP_OFFSETS = (8, 16, 24, 32, 40, 48, 56)
 EVALUATION_STEPS = (0, 128, 256, 512)
+CONTINUATION_EVALUATION_STEPS = (1024, 2048)
+CONTINUATION_FULL_GENERATION_STEPS = (2048,)
 INTERMEDIATE_SEEN_PER_GEOMETRY = 8
 FINAL_SEEN_PER_GEOMETRY = 32
 INTERMEDIATE_HOLDOUT_PER_GEOMETRY = 8
@@ -194,6 +216,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--volume-name", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--parent-report", type=Path)
+    parser.add_argument("--parent-report-sha256")
     return parser.parse_args()
 
 
@@ -662,7 +686,14 @@ def _balanced_subset_indices(
 
 def _build_training_schedule(
     train: Sequence[PreparedView],
+    *,
+    phase_start: int = 0,
+    phase_count: int = 1,
 ) -> tuple[TrainingBatchPlan, ...]:
+    if phase_start < 0:
+        raise ValueError("phase_start must be non-negative")
+    if phase_count <= 0:
+        raise ValueError("phase_count must be positive")
     if len(train) != TRAIN_VIEW_COUNT:
         raise ValueError(f"train must contain {TRAIN_VIEW_COUNT} views")
     by_geometry = {
@@ -690,58 +721,88 @@ def _build_training_schedule(
         groups.append(tuple(int(index) for index in slots))
 
     plans: list[TrainingBatchPlan] = []
-    for cycle_index in range(ENDPOINT_UPDATE_COUNT):
-        for cycle_position in range(UPDATE_CYCLE_LENGTH):
-            step = cycle_index * UPDATE_CYCLE_LENGTH + cycle_position + 1
-            if cycle_position == 0:
-                group_index = cycle_index
+    for phase_index in range(phase_start, phase_start + phase_count):
+        group_rotation = (17 * phase_index) % ENDPOINT_UPDATE_COUNT
+        for local_cycle_index in range(ENDPOINT_UPDATE_COUNT):
+            cycle_index = phase_index * ENDPOINT_UPDATE_COUNT + local_cycle_index
+            for cycle_position in range(UPDATE_CYCLE_LENGTH):
+                step = cycle_index * UPDATE_CYCLE_LENGTH + cycle_position + 1
+                if cycle_position == 0:
+                    group_index = (
+                        local_cycle_index + group_rotation
+                    ) % ENDPOINT_UPDATE_COUNT
+                    plans.append(
+                        TrainingBatchPlan(
+                            step=step,
+                            cycle_index=cycle_index,
+                            cycle_position=cycle_position,
+                            kind="shared_endpoint",
+                            view_indices=groups[group_index],
+                            timestep_strata=None,
+                        )
+                    )
+                    continue
+                group_index = (
+                    local_cycle_index
+                    + group_rotation
+                    + REGULAR_GROUP_OFFSETS[cycle_position - 1]
+                ) % ENDPOINT_UPDATE_COUNT
                 plans.append(
                     TrainingBatchPlan(
                         step=step,
                         cycle_index=cycle_index,
                         cycle_position=cycle_position,
-                        kind="shared_endpoint",
+                        kind="stratified",
                         view_indices=groups[group_index],
-                        timestep_strata=None,
+                        timestep_strata=tuple(
+                            (
+                                slot
+                                + cycle_position
+                                + phase_index
+                            )
+                            % OPTIMIZER_BATCH_SIZE
+                            for slot in range(OPTIMIZER_BATCH_SIZE)
+                        ),
                     )
                 )
-                continue
-            group_index = (
-                cycle_index + REGULAR_GROUP_OFFSETS[cycle_position - 1]
-            ) % ENDPOINT_UPDATE_COUNT
-            plans.append(
-                TrainingBatchPlan(
-                    step=step,
-                    cycle_index=cycle_index,
-                    cycle_position=cycle_position,
-                    kind="stratified",
-                    view_indices=groups[group_index],
-                    timestep_strata=tuple(
-                        (slot + cycle_position) % OPTIMIZER_BATCH_SIZE
-                        for slot in range(OPTIMIZER_BATCH_SIZE)
-                    ),
-                )
-            )
     result = tuple(plans)
-    _validate_training_schedule(result, train)
+    _validate_training_schedule(
+        result,
+        train,
+        phase_start=phase_start,
+        phase_count=phase_count,
+    )
     return result
 
 
 def _validate_training_schedule(
     schedule: tuple[TrainingBatchPlan, ...],
     train: Sequence[PreparedView],
+    *,
+    phase_start: int = 0,
+    phase_count: int = 1,
 ) -> None:
-    if len(schedule) != OPTIMIZER_STEPS:
-        raise RuntimeError("Training schedule does not contain 512 updates")
+    expected_updates = OPTIMIZER_STEPS * phase_count
+    if len(schedule) != expected_updates:
+        raise RuntimeError(
+            f"Training schedule contains {len(schedule)} updates, "
+            f"expected {expected_updates}"
+        )
     exposure_counts = {
-        index: {"total": 0, "shared_endpoint": 0, "stratified": 0, "strata": set()}
+        index: {
+            "total": 0,
+            "shared_endpoint": 0,
+            "stratified": 0,
+            "strata": Counter(),
+        }
         for index in range(len(train))
     }
     omitted_by_geometry: dict[ArcGeometry, Counter[int]] = {
         geometry: Counter() for geometry in EFFECTIVE_GEOMETRIES
     }
     endpoint_steps = []
-    for expected_step, batch in enumerate(schedule, start=1):
+    first_step = phase_start * OPTIMIZER_STEPS + 1
+    for expected_step, batch in enumerate(schedule, start=first_step):
         if batch.step != expected_step:
             raise RuntimeError("Training schedule steps are not contiguous")
         if len(batch.view_indices) != OPTIMIZER_BATCH_SIZE:
@@ -769,23 +830,34 @@ def _validate_training_schedule(
             counts["total"] += 1
             counts[batch.kind] += 1
             if batch.timestep_strata is not None:
-                counts["strata"].add(batch.timestep_strata[row])
+                counts["strata"][batch.timestep_strata[row]] += 1
 
-    expected_endpoint_steps = list(range(1, OPTIMIZER_STEPS + 1, 8))
+    final_step = (phase_start + phase_count) * OPTIMIZER_STEPS
+    expected_endpoint_steps = list(range(first_step, final_step + 1, 8))
     if endpoint_steps != expected_endpoint_steps:
-        raise RuntimeError("Endpoint steps differ from 1, 9, ..., 505")
+        raise RuntimeError("Endpoint steps differ from the first update of each cycle")
     for view_index, counts in exposure_counts.items():
         if (
-            counts["total"] != EXPOSURES_PER_VIEW
-            or counts["shared_endpoint"] != ENDPOINT_EXPOSURES_PER_VIEW
-            or counts["stratified"] != REGULAR_EXPOSURES_PER_VIEW
-            or len(counts["strata"]) != REGULAR_EXPOSURES_PER_VIEW
+            counts["total"] != EXPOSURES_PER_VIEW * phase_count
+            or counts["shared_endpoint"]
+            != ENDPOINT_EXPOSURES_PER_VIEW * phase_count
+            or counts["stratified"] != REGULAR_EXPOSURES_PER_VIEW * phase_count
         ):
             raise RuntimeError(f"View {view_index} exposure counts differ: {counts}")
-        omitted = next(iter(set(range(8)) - counts["strata"]))
-        omitted_by_geometry[train[view_index].geometry][omitted] += 1
+        stratum_counts = [counts["strata"][stratum] for stratum in range(8)]
+        if max(stratum_counts) - min(stratum_counts) > 1:
+            raise RuntimeError(
+                f"View {view_index} regular strata are imbalanced: {stratum_counts}"
+            )
+        for stratum, count in enumerate(stratum_counts):
+            omitted_by_geometry[train[view_index].geometry][stratum] += (
+                phase_count - count
+            )
     for geometry, counts in omitted_by_geometry.items():
-        if counts != Counter({stratum: 16 for stratum in range(8)}):
+        expected_omissions = Counter(
+            {stratum: 16 * phase_count for stratum in range(8)}
+        )
+        if counts != expected_omissions:
             raise RuntimeError(
                 f"Omitted-stratum counts are imbalanced for {geometry.value}: {counts}"
             )
@@ -828,18 +900,90 @@ def _schedule_exposure_audit(
             item[batch.kind] += 1
             if batch.timestep_strata is not None:
                 item["regular_strata"].append(batch.timestep_strata[row])
+    endpoint_updates = sum(batch.kind == "shared_endpoint" for batch in schedule)
+    regular_updates = sum(batch.kind == "stratified" for batch in schedule)
+    planned_exposures = len(schedule) * OPTIMIZER_BATCH_SIZE
+    endpoint_exposures = endpoint_updates * OPTIMIZER_BATCH_SIZE
+    regular_exposures = regular_updates * OPTIMIZER_BATCH_SIZE
+    for name, count in (
+        ("total", planned_exposures),
+        ("shared_endpoint", endpoint_exposures),
+        ("stratified", regular_exposures),
+    ):
+        if count % len(by_key):
+            raise RuntimeError(f"{name} exposures do not divide evenly across views")
+    expected = {
+        "total": planned_exposures // len(by_key),
+        "shared_endpoint": endpoint_exposures // len(by_key),
+        "stratified": regular_exposures // len(by_key),
+    }
     all_exact = all(
-        item["total"] == 8
-        and item["shared_endpoint"] == 1
-        and item["stratified"] == 7
-        and len(set(item["regular_strata"])) == 7
+        item["total"] == expected["total"]
+        and item["shared_endpoint"] == expected["shared_endpoint"]
+        and item["stratified"] == expected["stratified"]
+        and max(
+            Counter(item["regular_strata"])[stratum] for stratum in range(8)
+        )
+        - min(Counter(item["regular_strata"])[stratum] for stratum in range(8))
+        <= 1
         for item in by_key.values()
     )
     return {
-        "expected": {"total": 8, "shared_endpoint": 1, "stratified": 7},
+        "expected": expected,
+        "expected_update_counts": {
+            "shared_endpoint": endpoint_updates,
+            "stratified": regular_updates,
+            "total": len(schedule),
+        },
         "view_count": len(by_key),
         "all_exact": all_exact,
         "items": by_key,
+    }
+
+
+def _combine_exposure_audits(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any]:
+    first_items = first.get("items")
+    second_items = second.get("items")
+    if not isinstance(first_items, dict) or not isinstance(second_items, dict):
+        raise RuntimeError("Cannot combine exposure audits without per-view items")
+    if first_items.keys() != second_items.keys():
+        raise RuntimeError("Parent and continuation exposure keys differ")
+    expected = {
+        name: int(first["expected"][name]) + int(second["expected"][name])
+        for name in ("total", "shared_endpoint", "stratified")
+    }
+    items = {}
+    for key in first_items:
+        left = first_items[key]
+        right = second_items[key]
+        item = {
+            "total": int(left["total"]) + int(right["total"]),
+            "shared_endpoint": int(left["shared_endpoint"])
+            + int(right["shared_endpoint"]),
+            "stratified": int(left["stratified"]) + int(right["stratified"]),
+            "regular_strata": list(left["regular_strata"])
+            + list(right["regular_strata"]),
+        }
+        items[key] = item
+    all_exact = all(
+        item["total"] == expected["total"]
+        and item["shared_endpoint"] == expected["shared_endpoint"]
+        and item["stratified"] == expected["stratified"]
+        and max(
+            Counter(item["regular_strata"])[stratum] for stratum in range(8)
+        )
+        - min(Counter(item["regular_strata"])[stratum] for stratum in range(8))
+        <= 1
+        for item in items.values()
+    )
+    return {
+        "expected": expected,
+        "view_count": len(items),
+        "all_exact": all_exact,
+        "items": items,
     }
 
 
@@ -863,6 +1007,16 @@ def _validate_static_protocol() -> None:
         raise RuntimeError("Endpoint allocation differs from protocol")
     if EVALUATION_STEPS != (0, 128, 256, 512):
         raise RuntimeError("Evaluation steps differ from protocol")
+    if (
+        CONTINUATION_START_STEP != 512
+        or CONTINUATION_FINAL_STEP != 2048
+        or CONTINUATION_OPTIMIZER_STEPS != 1536
+        or CONTINUATION_PHASE_START != 1
+        or CONTINUATION_PHASE_COUNT != 3
+        or CONTINUATION_EVALUATION_STEPS != (1024, 2048)
+        or CONTINUATION_FULL_GENERATION_STEPS != (2048,)
+    ):
+        raise RuntimeError("Continuation allocation differs from protocol")
 
 
 def _normalized_images_to_uint8(images: Tensor) -> Tensor:
@@ -1320,10 +1474,13 @@ def _evaluation_indices(
     step: int,
     train: Sequence[PreparedView],
     holdout: Sequence[PreparedView],
+    *,
+    evaluation_steps: Sequence[int] = EVALUATION_STEPS,
+    final_step: int = OPTIMIZER_STEPS,
 ) -> tuple[int, ...]:
-    if step not in EVALUATION_STEPS:
+    if step not in evaluation_steps:
         raise ValueError(f"Unsupported evaluation step: {step}")
-    if step == OPTIMIZER_STEPS:
+    if step == final_step:
         seen_local = _balanced_subset_indices(
             train,
             per_geometry=FINAL_SEEN_PER_GEOMETRY,
@@ -1681,10 +1838,18 @@ def _evaluate(
     holdout: Sequence[PreparedView],
     original: PreparedView,
     compute_dtype: torch.dtype,
+    evaluation_steps: Sequence[int] = EVALUATION_STEPS,
+    final_step: int = OPTIMIZER_STEPS,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     all_views = tuple(train) + tuple(holdout) + (original,)
-    global_indices = _evaluation_indices(step, train, holdout)
+    global_indices = _evaluation_indices(
+        step,
+        train,
+        holdout,
+        evaluation_steps=evaluation_steps,
+        final_step=final_step,
+    )
     print(
         f"[{STAGE_NAME}] evaluation step {step}: starting 641-view t=1 "
         f"diagnostic and {len(global_indices)}-view generation panel"
@@ -1751,6 +1916,7 @@ def _evaluate(
     )
     entry = {
         "step": step,
+        "kind": "full-generation",
         "panel_global_indices": list(global_indices),
         "panel_keys": [all_views[index].serialized_key for index in global_indices],
         "panels": metrics["panels"],
@@ -1781,6 +1947,56 @@ def _evaluate(
     return entry
 
 
+@torch.no_grad()
+def _evaluate_t1_only(
+    *,
+    transformer: torch.nn.Module,
+    vae_decoder: Any,
+    step: int,
+    all_text_inputs: FluxTextInputs,
+    all_latents: Tensor,
+    train: Sequence[PreparedView],
+    holdout: Sequence[PreparedView],
+    original: PreparedView,
+    compute_dtype: torch.dtype,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    all_views = tuple(train) + tuple(holdout) + (original,)
+    print(
+        f"[{STAGE_NAME}] evaluation step {step}: starting 641-view t=1 "
+        "diagnostic without target-free generation"
+    )
+    t1 = _t1_diagnostic(
+        transformer=transformer,
+        all_text_inputs=all_text_inputs,
+        all_latents=all_latents,
+        all_views=all_views,
+        compute_dtype=compute_dtype,
+        vae_decoder=vae_decoder,
+    )
+    entry = {
+        "step": step,
+        "kind": "t1-only",
+        "panels": None,
+        "generation": None,
+        "t1_diagnostic": t1,
+        "seconds": time.perf_counter() - started,
+        "memory": cuda_memory(f"evaluation-step-{step}"),
+    }
+    REPORT["stages"][STAGE_NAME]["evaluations"].append(entry)
+    save_report()
+    summaries = t1["summaries"]
+    print(
+        f"[{STAGE_NAME}] evaluation step {step}: t=1 only; "
+        f"seen={summaries['seen']['exact_grid_count']}/"
+        f"{summaries['seen']['count']} "
+        f"holdout={summaries['holdout']['exact_grid_count']}/"
+        f"{summaries['holdout']['count']} "
+        f"seconds={entry['seconds']:.1f}"
+    )
+    return entry
+
+
 def _mean_exposure_metrics(exposures: Sequence[dict[str, Any]]) -> dict[str, float]:
     if not exposures:
         raise RuntimeError("Cannot summarize zero target exposures")
@@ -1797,11 +2013,43 @@ def _summarize_flow_sampling(
     records: Sequence[dict[str, Any]],
     *,
     exposure_audit: dict[str, Any],
+    planned_batches: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    if len(records) != OPTIMIZER_STEPS:
+    expected_updates = exposure_audit.get("expected_update_counts")
+    if not isinstance(expected_updates, dict):
+        raise RuntimeError("Planned update counts are missing")
+    if len(records) != expected_updates.get("total"):
         raise RuntimeError(
-            f"Flow summary received {len(records)} updates, expected {OPTIMIZER_STEPS}"
+            f"Flow summary received {len(records)} updates, expected "
+            f"{expected_updates.get('total')}"
         )
+    if len(planned_batches) != len(records):
+        raise RuntimeError("Planned and observed update counts differ")
+    for record, planned in zip(records, planned_batches, strict=True):
+        if record.get("step") != planned.get("step"):
+            raise RuntimeError("Observed optimizer steps differ from the plan")
+        sampling = record.get("sampling", {})
+        if sampling.get("kind") != planned.get("kind"):
+            raise RuntimeError(
+                f"Observed sampling kind differs at step {record.get('step')}"
+            )
+        if sampling.get("flow_seed") != FLOW_SEED + int(planned["step"]):
+            raise RuntimeError(
+                f"Observed flow seed differs at step {record.get('step')}"
+            )
+        observed_keys = [item.get("key") for item in record.get("per_exposure", [])]
+        if observed_keys != planned.get("keys"):
+            raise RuntimeError(
+                f"Observed training keys differ at step {record.get('step')}"
+            )
+        planned_strata = planned.get("timestep_strata")
+        normalized_planned_strata = (
+            None if planned_strata is None else list(planned_strata)
+        )
+        if sampling.get("prescribed_timestep_strata") != normalized_planned_strata:
+            raise RuntimeError(
+                f"Observed timestep strata differ at step {record.get('step')}"
+            )
     endpoint = [
         record for record in records if record["sampling"]["kind"] == "shared_endpoint"
     ]
@@ -1809,8 +2057,8 @@ def _summarize_flow_sampling(
         record for record in records if record["sampling"]["kind"] == "stratified"
     ]
     if (
-        len(endpoint) != ENDPOINT_UPDATE_COUNT
-        or len(stratified) != REGULAR_UPDATE_COUNT
+        len(endpoint) != expected_updates.get("shared_endpoint")
+        or len(stratified) != expected_updates.get("stratified")
     ):
         raise RuntimeError("Observed endpoint/regular update counts differ")
     endpoint_exposures = [
@@ -1883,10 +2131,10 @@ def _summarize_flow_sampling(
             for exposure in regular_exposures
             if exposure["timestep_stratum"] == stratum
         ]
-        if len(matching) != REGULAR_UPDATE_COUNT:
+        if len(matching) != len(stratified):
             raise RuntimeError(
                 f"Timestep stratum {stratum} has {len(matching)} exposures, "
-                f"expected {REGULAR_UPDATE_COUNT}"
+                f"expected {len(stratified)}"
             )
         strata[str(stratum)] = {
             "interval": [stratum / 8, (stratum + 1) / 8],
@@ -1956,11 +2204,145 @@ def _validate_transformer_checkpoint(
     return manifest
 
 
+def _validate_parent_report_payload(
+    parent: dict[str, Any],
+    *,
+    parent_report_path: Path,
+    volume_root: Path,
+    volume_name: str,
+) -> tuple[Path, dict[str, Any]]:
+    if parent.get("status") != "COMPLETE":
+        raise RuntimeError("Parent augmentation-generalization run is not COMPLETE")
+    if parent.get("run_id") != CONTINUATION_PARENT_RUN_ID:
+        raise RuntimeError("Parent run ID differs from the pinned continuation parent")
+    if (
+        parent.get("source", {}).get("resolved_commit")
+        != CONTINUATION_PARENT_SOURCE_COMMIT
+    ):
+        raise RuntimeError("Parent source commit differs from the pinned run")
+    if parent.get("protocol", {}).get("name") != PROTOCOL:
+        raise RuntimeError("Parent report protocol differs from the fresh run")
+    if parent.get("protocol", {}).get("optimizer_steps") != OPTIMIZER_STEPS:
+        raise RuntimeError("Parent report does not end at optimizer step 512")
+    if (
+        parent.get("pool", {}).get("pool_sha256")
+        != CONTINUATION_PARENT_POOL_SHA256
+    ):
+        raise RuntimeError("Parent report pool hash differs from the pinned run")
+    if not parent.get("durability", {}).get("remote_content_verified"):
+        raise RuntimeError("Parent report was not remotely content-verified")
+    if parent.get("pool", {}).get("counts") != {
+        "train": TRAIN_VIEW_COUNT,
+        "holdout": HOLDOUT_VIEW_COUNT,
+        "original": ORIGINAL_VIEW_COUNT,
+    }:
+        raise RuntimeError("Parent report pool counts differ")
+    stage = parent.get("stages", {}).get(STAGE_NAME)
+    if not isinstance(stage, dict) or stage.get("status") != "COMPLETE":
+        raise RuntimeError("Parent training stage is not COMPLETE")
+    training = stage.get("training")
+    if (
+        not isinstance(training, dict)
+        or training.get("completed_steps") != OPTIMIZER_STEPS
+        or training.get("target_exposures")
+        != OPTIMIZER_STEPS * OPTIMIZER_BATCH_SIZE
+    ):
+        raise RuntimeError("Parent training budget differs")
+    checkpoint = stage.get("saved_checkpoint")
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Parent report lacks a saved transformer checkpoint")
+    if (
+        checkpoint.get("step") != CONTINUATION_START_STEP
+        or checkpoint.get("state_scope") != "transformer_only"
+        or not checkpoint.get("remote_file_sizes_verified")
+    ):
+        raise RuntimeError("Parent transformer checkpoint contract differs")
+    checkpoint_path = Path(checkpoint.get("path", "")).resolve()
+    if not checkpoint_path.is_relative_to(volume_root):
+        raise RuntimeError("Parent transformer checkpoint lies outside the Volume")
+    expected_report_path = (
+        volume_root
+        / "results"
+        / RESULT_FAMILY
+        / CONTINUATION_PARENT_RUN_ID
+        / "report.json"
+    ).resolve()
+    if parent_report_path.resolve() != expected_report_path:
+        raise RuntimeError("Parent report path differs from its pinned run ID")
+    relative_checkpoint = checkpoint.get("volume_relative_path")
+    if not isinstance(relative_checkpoint, str) or not relative_checkpoint.startswith(
+        "/results/"
+    ):
+        raise RuntimeError("Parent checkpoint Volume-relative path is invalid")
+    expected_checkpoint_path = (
+        volume_root / relative_checkpoint.lstrip("/")
+    ).resolve()
+    if checkpoint_path != expected_checkpoint_path:
+        raise RuntimeError("Parent checkpoint path differs from its Volume path")
+    if checkpoint.get("volume_name") != volume_name:
+        raise RuntimeError("Parent checkpoint Volume name differs")
+    if parent_report_path.resolve() == checkpoint_path:
+        raise RuntimeError("Parent report path unexpectedly equals checkpoint path")
+    manifest = checkpoint.get("manifest")
+    if not isinstance(manifest, dict) or not manifest:
+        raise RuntimeError("Parent checkpoint manifest is missing")
+    return checkpoint_path, checkpoint
+
+
+def _load_and_validate_parent_report(
+    *,
+    parent_report_path: Path,
+    expected_sha256: str,
+    volume_root: Path,
+    volume_name: str,
+) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    if (
+        len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise ValueError("parent-report-sha256 must be a lowercase SHA-256 digest")
+    if expected_sha256 != CONTINUATION_PARENT_REPORT_SHA256:
+        raise RuntimeError("Parent report SHA-256 differs from the pinned run")
+    resolved_report = parent_report_path.resolve()
+    if not resolved_report.is_relative_to(volume_root):
+        raise RuntimeError("Parent report lies outside the mounted Volume")
+    if not resolved_report.is_file():
+        raise FileNotFoundError(resolved_report)
+    actual_sha256 = sha256_file(resolved_report)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            f"Parent report SHA-256 differs: {actual_sha256} versus {expected_sha256}"
+        )
+    parent = json.loads(resolved_report.read_text(encoding="utf-8"))
+    checkpoint_path, checkpoint = _validate_parent_report_payload(
+        parent,
+        parent_report_path=resolved_report,
+        volume_root=volume_root,
+        volume_name=volume_name,
+    )
+    if not checkpoint_path.is_dir():
+        raise FileNotFoundError(checkpoint_path)
+    observed_manifest = _validate_transformer_checkpoint(checkpoint_path)
+    if observed_manifest != checkpoint["manifest"]:
+        raise RuntimeError("Parent transformer checkpoint hashes differ from report")
+    return parent, checkpoint_path, {
+        "report_path": str(resolved_report),
+        "report_sha256": actual_sha256,
+        "run_id": parent.get("run_id"),
+        "source_commit": parent.get("source", {}).get("resolved_commit"),
+        "pool_sha256": parent["pool"]["pool_sha256"],
+        "checkpoint": checkpoint,
+        "optimizer_state_restored": False,
+        "optimizer_reset_reason": "parent checkpoint contains transformer weights only",
+    }
+
+
 def _save_and_upload_checkpoint(
     *,
     transformer: torch.nn.Module,
     volume_name: str,
     run_id: str,
+    final_step: int = OPTIMIZER_STEPS,
 ) -> dict[str, Any]:
     local_root = Path("/tmp") / (f"diffusion-arc-checkpoint-{run_id}-{STAGE_NAME}")
     if local_root.exists():
@@ -1984,7 +2366,7 @@ def _save_and_upload_checkpoint(
 
     remote_path = (
         f"/results/{RESULT_FAMILY}/{run_id}/{STAGE_NAME}/"
-        f"flux-transformer-step-{OPTIMIZER_STEPS:04d}"
+        f"flux-transformer-step-{final_step:04d}"
     )
     volume = modal.Volume.from_name(volume_name)
     upload_started = time.perf_counter()
@@ -2007,7 +2389,7 @@ def _save_and_upload_checkpoint(
         "path": str(Path("/mnt") / volume_name / remote_path.lstrip("/")),
         "volume_name": volume_name,
         "volume_relative_path": remote_path,
-        "step": OPTIMIZER_STEPS,
+        "step": final_step,
         "state_scope": "transformer_only",
         "manifest": manifest,
         "local_validation": True,
@@ -2069,6 +2451,12 @@ def _run_training(
     volume_name: str,
     run_id: str,
     exposure_audit: dict[str, Any],
+    initial_step: int = 0,
+    final_step: int = OPTIMIZER_STEPS,
+    evaluation_steps: Sequence[int] = EVALUATION_STEPS,
+    full_generation_steps: Sequence[int] = EVALUATION_STEPS,
+    evaluate_initial: bool = True,
+    checkpoint_before_final_evaluation: bool = False,
 ) -> None:
     stage_report = REPORT["stages"][STAGE_NAME]
     stage_report["status"] = "TRAINING"
@@ -2077,18 +2465,22 @@ def _run_training(
     step_path = REPORT_DIR / STAGE_NAME / "optimizer_steps.jsonl"
     step_path.parent.mkdir(parents=True, exist_ok=True)
     records = []
+    deferred_final_evaluation = False
     torch.cuda.reset_peak_memory_stats(DEVICE)
-    _evaluate(
-        transformer=transformer,
-        vae_decoder=vae_decoder,
-        step=0,
-        all_text_inputs=all_text_inputs,
-        all_latents=all_latents,
-        train=train,
-        holdout=holdout,
-        original=original,
-        compute_dtype=compute_dtype,
-    )
+    if evaluate_initial:
+        _evaluate(
+            transformer=transformer,
+            vae_decoder=vae_decoder,
+            step=initial_step,
+            all_text_inputs=all_text_inputs,
+            all_latents=all_latents,
+            train=train,
+            holdout=holdout,
+            original=original,
+            compute_dtype=compute_dtype,
+            evaluation_steps=evaluation_steps,
+            final_step=final_step,
+        )
     training_started = time.perf_counter()
     with step_path.open("a", encoding="utf-8") as handle:
         for batch_plan in schedule:
@@ -2108,46 +2500,69 @@ def _run_training(
                 compute_dtype=compute_dtype,
             )
             records.append(record)
+            completed_updates = len(records)
             handle.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
             if (
                 batch_plan.step % PROGRESS_EVERY == 0
-                or batch_plan.step in EVALUATION_STEPS
-                or batch_plan.step == 1
+                or batch_plan.step in evaluation_steps
+                or completed_updates == 1
             ):
                 handle.flush()
                 os.fsync(handle.fileno())
-            if batch_plan.step == 1 or batch_plan.step % PROGRESS_EVERY == 0:
+            if completed_updates == 1 or batch_plan.step % PROGRESS_EVERY == 0:
                 elapsed = time.perf_counter() - training_started
                 remaining = (
-                    elapsed / batch_plan.step * (OPTIMIZER_STEPS - batch_plan.step)
+                    elapsed
+                    / completed_updates
+                    * (len(schedule) - completed_updates)
                 )
                 print(
-                    f"[{STAGE_NAME}] {batch_plan.step}/{OPTIMIZER_STEPS} "
+                    f"[{STAGE_NAME}] global step {batch_plan.step}/{final_step} "
+                    f"phase update {completed_updates}/{len(schedule)} "
                     f"loss={record['loss']:.5f} "
                     f"grad={record['gradient_norm']:.3f} "
                     f"peak={record['peak_allocated_gib']:.1f}GiB "
                     f"elapsed={elapsed / 60:.1f}m eta={remaining / 60:.1f}m"
                 )
-            if batch_plan.step in EVALUATION_STEPS:
-                _evaluate(
-                    transformer=transformer,
-                    vae_decoder=vae_decoder,
-                    step=batch_plan.step,
-                    all_text_inputs=all_text_inputs,
-                    all_latents=all_latents,
-                    train=train,
-                    holdout=holdout,
-                    original=original,
-                    compute_dtype=compute_dtype,
-                )
+            if batch_plan.step in evaluation_steps:
+                if (
+                    checkpoint_before_final_evaluation
+                    and batch_plan.step == final_step
+                ):
+                    deferred_final_evaluation = True
+                    continue
+                evaluation_arguments = {
+                    "transformer": transformer,
+                    "vae_decoder": vae_decoder,
+                    "step": batch_plan.step,
+                    "all_text_inputs": all_text_inputs,
+                    "all_latents": all_latents,
+                    "train": train,
+                    "holdout": holdout,
+                    "original": original,
+                    "compute_dtype": compute_dtype,
+                }
+                if batch_plan.step in full_generation_steps:
+                    _evaluate(
+                        **evaluation_arguments,
+                        evaluation_steps=evaluation_steps,
+                        final_step=final_step,
+                    )
+                else:
+                    _evaluate_t1_only(**evaluation_arguments)
 
     flow_summary = _summarize_flow_sampling(
         records,
         exposure_audit=exposure_audit,
+        planned_batches=_schedule_payload(schedule, train),
     )
     stage_report["training"] = {
         "completed_steps": len(records),
+        "initial_global_step": initial_step,
+        "final_global_step": final_step,
+        "cumulative_completed_steps": final_step,
         "target_exposures": len(records) * OPTIMIZER_BATCH_SIZE,
+        "cumulative_target_exposures": final_step * OPTIMIZER_BATCH_SIZE,
         "mean_loss": sum(record["loss"] for record in records) / len(records),
         "first_loss": records[0]["loss"],
         "last_loss": records[-1]["loss"],
@@ -2162,8 +2577,31 @@ def _run_training(
         transformer=transformer,
         volume_name=volume_name,
         run_id=run_id,
+        final_step=final_step,
     )
     stage_report["saved_checkpoint"] = checkpoint
+    if deferred_final_evaluation:
+        stage_report["status"] = "FINAL_EVALUATION"
+        save_report()
+        evaluation_arguments = {
+            "transformer": transformer,
+            "vae_decoder": vae_decoder,
+            "step": final_step,
+            "all_text_inputs": all_text_inputs,
+            "all_latents": all_latents,
+            "train": train,
+            "holdout": holdout,
+            "original": original,
+            "compute_dtype": compute_dtype,
+        }
+        if final_step in full_generation_steps:
+            _evaluate(
+                **evaluation_arguments,
+                evaluation_steps=evaluation_steps,
+                final_step=final_step,
+            )
+        else:
+            _evaluate_t1_only(**evaluation_arguments)
     stage_report["status"] = "COMPLETE"
     save_report()
 
@@ -2179,11 +2617,50 @@ def run(args: argparse.Namespace) -> None:
     global REPORT, REPORT_DIR, REPORT_PATH, DEVICE
 
     _validate_static_protocol()
-    if args.protocol != PROTOCOL:
+    if args.protocol not in (PROTOCOL, CONTINUATION_PROTOCOL):
         raise ValueError(
-            f"Unsupported protocol {args.protocol!r}; expected {PROTOCOL!r}"
+            f"Unsupported protocol {args.protocol!r}; expected {PROTOCOL!r} or "
+            f"{CONTINUATION_PROTOCOL!r}"
         )
     _validate_source_commit(args.source_commit)
+    continuation = args.protocol == CONTINUATION_PROTOCOL
+    if continuation:
+        if args.parent_report is None or args.parent_report_sha256 is None:
+            raise ValueError(
+                "Continuation requires --parent-report and --parent-report-sha256"
+            )
+        initial_step = CONTINUATION_START_STEP
+        final_step = CONTINUATION_FINAL_STEP
+        training_update_count = CONTINUATION_OPTIMIZER_STEPS
+        phase_start = CONTINUATION_PHASE_START
+        phase_count = CONTINUATION_PHASE_COUNT
+        evaluation_steps = CONTINUATION_EVALUATION_STEPS
+        full_generation_steps = CONTINUATION_FULL_GENERATION_STEPS
+        config_name = CONTINUATION_CONFIG_NAME
+        question = (
+            "Does warm-starting from the verified step-512 transformer and giving "
+            "the same 512 training augmentations three additional endpoint/regular "
+            "sampling phases through global step 2048 improve seen fitting and "
+            "transfer to the unchanged 128-view holdout?"
+        )
+    else:
+        if args.parent_report is not None or args.parent_report_sha256 is not None:
+            raise ValueError("Fresh protocol must not receive a parent report")
+        initial_step = 0
+        final_step = OPTIMIZER_STEPS
+        training_update_count = OPTIMIZER_STEPS
+        phase_start = 0
+        phase_count = 1
+        evaluation_steps = EVALUATION_STEPS
+        full_generation_steps = EVALUATION_STEPS
+        config_name = CONFIG_NAME
+        question = (
+            "Can a fresh full FLUX transformer trained on 512 VAE-safe "
+            "augmentations of ARC task 0d3d703e fit a representative seen "
+            "panel and generalize to 128 semantically disjoint augmentations "
+            "when every training view receives one exact t=1 endpoint contact "
+            "and seven regular trajectory contacts?"
+        )
     volume_root = args.volume_root.resolve()
     flux_checkpoint = volume_root / "flux2-klein-base-4b"
     nvarc_checkpoint = volume_root / "nvarc-qwen3-4b-grids15-sft139"
@@ -2201,6 +2678,19 @@ def run(args: argparse.Namespace) -> None:
     if missing:
         raise FileNotFoundError(f"Missing required Volume artifacts: {missing}")
 
+    parent_report = None
+    parent_checkpoint = None
+    parent_lineage = None
+    if continuation:
+        parent_report, parent_checkpoint, parent_lineage = (
+            _load_and_validate_parent_report(
+                parent_report_path=args.parent_report,
+                expected_sha256=args.parent_report_sha256,
+                volume_root=volume_root,
+                volume_name=args.volume_name,
+            )
+        )
+
     REPORT_DIR = volume_root / "results" / RESULT_FAMILY / args.run_id
     REPORT_DIR.mkdir(parents=True, exist_ok=False)
     REPORT_PATH = REPORT_DIR / "report.json"
@@ -2208,15 +2698,9 @@ def run(args: argparse.Namespace) -> None:
         "schema_version": 1,
         "status": "INITIALIZING",
         "run_id": args.run_id,
-        "question": (
-            "Can a fresh full FLUX transformer trained on 512 VAE-safe "
-            "augmentations of ARC task 0d3d703e fit a representative seen "
-            "panel and generalize to 128 semantically disjoint augmentations "
-            "when every training view receives one exact t=1 endpoint contact "
-            "and seven regular trajectory contacts?"
-        ),
+        "question": question,
         "protocol": {
-            "name": PROTOCOL,
+            "name": args.protocol,
             "task_id": TASK_ID,
             "target_original_pair_index": TARGET_ORIGINAL_PAIR_INDEX,
             "effective_geometries": [
@@ -2231,14 +2715,30 @@ def run(args: argparse.Namespace) -> None:
                 "holdout": HOLDOUT_VIEW_COUNT,
                 "original": ORIGINAL_VIEW_COUNT,
             },
-            "optimizer_steps": OPTIMIZER_STEPS,
+            "optimizer_steps": training_update_count,
+            "initial_optimizer_step": initial_step,
+            "final_optimizer_step": final_step,
             "optimizer_batch_size": OPTIMIZER_BATCH_SIZE,
-            "evaluation_steps": list(EVALUATION_STEPS),
+            "evaluation_steps": list(evaluation_steps),
+            "full_generation_steps": list(full_generation_steps),
+            "t1_only_steps": [
+                step for step in evaluation_steps if step not in full_generation_steps
+            ],
+            "checkpoint_saved_before_final_evaluation": continuation,
             "intermediate_generation_counts": {
-                "seen": INTERMEDIATE_SEEN_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES),
-                "holdout": INTERMEDIATE_HOLDOUT_PER_GEOMETRY
-                * len(EFFECTIVE_GEOMETRIES),
-                "original": 1,
+                "seen": (
+                    0
+                    if continuation
+                    else INTERMEDIATE_SEEN_PER_GEOMETRY
+                    * len(EFFECTIVE_GEOMETRIES)
+                ),
+                "holdout": (
+                    0
+                    if continuation
+                    else INTERMEDIATE_HOLDOUT_PER_GEOMETRY
+                    * len(EFFECTIVE_GEOMETRIES)
+                ),
+                "original": 0 if continuation else 1,
             },
             "final_generation_counts": {
                 "seen": FINAL_SEEN_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES),
@@ -2263,8 +2763,12 @@ def run(args: argparse.Namespace) -> None:
             "volume_root": str(volume_root),
             "flux_checkpoint": str(flux_checkpoint),
             "nvarc_checkpoint": str(nvarc_checkpoint),
+            "initial_transformer_checkpoint": str(
+                parent_checkpoint if continuation else flux_checkpoint
+            ),
         },
         "source": {"resolved_commit": args.source_commit},
+        "parent_lineage": parent_lineage,
         "failures": [],
         "pool": {"status": "PENDING"},
         "stages": {STAGE_NAME: {"status": "PENDING", "evaluations": []}},
@@ -2306,7 +2810,7 @@ def run(args: argparse.Namespace) -> None:
                 raise RuntimeError(f"ARC dataset file differs: {relative}")
 
         source_config = load_single_gpu_training_config(
-            REPOSITORY_ROOT / "configs" / "training" / CONFIG_NAME
+            REPOSITORY_ROOT / "configs" / "training" / config_name
         )
         run_config = replace(
             source_config,
@@ -2317,7 +2821,7 @@ def run(args: argparse.Namespace) -> None:
             ),
         )
         if (
-            run_config.loop.max_optimizer_steps != OPTIMIZER_STEPS
+            run_config.loop.max_optimizer_steps != training_update_count
             or run_config.loop.optimizer_batch_size != OPTIMIZER_BATCH_SIZE
             or run_config.loop.flux_microbatch_size != OPTIMIZER_BATCH_SIZE
             or run_config.loop.min_context_pairs_before_target != 4
@@ -2332,9 +2836,19 @@ def run(args: argparse.Namespace) -> None:
         DEVICE = prepare_single_gpu_device(run_config)
         seed_single_gpu_process(run_config.seed)
         torch.cuda.empty_cache()
-        print(f"[{STAGE_NAME}] loading frozen NVARC/VAE and fresh FLUX transformer")
+        transformer_source = parent_checkpoint if continuation else None
+        source_label = (
+            f"verified parent transformer at global step {initial_step}"
+            if continuation
+            else "fresh FLUX transformer"
+        )
+        print(f"[{STAGE_NAME}] loading frozen NVARC/VAE and {source_label}")
         model_load_started = time.perf_counter()
-        models = load_single_gpu_models(run_config, device=DEVICE)
+        models = load_single_gpu_models(
+            run_config,
+            device=DEVICE,
+            transformer_checkpoint=transformer_source,
+        )
         tokenizer = models.tokenizer
         nvarc_runner = models.nvarc_runner
         vae_encoder = models.vae_encoder
@@ -2345,7 +2859,7 @@ def run(args: argparse.Namespace) -> None:
         parameter_count = sum(
             parameter.numel() for parameter in transformer.parameters()
         )
-        base_fingerprint = _transformer_fingerprint(transformer)
+        initial_transformer_fingerprint = _transformer_fingerprint(transformer)
         print(
             f"[{STAGE_NAME}] models loaded in "
             f"{time.perf_counter() - model_load_started:.1f}s"
@@ -2467,7 +2981,11 @@ def run(args: argparse.Namespace) -> None:
         gc.collect()
         torch.cuda.empty_cache()
 
-        schedule = _build_training_schedule(train)
+        schedule = _build_training_schedule(
+            train,
+            phase_start=phase_start,
+            phase_count=phase_count,
+        )
         schedule_payload = _schedule_payload(schedule, train)
         schedule_hash = _hash_json(schedule_payload)
         exposure_audit = _schedule_exposure_audit(schedule, train)
@@ -2484,10 +3002,56 @@ def run(args: argparse.Namespace) -> None:
             "holdout": [_view_payload(view, split="holdout") for view in holdout],
             "original": _view_payload(original, split="original"),
         }
+        pool_hash = _hash_json(pool_payload)
+        cumulative_exposure_audit = exposure_audit
+        parent_schedule_hash = None
+        if continuation:
+            parent_pool_payload = {
+                name: parent_report["pool"][name]
+                for name in ("counts", "train", "holdout", "original")
+            }
+            recorded_parent_pool_hash = parent_report["pool"]["pool_sha256"]
+            if _hash_json(parent_pool_payload) != recorded_parent_pool_hash:
+                raise RuntimeError("Parent pool payload does not match its hash")
+            normalized_pool_payload = json.loads(
+                json.dumps(pool_payload, sort_keys=True)
+            )
+            if (
+                pool_hash != recorded_parent_pool_hash
+                or normalized_pool_payload != parent_pool_payload
+            ):
+                raise RuntimeError("Regenerated pool differs from the parent run")
+
+            parent_schedule = parent_report.get("training_schedule", {})
+            parent_batches = parent_schedule.get("batches")
+            parent_schedule_hash = parent_schedule.get("sha256")
+            if (
+                not isinstance(parent_batches, list)
+                or parent_schedule_hash != CONTINUATION_PARENT_SCHEDULE_SHA256
+                or _hash_json(parent_batches) != parent_schedule_hash
+            ):
+                raise RuntimeError("Parent training schedule does not match its hash")
+            regenerated_parent_schedule = _schedule_payload(
+                _build_training_schedule(train),
+                train,
+            )
+            if _hash_json(regenerated_parent_schedule) != parent_schedule_hash:
+                raise RuntimeError("Regenerated base schedule differs from parent")
+            parent_exposure_audit = parent_schedule.get("per_view_exposure_audit")
+            if not isinstance(parent_exposure_audit, dict):
+                raise RuntimeError("Parent schedule lacks a per-view exposure audit")
+            cumulative_exposure_audit = _combine_exposure_audits(
+                parent_exposure_audit,
+                exposure_audit,
+            )
+            if not cumulative_exposure_audit["all_exact"]:
+                raise RuntimeError("Cumulative exposure audit is not exact")
+
         REPORT["pool"] = {
             "status": "COMPLETE",
             **pool_payload,
-            "pool_sha256": _hash_json(pool_payload),
+            "pool_sha256": pool_hash,
+            "matches_parent_exactly": continuation,
             "candidate_generation": candidate_audit,
             "selection": selection_audit,
             "vae_roundtrip_selection": vae_audit,
@@ -2515,18 +3079,40 @@ def run(args: argparse.Namespace) -> None:
         }
         REPORT["training_schedule"] = {
             "sha256": schedule_hash,
+            "parent_sha256": parent_schedule_hash,
             "updates": len(schedule),
-            "endpoint_steps": list(range(1, OPTIMIZER_STEPS + 1, 8)),
-            "update_counts": {
-                "shared_endpoint": ENDPOINT_UPDATE_COUNT,
-                "stratified": REGULAR_UPDATE_COUNT,
-            },
+            "global_step_range": [schedule[0].step, schedule[-1].step],
+            "endpoint_steps": [
+                batch.step for batch in schedule if batch.kind == "shared_endpoint"
+            ],
+            "update_counts": exposure_audit["expected_update_counts"],
             "exposure_counts": {
-                "shared_endpoint": TRAIN_VIEW_COUNT,
-                "stratified": TRAIN_VIEW_COUNT * REGULAR_EXPOSURES_PER_VIEW,
-                "total": TRAIN_VIEW_COUNT * EXPOSURES_PER_VIEW,
+                "shared_endpoint": sum(
+                    batch.kind == "shared_endpoint" for batch in schedule
+                )
+                * OPTIMIZER_BATCH_SIZE,
+                "stratified": sum(
+                    batch.kind == "stratified" for batch in schedule
+                )
+                * OPTIMIZER_BATCH_SIZE,
+                "total": len(schedule) * OPTIMIZER_BATCH_SIZE,
             },
+            "flow_seed_range": [
+                FLOW_SEED + schedule[0].step,
+                FLOW_SEED + schedule[-1].step,
+            ],
+            "parent_flow_seed_range": (
+                [FLOW_SEED + 1, FLOW_SEED + CONTINUATION_START_STEP]
+                if continuation
+                else None
+            ),
+            "parent_flow_seeds_disjoint": (
+                schedule[0].step > CONTINUATION_START_STEP
+                if continuation
+                else None
+            ),
             "per_view_exposure_audit": exposure_audit,
+            "cumulative_per_view_exposure_audit": cumulative_exposure_audit,
             "batches": schedule_payload,
         }
         REPORT["resolved_training_config"] = json.loads(
@@ -2571,15 +3157,24 @@ def run(args: argparse.Namespace) -> None:
         )
         REPORT["models"] = {
             "flux_parameter_count": parameter_count,
-            "base_fingerprint": base_fingerprint,
-            "fresh_full_transformer": True,
+            "initial_transformer_fingerprint": initial_transformer_fingerprint,
+            "fresh_full_transformer": not continuation,
+            "warm_start_from_parent_transformer": continuation,
+            "optimizer_state_restored": False,
+            "rng_state_restored": False,
+            "scheduler_state_restored": False,
+            "optimizer_state_policy": (
+                "fresh AdamW because the parent checkpoint is transformer-only"
+                if continuation
+                else "fresh AdamW for fresh transformer training"
+            ),
             "nvarc_frozen": True,
             "vae_frozen": True,
             "preflight_loss": float(preflight_loss.item()),
             "memory_after_preflight": cuda_memory("after-preflight"),
         }
         REPORT["stages"][STAGE_NAME]["schedule_sha256"] = schedule_hash
-        REPORT["stages"][STAGE_NAME]["evaluation_steps"] = list(EVALUATION_STEPS)
+        REPORT["stages"][STAGE_NAME]["evaluation_steps"] = list(evaluation_steps)
         save_report()
 
         _run_training(
@@ -2598,6 +3193,12 @@ def run(args: argparse.Namespace) -> None:
             volume_name=args.volume_name,
             run_id=args.run_id,
             exposure_audit=exposure_audit,
+            initial_step=initial_step,
+            final_step=final_step,
+            evaluation_steps=evaluation_steps,
+            full_generation_steps=full_generation_steps,
+            evaluate_initial=not continuation,
+            checkpoint_before_final_evaluation=continuation,
         )
         final = REPORT["stages"][STAGE_NAME]["evaluations"][-1]
         REPORT["comparison"] = {
