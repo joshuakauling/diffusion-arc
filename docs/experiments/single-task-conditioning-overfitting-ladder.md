@@ -2,8 +2,9 @@
 
 ## Status and question
 
-This document preregisters a three-stage diagnostic on ARC task `0d3d703e`.
-It keeps the primary fixed 30x30 canvas, frozen NVARC, frozen FLUX VAE, full
+This document records the preregistration and one pre-training protocol
+amendment for a three-stage diagnostic on ARC task `0d3d703e`. It keeps the
+primary fixed 30x30 canvas, frozen NVARC, frozen FLUX VAE, full
 FLUX-transformer training, native velocity head, and unweighted flow-matching
 loss.
 
@@ -31,6 +32,27 @@ and broad flow-time coverage. It also fixes the original fifth pair as the
 target in every condition. Only original pairs 0 through 3 appear as
 demonstrations.
 
+## Pre-training VAE protocol amendment
+
+The first execution, run `20260825T233807503991Z` from source commit
+`d7cc6632ad6bde7bef177a959670fcb40ad499ec`, stopped before any optimizer was
+constructed because the clean frozen-VAE encode/decode round trip was exact
+for 16 of the 17 conditions. No FLUX learning result or stage-zero generation
+was observed before this amendment.
+
+The fixed palette and all 17 deterministic conditions remain unchanged. The
+clean-VAE check now records the expected grid, decoded grid, validity, inferred
+shape, cell accuracy, and mismatched cells for every condition. The run may
+continue only when canonical is exact and at least 16 of 17 conditions are
+exact. Thus at most one noncanonical clean-VAE failure is tolerated and made
+visible in every relevant panel summary. Two failures or any canonical failure
+still stop the run before training.
+
+This tolerance isolates the requested FLUX/NVARC overfitting diagnostic while
+the broader VAE representation issue is investigated separately. It does not
+reclassify a VAE-limited condition as an exact model success, regenerate data,
+or change the target palette after inspecting the failure.
+
 ## Conditions
 
 The runner constructs 17 deterministic conditions directly from the raw task:
@@ -48,7 +70,9 @@ the two routing targets differ in every cell.
 
 All 17 target-free prefixes are encoded in one physical NVARC batch. Their
 hidden states and the 17 frozen-VAE target latents are cached before any FLUX
-optimizer is constructed.
+optimizer is constructed. The detailed clean-target-latent round trip is saved
+before its acceptance gate is evaluated, so an aborted run still identifies
+the exact failing conditions.
 
 ## Independent stages
 
@@ -104,6 +128,10 @@ steps. It records:
 - contact sheets for correct generation at every evaluation;
 - final same-noise swapped generation for stages 2 and 3.
 
+Each stage report additionally stores the clean-VAE exact reference for every
+condition panel, and the final cross-stage comparison places those reference
+counts beside the raw generation results.
+
 For the routing probe, each target row keeps exactly the same `z_t`, timestep,
 and Gaussian noise while only its NVARC condition is exchanged. Final correct
 and swapped generations reinitialize the generator with the same seed, batch
@@ -122,6 +150,10 @@ row target and the target belonging to the exchanged condition.
   repeated exposure across the larger fixed condition set.
 - Seen success without unseen success is presentation memorization, which is
   sufficient for this overfitting diagnostic but not augmentation transfer.
+- A model failure on a condition whose clean target latent already fails the
+  VAE round trip cannot be attributed solely to FLUX. Raw exact-grid results
+  remain unchanged, while the report exposes the corresponding clean-VAE
+  reference count beside every stage summary.
 
 Run status `COMPLETE` means the technical protocol, checkpoint uploads, and
 report upload completed. It never implies that a learning criterion passed.

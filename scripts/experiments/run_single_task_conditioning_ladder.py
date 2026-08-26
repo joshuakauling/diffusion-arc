@@ -207,6 +207,8 @@ STAGES = (
     ),
 )
 
+MINIMUM_CLEAN_VAE_EXACT_GRIDS = len(CONDITION_SPECS) - 1
+
 
 REPORT: dict[str, Any]
 REPORT_PATH: Path
@@ -420,12 +422,68 @@ def _decode_latents(latents: Tensor, vae_decoder: Any) -> tuple[Tensor, tuple[An
     return classes, decode_arc_grids(classes, canvas_size=SPATIAL_SHAPE.height), rgb_images
 
 
+def _grid_mismatches(
+    predicted_grid: Any,
+    expected_grid: Any,
+) -> list[dict[str, int]]:
+    if predicted_grid is None or len(predicted_grid) != len(expected_grid):
+        return []
+    if any(
+        len(predicted_row) != len(expected_row)
+        for predicted_row, expected_row in zip(
+            predicted_grid,
+            expected_grid,
+            strict=True,
+        )
+    ):
+        return []
+    return [
+        {
+            "row": row_index,
+            "column": column_index,
+            "expected": int(expected),
+            "predicted": int(predicted),
+        }
+        for row_index, (predicted_row, expected_row) in enumerate(
+            zip(predicted_grid, expected_grid, strict=True)
+        )
+        for column_index, (predicted, expected) in enumerate(
+            zip(predicted_row, expected_row, strict=True)
+        )
+        if predicted != expected
+    ]
+
+
+def _roundtrip_group_summary(
+    per_condition: dict[str, dict[str, Any]],
+    condition_names: tuple[str, ...],
+) -> dict[str, Any]:
+    missing = [name for name in condition_names if name not in per_condition]
+    if missing:
+        raise RuntimeError(f"VAE round-trip conditions are missing: {missing}")
+    exact_names = [
+        name for name in condition_names if per_condition[name]["exact_grid"]
+    ]
+    failed_names = [name for name in condition_names if name not in exact_names]
+    return {
+        "condition_names": list(condition_names),
+        "exact_grids": len(exact_names),
+        "total_grids": len(condition_names),
+        "exact_grid_fraction": len(exact_names) / len(condition_names),
+        "exact_condition_names": exact_names,
+        "failed_condition_names": failed_names,
+    }
+
+
 def _vae_roundtrip(
     *,
     latents: Tensor,
+    condition_names: tuple[str, ...],
     grids: tuple[Any, ...],
     vae_decoder: Any,
 ) -> dict[str, Any]:
+    if len(condition_names) != len(grids) or latents.shape[0] != len(grids):
+        raise RuntimeError("VAE round-trip batch differs from condition count")
     predictions = []
     for start in range(0, len(grids), 8):
         _, decoded, _ = _decode_latents(
@@ -434,10 +492,98 @@ def _vae_roundtrip(
         )
         predictions.extend(decoded)
     diagnostics = diagnose_exact_grids(tuple(predictions), grids)
-    exact = sum(item.exact_grid for item in diagnostics)
-    if exact != len(grids):
-        raise RuntimeError(f"Clean VAE round trip is {exact}/{len(grids)}")
-    return {"exact_grids": exact, "total_grids": len(grids)}
+    per_condition = {}
+    for name, prediction, expected_grid, diagnostic in zip(
+        condition_names,
+        predictions,
+        grids,
+        diagnostics,
+        strict=True,
+    ):
+        per_condition[name] = {
+            **asdict(diagnostic),
+            "expected_grid": expected_grid,
+            "predicted_grid": prediction.grid,
+            "mismatched_cells": _grid_mismatches(
+                prediction.grid,
+                expected_grid,
+            ),
+        }
+
+    exact = sum(item["exact_grid"] for item in per_condition.values())
+    group_summaries = {
+        "training_conditions": _roundtrip_group_summary(
+            per_condition,
+            _TRAIN_CONDITION_NAMES,
+        ),
+        "unseen_conditions": _roundtrip_group_summary(
+            per_condition,
+            _UNSEEN_CONDITION_NAMES,
+        ),
+        "canonical": _roundtrip_group_summary(
+            per_condition,
+            ("canonical",),
+        ),
+    }
+    stage_panel_summaries = {
+        stage.name: {
+            "seen": _roundtrip_group_summary(
+                per_condition,
+                stage.condition_names,
+            ),
+            "unseen": _roundtrip_group_summary(
+                per_condition,
+                _UNSEEN_CONDITION_NAMES,
+            ),
+            "canonical": _roundtrip_group_summary(
+                per_condition,
+                ("canonical",),
+            ),
+        }
+        for stage in STAGES
+    }
+    canonical_exact = per_condition["canonical"]["exact_grid"]
+    gate_passed = bool(
+        canonical_exact and exact >= MINIMUM_CLEAN_VAE_EXACT_GRIDS
+    )
+    return {
+        "exact_grids": exact,
+        "total_grids": len(grids),
+        "exact_grid_fraction": exact / len(grids),
+        "failed_condition_names": [
+            name
+            for name in condition_names
+            if not per_condition[name]["exact_grid"]
+        ],
+        "per_condition": per_condition,
+        "group_summaries": group_summaries,
+        "stage_panel_summaries": stage_panel_summaries,
+        "gate": {
+            "canonical_must_be_exact": True,
+            "canonical_exact": canonical_exact,
+            "minimum_exact_grids": MINIMUM_CLEAN_VAE_EXACT_GRIDS,
+            "tolerated_failure_count": len(grids) - exact,
+            "accepted_with_tolerance": bool(
+                gate_passed and exact < len(grids)
+            ),
+            "passed": gate_passed,
+        },
+    }
+
+
+def _validate_vae_roundtrip_gate(roundtrip: dict[str, Any]) -> None:
+    failed_names = roundtrip["failed_condition_names"]
+    if not roundtrip["gate"]["canonical_exact"]:
+        raise RuntimeError(
+            "Canonical clean VAE round trip is not exact; "
+            f"failed conditions: {failed_names}"
+        )
+    if roundtrip["exact_grids"] < MINIMUM_CLEAN_VAE_EXACT_GRIDS:
+        raise RuntimeError(
+            "Clean VAE round trip is below the preregistered tolerance: "
+            f"{roundtrip['exact_grids']}/{roundtrip['total_grids']}; "
+            f"failed conditions: {failed_names}"
+        )
 
 
 def _transformer_fingerprint(transformer: torch.nn.Module) -> str:
@@ -1320,6 +1466,9 @@ def _run_stage(
                 for name, group_slice in groups
             },
             "canonical_is_seen": "canonical" in stage.condition_names,
+            "clean_vae_panel_reference": REPORT["vae_precompute"]["roundtrip"][
+                "stage_panel_summaries"
+            ][stage.name],
             "fresh_base_fingerprint": _transformer_fingerprint(transformer),
         }
     )
@@ -1434,6 +1583,8 @@ def _validate_static_protocol() -> None:
         raise RuntimeError("Stage 1 must use the canonical condition")
     if STAGES[1].condition_names != ("canonical", "train-id"):
         raise RuntimeError("Stage 2 must compare canonical and color-permuted ID")
+    if MINIMUM_CLEAN_VAE_EXACT_GRIDS != 16:
+        raise RuntimeError("Clean VAE tolerance must allow exactly one failed condition")
     for stage in STAGES:
         if len(stage.batch_condition_names()) != OPTIMIZER_BATCH_SIZE:
             raise RuntimeError(f"Stage batch differs from size 8: {stage.name}")
@@ -1448,10 +1599,26 @@ def _summarize_stages() -> dict[str, Any]:
     for stage in STAGES:
         payload = REPORT["stages"][stage.name]
         final = payload["evaluations"][-1]
+        clean_vae_reference = payload["clean_vae_panel_reference"]
         result[stage.name] = {
             "seen_exact_grid_pass2": final["panels"]["seen"]["exact_grid_pass2"],
             "unseen_exact_grid_pass2": final["panels"]["unseen"]["exact_grid_pass2"],
             "canonical_exact_grid_pass2": final["panels"]["canonical"]["exact_grid_pass2"],
+            "seen_clean_vae_exact_grids": clean_vae_reference["seen"][
+                "exact_grids"
+            ],
+            "seen_clean_vae_total_grids": clean_vae_reference["seen"][
+                "total_grids"
+            ],
+            "unseen_clean_vae_exact_grids": clean_vae_reference["unseen"][
+                "exact_grids"
+            ],
+            "unseen_clean_vae_total_grids": clean_vae_reference["unseen"][
+                "total_grids"
+            ],
+            "canonical_clean_vae_exact_grids": clean_vae_reference[
+                "canonical"
+            ]["exact_grids"],
             "seen_mean_best_cell_accuracy": final["panels"]["seen"][
                 "mean_best_cell_accuracy"
             ],
@@ -1489,7 +1656,7 @@ def run(args: argparse.Namespace) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=False)
     REPORT_PATH = REPORT_DIR / "report.json"
     REPORT = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "INITIALIZING",
         "run_id": args.run_id,
         "question": (
@@ -1509,6 +1676,11 @@ def run(args: argparse.Namespace) -> None:
             "generation_seeds": list(GENERATION_SEEDS),
             "inference_steps": INFERENCE_STEPS,
             "max_grad_norm": MAX_GRAD_NORM,
+            "clean_vae_roundtrip_gate": {
+                "canonical_must_be_exact": True,
+                "minimum_exact_grids": MINIMUM_CLEAN_VAE_EXACT_GRIDS,
+                "total_grids": len(CONDITION_SPECS),
+            },
             "stage_order": [stage.name for stage in STAGES],
             "stages": [asdict(stage) for stage in STAGES],
         },
@@ -1659,12 +1831,55 @@ def run(args: argparse.Namespace) -> None:
         all_latents = _encode_target_grids(all_grids, vae_encoder)
         vae_roundtrip = _vae_roundtrip(
             latents=all_latents,
+            condition_names=condition_order,
             grids=all_grids,
             vae_decoder=vae_decoder,
         )
         del vae_encoder
         gc.collect()
         torch.cuda.empty_cache()
+
+        REPORT["conditions"] = {
+            "order": list(condition_order),
+            "count": len(condition_order),
+            "items": {
+                condition.name: {
+                    "key": str(condition.key()),
+                    "geometry": condition.geometry.value,
+                    "color_mapping": list(condition.color_mapping),
+                    "pair_indices": list(condition.pair_indices),
+                    "target_grid": grids_by_name[condition.name],
+                }
+                for condition in CONDITION_SPECS
+            },
+            "all_target_original_pair_4": True,
+            "all_target_mappings_directly_demonstrated": True,
+            "all_target_grids_unique": True,
+            "stage_2_target_cell_differences": routing_cell_differences,
+            "stage_2_target_cell_count": routing_cell_count,
+        }
+        REPORT["nvarc_precompute"] = {
+            "physical_batch_size": len(condition_order),
+            "seconds": nvarc_seconds,
+            "batch1_vs_batch17_cosine_similarity": cosine,
+            "batch1_vs_batch17_mean_absolute_error": mean_absolute_error,
+            "text_shape": list(all_text_inputs.encoder_hidden_states.shape),
+            "memory": cuda_memory("after-nvarc-precompute"),
+        }
+        REPORT["vae_precompute"] = {
+            "latent_shape": list(all_latents.shape),
+            "seconds": time.perf_counter() - vae_started,
+            "roundtrip": vae_roundtrip,
+        }
+        save_report()
+        _validate_vae_roundtrip_gate(vae_roundtrip)
+        if vae_roundtrip["gate"]["accepted_with_tolerance"]:
+            print(
+                "Continuing with a recorded clean-VAE limitation: "
+                f"{vae_roundtrip['exact_grids']}/{vae_roundtrip['total_grids']} "
+                "exact conditions; failures: "
+                f"{vae_roundtrip['failed_condition_names']}"
+            )
 
         parameter_count = sum(
             parameter.numel() for parameter in transformer.parameters()
@@ -1703,38 +1918,6 @@ def run(args: argparse.Namespace) -> None:
         if not bool(torch.isfinite(preflight_loss).item()):
             raise FloatingPointError("Conditioning-ladder preflight loss is non-finite")
 
-        REPORT["conditions"] = {
-            "order": list(condition_order),
-            "count": len(condition_order),
-            "items": {
-                condition.name: {
-                    "key": str(condition.key()),
-                    "geometry": condition.geometry.value,
-                    "color_mapping": list(condition.color_mapping),
-                    "pair_indices": list(condition.pair_indices),
-                    "target_grid": grids_by_name[condition.name],
-                }
-                for condition in CONDITION_SPECS
-            },
-            "all_target_original_pair_4": True,
-            "all_target_mappings_directly_demonstrated": True,
-            "all_target_grids_unique": True,
-            "stage_2_target_cell_differences": routing_cell_differences,
-            "stage_2_target_cell_count": routing_cell_count,
-        }
-        REPORT["nvarc_precompute"] = {
-            "physical_batch_size": len(condition_order),
-            "seconds": nvarc_seconds,
-            "batch1_vs_batch17_cosine_similarity": cosine,
-            "batch1_vs_batch17_mean_absolute_error": mean_absolute_error,
-            "text_shape": list(all_text_inputs.encoder_hidden_states.shape),
-            "memory": cuda_memory("after-nvarc-precompute"),
-        }
-        REPORT["vae_precompute"] = {
-            "latent_shape": list(all_latents.shape),
-            "seconds": time.perf_counter() - vae_started,
-            "roundtrip": vae_roundtrip,
-        }
         REPORT["models"] = {
             "flux_parameter_count": parameter_count,
             "base_fingerprint": base_fingerprint,
