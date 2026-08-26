@@ -6,8 +6,11 @@ from math import factorial
 from pathlib import Path
 import json
 import runpy
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -33,6 +36,12 @@ CONTINUATION_CONFIG = (
     / "training"
     / "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
 )
+REGION_WEIGHTED_CONTINUATION_CONFIG = (
+    REPOSITORY_ROOT
+    / "configs"
+    / "training"
+    / "single_gpu_0d3d703e_region_weighted_continuation.json"
+)
 NOTEBOOK = (
     REPOSITORY_ROOT
     / "experiments"
@@ -50,6 +59,12 @@ REGION_WEIGHTED_NOTEBOOK = (
     / "experiments"
     / "training"
     / "single-task-region-weighted-loss-overfitting-modal.ipynb"
+)
+REGION_WEIGHTED_CONTINUATION_NOTEBOOK = (
+    REPOSITORY_ROOT
+    / "experiments"
+    / "training"
+    / "single-task-region-weighted-loss-continuation-modal.ipynb"
 )
 
 
@@ -280,6 +295,26 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
             {"shared_endpoint": 192, "stratified": 1344, "total": 1536},
         )
 
+    def test_region_weighted_continuation_uses_two_complete_phases(self) -> None:
+        train = self._views(128)
+        continuation = self.namespace["_build_training_schedule"](
+            train,
+            phase_start=1,
+            phase_count=2,
+        )
+        audit = self.namespace["_schedule_exposure_audit"](continuation, train)
+
+        self.assertEqual(len(continuation), 1024)
+        self.assertEqual((continuation[0].step, continuation[-1].step), (513, 1536))
+        self.assertEqual(
+            audit["expected"],
+            {"total": 16, "shared_endpoint": 2, "stratified": 14},
+        )
+        self.assertEqual(
+            audit["expected_update_counts"],
+            {"shared_endpoint": 128, "stratified": 896, "total": 1024},
+        )
+
     def test_parent_and_continuation_audits_combine_to_32_contacts(self) -> None:
         train = self._views(128)
         build = self.namespace["_build_training_schedule"]
@@ -436,6 +471,7 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
                 "protocol": {
                     "name": self.namespace["PROTOCOL"],
                     "optimizer_steps": 512,
+                    "loss": self.namespace["UNWEIGHTED_LOSS_POLICY"],
                 },
                 "pool": {
                     "pool_sha256": self.namespace[
@@ -478,6 +514,166 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
                     volume_root=volume_root,
                     volume_name=volume_name,
                 )
+
+    def test_weighted_parent_accepts_only_the_pinned_terminal_upload_failure(
+        self,
+    ) -> None:
+        validate = self.namespace["_validate_parent_report_payload"]
+        contract = self.namespace["REGION_WEIGHTED_PARENT_CONTRACT"]
+        with tempfile.TemporaryDirectory() as temporary:
+            volume_root = (Path(temporary) / "vo-internal-id").resolve()
+            volume_name = "diffusion-arc-models"
+            report_path = (
+                volume_root
+                / "results"
+                / self.namespace["RESULT_FAMILY"]
+                / contract.run_id
+                / "report.json"
+            )
+            checkpoint_path = (
+                report_path.parent
+                / self.namespace["STAGE_NAME"]
+                / "flux-transformer-step-0512"
+            )
+            checkpoint_relative = "/" + str(
+                checkpoint_path.relative_to(volume_root)
+            )
+            parent = {
+                "status": "FAIL",
+                "failed_stage": "experiment",
+                "completed_at_utc": "2026-08-26T22:08:55+00:00",
+                "failures": [
+                    {
+                        **self.namespace["REGION_WEIGHTED_PARENT_TERMINAL_FAILURE"],
+                        "recorded_at_utc": "2026-08-26T22:09:02+00:00",
+                    }
+                ],
+                "run_id": contract.run_id,
+                "source": {"resolved_commit": contract.source_commit},
+                "durability": {"remote_content_verified": False},
+                "protocol": {
+                    "name": contract.protocol_name,
+                    "optimizer_steps": 512,
+                    "loss": contract.loss_policy,
+                    "region_loss": {
+                        "weights": self.namespace["REGION_LOSS_WEIGHTS"]
+                    },
+                },
+                "pool": {
+                    "pool_sha256": contract.pool_sha256,
+                    "counts": {"train": 512, "holdout": 128, "original": 1},
+                },
+                "stages": {
+                    self.namespace["STAGE_NAME"]: {
+                        "status": "COMPLETE",
+                        "training": {
+                            "completed_steps": 512,
+                            "target_exposures": 4096,
+                        },
+                        "saved_checkpoint": {
+                            "step": 512,
+                            "state_scope": "transformer_only",
+                            "remote_file_sizes_verified": True,
+                            "path": str(checkpoint_path),
+                            "volume_name": volume_name,
+                            "volume_relative_path": checkpoint_relative,
+                            "manifest": {
+                                "config.json": {"bytes": 1, "sha256": "x"}
+                            },
+                        },
+                    }
+                },
+            }
+
+            resolved, checkpoint = validate(
+                parent,
+                parent_report_path=report_path,
+                volume_root=volume_root,
+                volume_name=volume_name,
+                contract=contract,
+            )
+            self.assertEqual(resolved, checkpoint_path.resolve())
+            self.assertEqual(checkpoint["step"], 512)
+
+            parent["failures"][-1]["message"] = "different failure"
+            with self.assertRaisesRegex(RuntimeError, "terminal report-upload"):
+                validate(
+                    parent,
+                    parent_report_path=report_path,
+                    volume_root=volume_root,
+                    volume_name=volume_name,
+                    contract=contract,
+                )
+
+    def test_final_report_upload_retries_a_transient_block_failure(self) -> None:
+        upload = self.namespace["_upload_and_verify_final_report"]
+        function_globals = upload.__globals__
+
+        class FakeBatch:
+            def __init__(self, volume):
+                self.volume = volume
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def put_file(self, local_path: str, remote_path: str) -> None:
+                self.volume.payload = Path(local_path).read_bytes()
+                self.volume.remote_path = remote_path
+                self.volume.upload_count += 1
+
+        class FakeVolume:
+            def __init__(self):
+                self.payload = b""
+                self.remote_path = ""
+                self.upload_count = 0
+                self.read_count = 0
+
+            def batch_upload(self, *, force: bool):
+                self.force = force
+                return FakeBatch(self)
+
+            def read_file(self, remote_path: str):
+                self.read_count += 1
+                self.asserted_remote_path = remote_path
+                if self.read_count == 1:
+                    raise RuntimeError("block not found")
+                return (self.payload,)
+
+        fake_volume = FakeVolume()
+        fake_modal = SimpleNamespace(
+            Volume=SimpleNamespace(from_name=lambda _: fake_volume)
+        )
+        sentinel = object()
+        previous_report = function_globals.get("REPORT", sentinel)
+        previous_path = function_globals.get("REPORT_PATH", sentinel)
+        with tempfile.TemporaryDirectory() as temporary:
+            report_path = Path(temporary) / "report.json"
+            function_globals["REPORT"] = {"status": "COMPLETE"}
+            function_globals["REPORT_PATH"] = report_path
+            function_globals["save_report"]()
+            try:
+                with patch.dict(sys.modules, {"modal": fake_modal}), patch.object(
+                    function_globals["time"], "sleep", return_value=None
+                ):
+                    upload(volume_name="diffusion-arc-models", run_id="retry-test")
+                report = function_globals["REPORT"]
+                self.assertTrue(report["durability"]["remote_content_verified"])
+                self.assertEqual(report["durability"]["upload_attempts"], 2)
+                self.assertEqual(fake_volume.upload_count, 2)
+                self.assertEqual(fake_volume.read_count, 2)
+                self.assertEqual(fake_volume.payload, report_path.read_bytes())
+            finally:
+                if previous_report is sentinel:
+                    function_globals.pop("REPORT", None)
+                else:
+                    function_globals["REPORT"] = previous_report
+                if previous_path is sentinel:
+                    function_globals.pop("REPORT_PATH", None)
+                else:
+                    function_globals["REPORT_PATH"] = previous_path
 
     def test_generation_noise_is_keyed_and_chunk_invariant(self) -> None:
         keyed_noise = self.namespace["_keyed_noise"]
@@ -767,6 +963,19 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
         self.assertEqual(continuation.models, base.models)
         self.assertEqual(continuation.data, base.data)
 
+    def test_region_weighted_continuation_config_uses_1024_updates(self) -> None:
+        base = load_single_gpu_training_config(CONFIG)
+        continuation = load_single_gpu_training_config(
+            REGION_WEIGHTED_CONTINUATION_CONFIG
+        )
+        self.assertEqual(continuation.loop.max_optimizer_steps, 1024)
+        self.assertEqual(continuation.loop.optimizer_batch_size, 8)
+        self.assertEqual(continuation.loop.flux_microbatch_size, 8)
+        self.assertEqual(continuation.loop.min_context_pairs_before_target, 4)
+        self.assertEqual(continuation.optimizer, base.optimizer)
+        self.assertEqual(continuation.models, base.models)
+        self.assertEqual(continuation.data, base.data)
+
     def test_notebook_is_clean_and_all_code_cells_compile(self) -> None:
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         self.assertEqual(len(notebook["cells"]), 6)
@@ -798,6 +1007,24 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
             self.assertEqual(cell.get("outputs", []), [])
             self.assertIsNone(cell.get("execution_count"))
             compile("".join(cell["source"]), f"region-loss-cell-{index}", "exec")
+
+    def test_region_weighted_continuation_notebook_is_clean_and_compiles(
+        self,
+    ) -> None:
+        notebook = json.loads(
+            REGION_WEIGHTED_CONTINUATION_NOTEBOOK.read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(notebook["cells"]), 6)
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            self.assertEqual(cell.get("outputs", []), [])
+            self.assertIsNone(cell.get("execution_count"))
+            compile(
+                "".join(cell["source"]),
+                f"region-loss-continuation-cell-{index}",
+                "exec",
+            )
 
 
 if __name__ == "__main__":

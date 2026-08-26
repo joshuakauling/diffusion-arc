@@ -73,11 +73,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = "augmentation-generalization-overfit"
 CONTINUATION_PROTOCOL = "augmentation-generalization-overfit-continuation"
 REGION_WEIGHTED_PROTOCOL = "augmentation-generalization-region-weighted-overfit"
+REGION_WEIGHTED_CONTINUATION_PROTOCOL = (
+    "augmentation-generalization-region-weighted-overfit-continuation"
+)
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
 CONTINUATION_CONFIG_NAME = (
     "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
+)
+REGION_WEIGHTED_CONTINUATION_CONFIG_NAME = (
+    "single_gpu_0d3d703e_region_weighted_continuation.json"
 )
 TASK_ID = "0d3d703e"
 TARGET_ORIGINAL_PAIR_INDEX = 4
@@ -133,6 +139,36 @@ CONTINUATION_PARENT_POOL_SHA256 = (
 CONTINUATION_PARENT_SCHEDULE_SHA256 = (
     "eac20d584ecb44e78ba7dc22f6fbc7033ee0c5eac12e704affe1287e30636947"
 )
+REGION_WEIGHTED_CONTINUATION_START_STEP = 512
+REGION_WEIGHTED_CONTINUATION_FINAL_STEP = 1536
+REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS = (
+    REGION_WEIGHTED_CONTINUATION_FINAL_STEP
+    - REGION_WEIGHTED_CONTINUATION_START_STEP
+)
+REGION_WEIGHTED_CONTINUATION_PHASE_START = (
+    REGION_WEIGHTED_CONTINUATION_START_STEP // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_CONTINUATION_PHASE_COUNT = (
+    REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_CONTINUATION_PARENT_RUN_ID = "20260826T215440643526Z"
+REGION_WEIGHTED_CONTINUATION_PARENT_SOURCE_COMMIT = (
+    "ae3c87c68e2ca1e2248bbf614da6d878d8902a57"
+)
+REGION_WEIGHTED_CONTINUATION_PARENT_REPORT_SHA256 = (
+    "c7757b5b4976d1c3f7305641593e000c8c3d87aa149a4df8eb60803e379e5f38"
+)
+REGION_WEIGHTED_CONTINUATION_PARENT_POOL_SHA256 = (
+    "f512b3dc4cc5f603c3c764a45b3a4086d4b4837e63a2793a7009c2505e72e0b0"
+)
+REGION_WEIGHTED_CONTINUATION_PARENT_SCHEDULE_SHA256 = (
+    "eac20d584ecb44e78ba7dc22f6fbc7033ee0c5eac12e704affe1287e30636947"
+)
+REGION_WEIGHTED_PARENT_TERMINAL_FAILURE = {
+    "stage": "experiment",
+    "type": "ExecutionError",
+    "message": "Request failed with status 404 Not Found: block not found",
+}
 UPDATE_CYCLE_LENGTH = 8
 ENDPOINT_UPDATE_COUNT = OPTIMIZER_STEPS // UPDATE_CYCLE_LENGTH
 REGULAR_UPDATE_COUNT = OPTIMIZER_STEPS - ENDPOINT_UPDATE_COUNT
@@ -145,6 +181,8 @@ CONTINUATION_EVALUATION_STEPS = (1024, 2048)
 CONTINUATION_FULL_GENERATION_STEPS = (2048,)
 REGION_WEIGHTED_EVALUATION_STEPS = EVALUATION_STEPS
 REGION_WEIGHTED_FULL_GENERATION_STEPS = (512,)
+REGION_WEIGHTED_CONTINUATION_EVALUATION_STEPS = (1024, 1536)
+REGION_WEIGHTED_CONTINUATION_FULL_GENERATION_STEPS = (1536,)
 UNWEIGHTED_LOSS_POLICY = "unweighted-flow-matching"
 REGION_WEIGHTED_LOSS_POLICY = "region-weighted-flow-matching"
 REGION_LOSS_WEIGHTS = {
@@ -171,6 +209,8 @@ MINIMUM_VRAM_GIB = 120.0
 MINIMUM_LOCAL_CHECKPOINT_FREE_GIB = 24.0
 PROGRESS_EVERY = 64
 SHEET_PAGE_SIZE = 16
+FINAL_REPORT_UPLOAD_ATTEMPTS = 3
+FINAL_REPORT_RETRY_DELAYS_SECONDS = (1.0, 2.0)
 
 
 REPORT: dict[str, Any]
@@ -221,6 +261,44 @@ class TrainingBatchPlan:
     kind: str
     view_indices: tuple[int, ...]
     timestep_strata: tuple[int, ...] | None
+
+
+@dataclass(frozen=True)
+class ParentRunContract:
+    """Immutable lineage requirements for a transformer-only continuation."""
+
+    run_id: str
+    source_commit: str
+    report_sha256: str
+    pool_sha256: str
+    schedule_sha256: str
+    protocol_name: str
+    loss_policy: str
+    final_step: int
+    accept_terminal_report_upload_failure: bool = False
+
+
+UNWEIGHTED_PARENT_CONTRACT = ParentRunContract(
+    run_id=CONTINUATION_PARENT_RUN_ID,
+    source_commit=CONTINUATION_PARENT_SOURCE_COMMIT,
+    report_sha256=CONTINUATION_PARENT_REPORT_SHA256,
+    pool_sha256=CONTINUATION_PARENT_POOL_SHA256,
+    schedule_sha256=CONTINUATION_PARENT_SCHEDULE_SHA256,
+    protocol_name=PROTOCOL,
+    loss_policy=UNWEIGHTED_LOSS_POLICY,
+    final_step=CONTINUATION_START_STEP,
+)
+REGION_WEIGHTED_PARENT_CONTRACT = ParentRunContract(
+    run_id=REGION_WEIGHTED_CONTINUATION_PARENT_RUN_ID,
+    source_commit=REGION_WEIGHTED_CONTINUATION_PARENT_SOURCE_COMMIT,
+    report_sha256=REGION_WEIGHTED_CONTINUATION_PARENT_REPORT_SHA256,
+    pool_sha256=REGION_WEIGHTED_CONTINUATION_PARENT_POOL_SHA256,
+    schedule_sha256=REGION_WEIGHTED_CONTINUATION_PARENT_SCHEDULE_SHA256,
+    protocol_name=REGION_WEIGHTED_PROTOCOL,
+    loss_policy=REGION_WEIGHTED_LOSS_POLICY,
+    final_step=REGION_WEIGHTED_CONTINUATION_START_STEP,
+    accept_terminal_report_upload_failure=True,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1039,6 +1117,24 @@ def _validate_static_protocol() -> None:
         or abs(sum(REGION_LOSS_WEIGHTS.values()) - 1.0) > 1e-12
     ):
         raise RuntimeError("Region-weighted loss allocation differs from protocol")
+    if (
+        REGION_WEIGHTED_CONTINUATION_START_STEP != 512
+        or REGION_WEIGHTED_CONTINUATION_FINAL_STEP != 1536
+        or REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS != 1024
+        or REGION_WEIGHTED_CONTINUATION_PHASE_START != 1
+        or REGION_WEIGHTED_CONTINUATION_PHASE_COUNT != 2
+        or REGION_WEIGHTED_CONTINUATION_EVALUATION_STEPS != (1024, 1536)
+        or REGION_WEIGHTED_CONTINUATION_FULL_GENERATION_STEPS != (1536,)
+    ):
+        raise RuntimeError(
+            "Region-weighted continuation allocation differs from protocol"
+        )
+    if (
+        FINAL_REPORT_UPLOAD_ATTEMPTS != 3
+        or len(FINAL_REPORT_RETRY_DELAYS_SECONDS)
+        != FINAL_REPORT_UPLOAD_ATTEMPTS - 1
+    ):
+        raise RuntimeError("Final report retry policy differs from protocol")
 
 
 def _normalized_images_to_uint8(images: Tensor) -> Tensor:
@@ -2382,27 +2478,55 @@ def _validate_parent_report_payload(
     parent_report_path: Path,
     volume_root: Path,
     volume_name: str,
+    contract: ParentRunContract = UNWEIGHTED_PARENT_CONTRACT,
 ) -> tuple[Path, dict[str, Any]]:
-    if parent.get("status") != "COMPLETE":
-        raise RuntimeError("Parent augmentation-generalization run is not COMPLETE")
-    if parent.get("run_id") != CONTINUATION_PARENT_RUN_ID:
+    if contract.accept_terminal_report_upload_failure:
+        failures = parent.get("failures")
+        observed_failure = None if not failures else failures[-1]
+        observed_signature = (
+            None
+            if not isinstance(observed_failure, dict)
+            else {
+                key: observed_failure.get(key)
+                for key in ("stage", "type", "message")
+            }
+        )
+        if (
+            parent.get("status") != "FAIL"
+            or parent.get("failed_stage") != "experiment"
+            or observed_signature != REGION_WEIGHTED_PARENT_TERMINAL_FAILURE
+            or not parent.get("completed_at_utc")
+            or parent.get("durability", {}).get("remote_content_verified")
+            is not False
+        ):
+            raise RuntimeError(
+                "Parent run does not match the accepted terminal report-upload "
+                "failure"
+            )
+    else:
+        if parent.get("status") != "COMPLETE":
+            raise RuntimeError(
+                "Parent augmentation-generalization run is not COMPLETE"
+            )
+        if not parent.get("durability", {}).get("remote_content_verified"):
+            raise RuntimeError("Parent report was not remotely content-verified")
+    if parent.get("run_id") != contract.run_id:
         raise RuntimeError("Parent run ID differs from the pinned continuation parent")
-    if (
-        parent.get("source", {}).get("resolved_commit")
-        != CONTINUATION_PARENT_SOURCE_COMMIT
-    ):
+    if parent.get("source", {}).get("resolved_commit") != contract.source_commit:
         raise RuntimeError("Parent source commit differs from the pinned run")
-    if parent.get("protocol", {}).get("name") != PROTOCOL:
+    protocol = parent.get("protocol", {})
+    if protocol.get("name") != contract.protocol_name:
         raise RuntimeError("Parent report protocol differs from the fresh run")
-    if parent.get("protocol", {}).get("optimizer_steps") != OPTIMIZER_STEPS:
+    if protocol.get("optimizer_steps") != OPTIMIZER_STEPS:
         raise RuntimeError("Parent report does not end at optimizer step 512")
-    if (
-        parent.get("pool", {}).get("pool_sha256")
-        != CONTINUATION_PARENT_POOL_SHA256
-    ):
+    if protocol.get("loss") != contract.loss_policy:
+        raise RuntimeError("Parent report loss policy differs")
+    if contract.loss_policy == REGION_WEIGHTED_LOSS_POLICY and protocol.get(
+        "region_loss", {}
+    ).get("weights") != REGION_LOSS_WEIGHTS:
+        raise RuntimeError("Parent report region-loss weights differ")
+    if parent.get("pool", {}).get("pool_sha256") != contract.pool_sha256:
         raise RuntimeError("Parent report pool hash differs from the pinned run")
-    if not parent.get("durability", {}).get("remote_content_verified"):
-        raise RuntimeError("Parent report was not remotely content-verified")
     if parent.get("pool", {}).get("counts") != {
         "train": TRAIN_VIEW_COUNT,
         "holdout": HOLDOUT_VIEW_COUNT,
@@ -2424,7 +2548,7 @@ def _validate_parent_report_payload(
     if not isinstance(checkpoint, dict):
         raise RuntimeError("Parent report lacks a saved transformer checkpoint")
     if (
-        checkpoint.get("step") != CONTINUATION_START_STEP
+        checkpoint.get("step") != contract.final_step
         or checkpoint.get("state_scope") != "transformer_only"
         or not checkpoint.get("remote_file_sizes_verified")
     ):
@@ -2436,7 +2560,7 @@ def _validate_parent_report_payload(
         volume_root
         / "results"
         / RESULT_FAMILY
-        / CONTINUATION_PARENT_RUN_ID
+        / contract.run_id
         / "report.json"
     ).resolve()
     if parent_report_path.resolve() != expected_report_path:
@@ -2467,13 +2591,14 @@ def _load_and_validate_parent_report(
     expected_sha256: str,
     volume_root: Path,
     volume_name: str,
+    contract: ParentRunContract = UNWEIGHTED_PARENT_CONTRACT,
 ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
     if (
         len(expected_sha256) != 64
         or any(character not in "0123456789abcdef" for character in expected_sha256)
     ):
         raise ValueError("parent-report-sha256 must be a lowercase SHA-256 digest")
-    if expected_sha256 != CONTINUATION_PARENT_REPORT_SHA256:
+    if expected_sha256 != contract.report_sha256:
         raise RuntimeError("Parent report SHA-256 differs from the pinned run")
     resolved_report = parent_report_path.resolve()
     if not resolved_report.is_relative_to(volume_root):
@@ -2491,6 +2616,7 @@ def _load_and_validate_parent_report(
         parent_report_path=resolved_report,
         volume_root=volume_root,
         volume_name=volume_name,
+        contract=contract,
     )
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(checkpoint_path)
@@ -2503,6 +2629,13 @@ def _load_and_validate_parent_report(
         "run_id": parent.get("run_id"),
         "source_commit": parent.get("source", {}).get("resolved_commit"),
         "pool_sha256": parent["pool"]["pool_sha256"],
+        "report_status": parent.get("status"),
+        "remote_report_content_verified": parent.get("durability", {}).get(
+            "remote_content_verified"
+        ),
+        "accepted_terminal_report_upload_failure": (
+            contract.accept_terminal_report_upload_failure
+        ),
         "checkpoint": checkpoint,
         "optimizer_state_restored": False,
         "optimizer_reset_reason": "parent checkpoint contains transformer weights only",
@@ -2589,21 +2722,52 @@ def _upload_and_verify_final_report(
         "remote_report_path": remote_path,
         "upload_method": "modal.Volume.batch_upload",
         "remote_content_verified": False,
+        "upload_attempts": 0,
     }
     save_report()
     staging_path = Path("/tmp") / f"diffusion-arc-report-{run_id}.json"
     volume = modal.Volume.from_name(volume_name)
-    for verified_state in (False, True):
-        REPORT["durability"]["remote_content_verified"] = verified_state
+    REPORT["durability"]["remote_content_verified"] = True
+    save_report()
+    local_bytes = REPORT_PATH.read_bytes()
+    staging_path.write_bytes(local_bytes)
+    last_error: Exception | None = None
+    try:
+        for attempt in range(1, FINAL_REPORT_UPLOAD_ATTEMPTS + 1):
+            REPORT["durability"]["upload_attempts"] = attempt
+            save_report()
+            local_bytes = REPORT_PATH.read_bytes()
+            staging_path.write_bytes(local_bytes)
+            try:
+                with volume.batch_upload(force=True) as batch:
+                    batch.put_file(str(staging_path), remote_path)
+                remote_bytes = b"".join(volume.read_file(remote_path))
+                if remote_bytes != local_bytes:
+                    raise RuntimeError(
+                        "Remote report content differs after batch upload"
+                    )
+            except Exception as error:
+                last_error = error
+                if attempt == FINAL_REPORT_UPLOAD_ATTEMPTS:
+                    break
+                delay = FINAL_REPORT_RETRY_DELAYS_SECONDS[attempt - 1]
+                print(
+                    f"[{STAGE_NAME}] final report upload attempt {attempt} "
+                    f"failed: {error}; retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
+                continue
+            return
+        raise RuntimeError(
+            "Final report upload failed after "
+            f"{FINAL_REPORT_UPLOAD_ATTEMPTS} attempts"
+        ) from last_error
+    except Exception:
+        REPORT["durability"]["remote_content_verified"] = False
         save_report()
-        local_bytes = REPORT_PATH.read_bytes()
-        staging_path.write_bytes(local_bytes)
-        with volume.batch_upload(force=True) as batch:
-            batch.put_file(str(staging_path), remote_path)
-        remote_bytes = b"".join(volume.read_file(remote_path))
-        if remote_bytes != local_bytes:
-            raise RuntimeError("Remote report content differs after batch upload")
-    staging_path.unlink()
+        raise
+    finally:
+        staging_path.unlink(missing_ok=True)
 
 
 def _run_training(
@@ -2817,6 +2981,7 @@ def run(args: argparse.Namespace) -> None:
         PROTOCOL,
         CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_PROTOCOL,
+        REGION_WEIGHTED_CONTINUATION_PROTOCOL,
     )
     if args.protocol not in supported_protocols:
         raise ValueError(
@@ -2824,13 +2989,21 @@ def run(args: argparse.Namespace) -> None:
             f"{supported_protocols!r}"
         )
     _validate_source_commit(args.source_commit)
-    continuation = args.protocol == CONTINUATION_PROTOCOL
-    region_weighted = args.protocol == REGION_WEIGHTED_PROTOCOL
-    if continuation:
+    continuation = args.protocol in (
+        CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+    )
+    region_weighted = args.protocol in (
+        REGION_WEIGHTED_PROTOCOL,
+        REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+    )
+    parent_contract: ParentRunContract | None = None
+    if args.protocol == CONTINUATION_PROTOCOL:
         if args.parent_report is None or args.parent_report_sha256 is None:
             raise ValueError(
                 "Continuation requires --parent-report and --parent-report-sha256"
             )
+        parent_contract = UNWEIGHTED_PARENT_CONTRACT
         initial_step = CONTINUATION_START_STEP
         final_step = CONTINUATION_FINAL_STEP
         training_update_count = CONTINUATION_OPTIMIZER_STEPS
@@ -2847,6 +3020,31 @@ def run(args: argparse.Namespace) -> None:
             "the same 512 training augmentations three additional endpoint/regular "
             "sampling phases through global step 2048 improve seen fitting and "
             "transfer to the unchanged 128-view holdout?"
+        )
+    elif args.protocol == REGION_WEIGHTED_CONTINUATION_PROTOCOL:
+        if args.parent_report is None or args.parent_report_sha256 is None:
+            raise ValueError(
+                "Region-weighted continuation requires --parent-report and "
+                "--parent-report-sha256"
+            )
+        parent_contract = REGION_WEIGHTED_PARENT_CONTRACT
+        initial_step = REGION_WEIGHTED_CONTINUATION_START_STEP
+        final_step = REGION_WEIGHTED_CONTINUATION_FINAL_STEP
+        training_update_count = REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS
+        phase_start = REGION_WEIGHTED_CONTINUATION_PHASE_START
+        phase_count = REGION_WEIGHTED_CONTINUATION_PHASE_COUNT
+        evaluation_steps = REGION_WEIGHTED_CONTINUATION_EVALUATION_STEPS
+        full_generation_steps = (
+            REGION_WEIGHTED_CONTINUATION_FULL_GENERATION_STEPS
+        )
+        config_name = REGION_WEIGHTED_CONTINUATION_CONFIG_NAME
+        loss_policy = REGION_WEIGHTED_LOSS_POLICY
+        full_final_generation_panel = False
+        checkpoint_before_final_evaluation = True
+        question = (
+            "Do two complete additional region-weighted sampling phases from "
+            "the verified step-512 transformer through global step 1536 "
+            "produce exact seen grids or improved same-task holdout behavior?"
         )
     elif region_weighted:
         if args.parent_report is not None or args.parent_report_sha256 is not None:
@@ -2924,12 +3122,15 @@ def run(args: argparse.Namespace) -> None:
     parent_checkpoint = None
     parent_lineage = None
     if continuation:
+        if parent_contract is None:
+            raise AssertionError("Continuation lacks a parent contract")
         parent_report, parent_checkpoint, parent_lineage = (
             _load_and_validate_parent_report(
                 parent_report_path=args.parent_report,
                 expected_sha256=args.parent_report_sha256,
                 volume_root=volume_root,
                 volume_name=args.volume_name,
+                contract=parent_contract,
             )
         )
 
@@ -3271,11 +3472,16 @@ def run(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     "Region-weighted pool differs from the unweighted baseline"
                 )
-            if schedule_hash != CONTINUATION_PARENT_SCHEDULE_SHA256:
+            if (
+                not continuation
+                and schedule_hash != CONTINUATION_PARENT_SCHEDULE_SHA256
+            ):
                 raise RuntimeError(
                     "Region-weighted schedule differs from the unweighted baseline"
                 )
         if continuation:
+            if parent_contract is None:
+                raise AssertionError("Continuation lacks a parent contract")
             parent_pool_payload = {
                 name: parent_report["pool"][name]
                 for name in ("counts", "train", "holdout", "original")
@@ -3297,7 +3503,7 @@ def run(args: argparse.Namespace) -> None:
             parent_schedule_hash = parent_schedule.get("sha256")
             if (
                 not isinstance(parent_batches, list)
-                or parent_schedule_hash != CONTINUATION_PARENT_SCHEDULE_SHA256
+                or parent_schedule_hash != parent_contract.schedule_sha256
                 or _hash_json(parent_batches) != parent_schedule_hash
             ):
                 raise RuntimeError("Parent training schedule does not match its hash")
@@ -3354,7 +3560,9 @@ def run(args: argparse.Namespace) -> None:
             "unweighted_baseline_sha256": (
                 CONTINUATION_PARENT_SCHEDULE_SHA256 if region_weighted else None
             ),
-            "matches_unweighted_baseline_exactly": region_weighted,
+            "matches_unweighted_baseline_exactly": (
+                region_weighted and not continuation
+            ),
             "updates": len(schedule),
             "global_step_range": [schedule[0].step, schedule[-1].step],
             "endpoint_steps": [
@@ -3377,12 +3585,12 @@ def run(args: argparse.Namespace) -> None:
                 FLOW_SEED + schedule[-1].step,
             ],
             "parent_flow_seed_range": (
-                [FLOW_SEED + 1, FLOW_SEED + CONTINUATION_START_STEP]
+                [FLOW_SEED + 1, FLOW_SEED + initial_step]
                 if continuation
                 else None
             ),
             "parent_flow_seeds_disjoint": (
-                schedule[0].step > CONTINUATION_START_STEP
+                schedule[0].step > initial_step
                 if continuation
                 else None
             ),

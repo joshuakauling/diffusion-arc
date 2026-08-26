@@ -25,6 +25,7 @@ under [`results/`](results/) and retain their existing run-oriented layout.
 - [`single-task-augmentation-generalization-overfitting-modal.ipynb`](training/single-task-augmentation-generalization-overfitting-modal.ipynb)
 - [`single-task-augmentation-generalization-continuation-modal.ipynb`](training/single-task-augmentation-generalization-continuation-modal.ipynb)
 - [`single-task-region-weighted-loss-overfitting-modal.ipynb`](training/single-task-region-weighted-loss-overfitting-modal.ipynb)
+- [`single-task-region-weighted-loss-continuation-modal.ipynb`](training/single-task-region-weighted-loss-continuation-modal.ipynb)
 
 ## Inference and evaluation
 
