@@ -31,6 +31,7 @@ under [`results/`](results/) and retain their existing run-oriented layout.
 - [`evaluate-flux-checkpoint-training-view-modal.ipynb`](inference/evaluate-flux-checkpoint-training-view-modal.ipynb)
 - [`compare-flux-inference-schedules-modal.ipynb`](inference/compare-flux-inference-schedules-modal.ipynb)
 - [`compare-flux-restart-sampling-modal.ipynb`](inference/compare-flux-restart-sampling-modal.ipynb)
+- [`diagnose-conditioning-ladder-checkpoints-modal.ipynb`](inference/diagnose-conditioning-ladder-checkpoints-modal.ipynb)
 - [`Kaggle direct-sampling kernel`](inference/kaggle/nvarc_direct_sampling/)
 
 ## VAE experiments

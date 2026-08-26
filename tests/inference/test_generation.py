@@ -15,6 +15,7 @@ from diffusion_arc.arc_data import (
     render_grid_canvas,
 )
 from diffusion_arc.inference import (
+    continue_arc_batch,
     diagnose_exact_grids,
     generate_arc_batch,
     linear_timestep_schedule,
@@ -166,6 +167,82 @@ class GenerationTests(unittest.TestCase):
         torch.testing.assert_close(first.final_latents, second.final_latents)
         torch.testing.assert_close(first.rgb_images, second.rgb_images)
         self.assertEqual(first.predictions[0].grid, second.predictions[0].grid)
+
+    def test_continues_from_explicit_latents_at_partial_timestep(self) -> None:
+        transformer = ConstantVelocityTransformer(velocity=2.0).train()
+        decoder = PaletteImageDecoder(((1, 2), (3, 4)))
+        initial_latents = torch.full(
+            (2, *TARGET_LATENT_SHAPE),
+            3.0,
+            dtype=torch.float32,
+        )
+
+        result = continue_arc_batch(
+            transformer,
+            decoder,
+            _text_inputs(batch_size=2),
+            initial_latents=initial_latents,
+            timestep_schedule=(0.5, 0.25, 0.0),
+            compute_dtype=torch.bfloat16,
+        )
+
+        torch.testing.assert_close(
+            result.final_latents,
+            torch.full_like(result.final_latents, 2.0),
+        )
+        torch.testing.assert_close(
+            result.timestep_schedule,
+            torch.tensor((0.5, 0.25, 0.0)),
+        )
+        self.assertEqual(len(transformer.timesteps), 2)
+        torch.testing.assert_close(
+            transformer.timesteps[0],
+            torch.tensor((0.5, 0.5)),
+        )
+        self.assertTrue(transformer.training)
+        self.assertEqual(decoder.calls, 1)
+
+    def test_partial_generation_validates_latents_and_schedule(self) -> None:
+        transformer = ConstantVelocityTransformer()
+        decoder = PaletteImageDecoder(((0,),))
+        valid_latents = torch.zeros((1, *TARGET_LATENT_SHAPE))
+        invalid_cases = (
+            {"initial_latents": valid_latents, "timestep_schedule": (0.0, 0.0)},
+            {"initial_latents": valid_latents, "timestep_schedule": (1.1, 0.0)},
+            {"initial_latents": valid_latents, "timestep_schedule": (0.5, 0.1)},
+            {
+                "initial_latents": torch.zeros((2, *TARGET_LATENT_SHAPE)),
+                "timestep_schedule": (0.5, 0.0),
+            },
+            {
+                "initial_latents": torch.zeros(
+                    (1, TARGET_LATENT_SHAPE[0], TARGET_LATENT_CHANNELS - 1)
+                ),
+                "timestep_schedule": (0.5, 0.0),
+            },
+        )
+
+        for case in invalid_cases:
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                continue_arc_batch(
+                    transformer,
+                    decoder,
+                    _text_inputs(),
+                    compute_dtype=torch.bfloat16,
+                    **case,
+                )
+
+        with self.assertRaises(TypeError):
+            continue_arc_batch(
+                transformer,
+                decoder,
+                _text_inputs(),
+                initial_latents=torch.zeros(
+                    (1, *TARGET_LATENT_SHAPE), dtype=torch.int64
+                ),
+                timestep_schedule=(0.5, 0.0),
+                compute_dtype=torch.bfloat16,
+            )
 
     def test_generates_known_full_compact_grid_without_pad_inference(self) -> None:
         spatial_shape = FluxSpatialShape(height=3, width=3)
