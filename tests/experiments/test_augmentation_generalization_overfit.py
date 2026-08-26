@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from math import factorial
 from pathlib import Path
 import json
@@ -44,6 +45,14 @@ CONTINUATION_NOTEBOOK = (
     / "training"
     / "single-task-augmentation-generalization-continuation-modal.ipynb"
 )
+REGION_WEIGHTED_NOTEBOOK = (
+    REPOSITORY_ROOT
+    / "experiments"
+    / "training"
+    / "single-task-region-weighted-loss-overfitting-modal.ipynb"
+)
+
+
 def _indexed_permutation(index: int) -> tuple[int, ...]:
     values = list(range(10))
     result = []
@@ -125,6 +134,14 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         self.assertEqual(
             {member for members in classes.values() for member in members},
             set(type(self.geometries[0])),
+        )
+        self.assertEqual(
+            self.namespace["REGION_LOSS_WEIGHTS"],
+            {"grid": 0.6, "boundary": 0.3, "outer_padding": 0.1},
+        )
+        self.assertAlmostEqual(
+            sum(self.namespace["REGION_LOSS_WEIGHTS"].values()),
+            1.0,
         )
 
     def test_candidate_augmentation_is_deterministic_and_keeps_pair_four_last(
@@ -370,6 +387,23 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         )
         self.assertEqual(continuation, parent)
 
+    def test_region_weighted_final_panel_uses_cost_capped_counts(self) -> None:
+        train = self._views(128)
+        holdout = self._views(32, split=1)
+        indices = self.namespace["_evaluation_indices"](
+            512,
+            train,
+            holdout,
+            evaluation_steps=(0, 128, 256, 512),
+            final_step=512,
+            full_final_panel=False,
+        )
+        groups = Counter(
+            self.namespace["_group_for_global_index"](index) for index in indices
+        )
+        self.assertEqual(groups, {"seen": 32, "holdout": 32, "original": 1})
+        self.assertEqual(len(indices), len(set(indices)))
+
     def test_parent_payload_validation_pins_lineage_and_volume_paths(self) -> None:
         validate = self.namespace["_validate_parent_report_payload"]
         with tempfile.TemporaryDirectory() as temporary:
@@ -473,18 +507,83 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         torch.testing.assert_close(together[1], reversed_rows[0])
         self.assertEqual(tuple(together.shape), (2, 900, 128))
 
-    def test_t1_region_losses_are_vectorized_per_view(self) -> None:
-        squared = torch.ones((2, 30, 30, 128), dtype=torch.float32)
-        squared[0, :3, :3] = 4.0
-        squared[1] = 2.0
-        metrics = self.namespace["_per_row_region_losses"](squared.reshape(2, 900, 128))
-
-        self.assertEqual(tuple(metrics.shape), (2, 3))
-        torch.testing.assert_close(
-            metrics[0],
-            torch.tensor(((9 * 4 + 891) / 900, 4.0, 1.0)),
+    def test_region_losses_separate_grid_boundary_and_outer_padding(self) -> None:
+        views = tuple(
+            replace(
+                self._view(0, index),
+                target_grid=((1, 2, 3), (1, 2, 3), (1, 2, 3)),
+            )
+            for index in range(2)
         )
-        torch.testing.assert_close(metrics[1], torch.tensor((2.0, 2.0, 2.0)))
+        squared = torch.full((2, 30, 30, 128), 4.0, dtype=torch.float32)
+        squared[:, :3, :3] = 2.0
+        squared[:, 3, :4] = 3.0
+        squared[:, :3, 3] = 3.0
+        metrics = self.namespace["_per_row_region_losses"](
+            squared.reshape(2, 900, 128),
+            views,
+        )
+
+        self.assertEqual(tuple(metrics.shape), (2, 5))
+        expected_total = (9 * 2 + 7 * 3 + 884 * 4) / 900
+        expected_padding = (7 * 3 + 884 * 4) / 891
+        expected = torch.tensor(
+            (expected_total, 2.0, 3.0, 4.0, expected_padding)
+        )
+        torch.testing.assert_close(metrics[0], expected)
+        torch.testing.assert_close(metrics[1], expected)
+
+        masks = self.namespace["_region_masks"](
+            views[0].target_grid,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual([int(mask.sum()) for mask in masks], [9, 7, 884, 891])
+
+    def test_region_weighted_objective_uses_per_region_means(self) -> None:
+        view = replace(
+            self._view(0, 0),
+            target_grid=((1, 2, 3), (1, 2, 3), (1, 2, 3)),
+        )
+        squared = torch.full((1, 30, 30, 128), 4.0, dtype=torch.float32)
+        squared[:, :3, :3] = 2.0
+        squared[:, 3, :4] = 3.0
+        squared[:, :3, 3] = 3.0
+        predicted = squared.sqrt().reshape(1, 900, 128).requires_grad_(True)
+        target = torch.zeros_like(predicted)
+
+        objective, raw_squared, regions, contributions = self.namespace[
+            "_training_objective"
+        ](
+            predicted,
+            target,
+            (view,),
+            loss_policy=self.namespace["REGION_WEIGHTED_LOSS_POLICY"],
+        )
+        torch.testing.assert_close(raw_squared, squared.reshape(1, 900, 128))
+        torch.testing.assert_close(objective, torch.tensor(2.5))
+        torch.testing.assert_close(
+            contributions[0],
+            torch.tensor((1.2, 0.9, 0.4)),
+        )
+        torch.testing.assert_close(objective, contributions.sum())
+        self.assertEqual(tuple(regions.shape), (1, 5))
+        objective.backward()
+        self.assertTrue(bool((predicted.grad != 0).all()))
+
+    def test_unweighted_objective_remains_the_global_mse(self) -> None:
+        view = replace(
+            self._view(0, 0),
+            target_grid=((1, 2, 3), (1, 2, 3), (1, 2, 3)),
+        )
+        predicted = torch.linspace(-1, 1, 900 * 128).reshape(1, 900, 128)
+        target = torch.zeros_like(predicted)
+        objective, squared, _, _ = self.namespace["_training_objective"](
+            predicted,
+            target,
+            (view,),
+            loss_policy=self.namespace["UNWEIGHTED_LOSS_POLICY"],
+        )
+        torch.testing.assert_close(objective, squared.mean())
 
     def test_comparison_grid_rendering_uses_compact_canvas(self) -> None:
         render = self.namespace["_uint8_grid_image"]
@@ -687,6 +786,18 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
             self.assertEqual(cell.get("outputs", []), [])
             self.assertIsNone(cell.get("execution_count"))
             compile("".join(cell["source"]), f"continuation-cell-{index}", "exec")
+
+    def test_region_weighted_notebook_is_clean_and_all_code_cells_compile(
+        self,
+    ) -> None:
+        notebook = json.loads(REGION_WEIGHTED_NOTEBOOK.read_text(encoding="utf-8"))
+        self.assertEqual(len(notebook["cells"]), 6)
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            self.assertEqual(cell.get("outputs", []), [])
+            self.assertIsNone(cell.get("execution_count"))
+            compile("".join(cell["source"]), f"region-loss-cell-{index}", "exec")
 
 
 if __name__ == "__main__":

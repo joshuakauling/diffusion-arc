@@ -72,6 +72,7 @@ from diffusion_arc.training.single_gpu_setup import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = "augmentation-generalization-overfit"
 CONTINUATION_PROTOCOL = "augmentation-generalization-overfit-continuation"
+REGION_WEIGHTED_PROTOCOL = "augmentation-generalization-region-weighted-overfit"
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
@@ -142,6 +143,15 @@ REGULAR_GROUP_OFFSETS = (8, 16, 24, 32, 40, 48, 56)
 EVALUATION_STEPS = (0, 128, 256, 512)
 CONTINUATION_EVALUATION_STEPS = (1024, 2048)
 CONTINUATION_FULL_GENERATION_STEPS = (2048,)
+REGION_WEIGHTED_EVALUATION_STEPS = EVALUATION_STEPS
+REGION_WEIGHTED_FULL_GENERATION_STEPS = (512,)
+UNWEIGHTED_LOSS_POLICY = "unweighted-flow-matching"
+REGION_WEIGHTED_LOSS_POLICY = "region-weighted-flow-matching"
+REGION_LOSS_WEIGHTS = {
+    "grid": 0.6,
+    "boundary": 0.3,
+    "outer_padding": 0.1,
+}
 INTERMEDIATE_SEEN_PER_GEOMETRY = 8
 FINAL_SEEN_PER_GEOMETRY = 32
 INTERMEDIATE_HOLDOUT_PER_GEOMETRY = 8
@@ -167,6 +177,10 @@ REPORT: dict[str, Any]
 REPORT_PATH: Path
 REPORT_DIR: Path
 DEVICE: torch.device
+REGION_MASK_CACHE: dict[
+    tuple[int, int, str, int | None],
+    tuple[Tensor, Tensor, Tensor, Tensor],
+] = {}
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1031,14 @@ def _validate_static_protocol() -> None:
         or CONTINUATION_FULL_GENERATION_STEPS != (2048,)
     ):
         raise RuntimeError("Continuation allocation differs from protocol")
+    if (
+        REGION_WEIGHTED_EVALUATION_STEPS != (0, 128, 256, 512)
+        or REGION_WEIGHTED_FULL_GENERATION_STEPS != (512,)
+        or REGION_LOSS_WEIGHTS
+        != {"grid": 0.6, "boundary": 0.3, "outer_padding": 0.1}
+        or abs(sum(REGION_LOSS_WEIGHTS.values()) - 1.0) > 1e-12
+    ):
+        raise RuntimeError("Region-weighted loss allocation differs from protocol")
 
 
 def _normalized_images_to_uint8(images: Tensor) -> Tensor:
@@ -1311,6 +1333,7 @@ def _optimizer_step(
     views: Sequence[PreparedView],
     batch_plan: TrainingBatchPlan,
     compute_dtype: torch.dtype,
+    loss_policy: str = UNWEIGHTED_LOSS_POLICY,
 ) -> dict[str, Any]:
     image_ids = build_flux_image_position_ids(
         clean_latents.shape[0],
@@ -1340,10 +1363,14 @@ def _optimizer_step(
         flow_batch.timesteps,
         compute_dtype=compute_dtype,
     )
-    squared_error = (
-        predicted_velocity.float() - flow_batch.target_velocity.float()
-    ).square()
-    loss = flow_matching_loss(predicted_velocity, flow_batch.target_velocity)
+    loss, squared_error, region_losses, weighted_contributions = (
+        _training_objective(
+            predicted_velocity,
+            flow_batch.target_velocity,
+            views,
+            loss_policy=loss_policy,
+        )
+    )
     if not bool(torch.isfinite(loss.detach()).item()):
         raise FloatingPointError("Training loss is non-finite")
     loss.backward()
@@ -1360,53 +1387,73 @@ def _optimizer_step(
     optimizer.step()
     torch.cuda.synchronize(DEVICE)
 
-    spatial_squared = squared_error.detach().reshape(
-        squared_error.shape[0],
-        SPATIAL_SHAPE.height,
-        SPATIAL_SHAPE.width,
-        squared_error.shape[2],
+    row_objectives = (
+        weighted_contributions.sum(dim=1)
+        if loss_policy == REGION_WEIGHTED_LOSS_POLICY
+        else region_losses[:, 0]
     )
-    padding_mask = torch.ones(
-        (SPATIAL_SHAPE.height, SPATIAL_SHAPE.width),
-        dtype=torch.bool,
-        device=DEVICE,
-    )
-    padding_mask[:3, :3] = False
     per_row = torch.stack(
         (
             flow_batch.timesteps,
-            squared_error.detach().mean(dim=(1, 2)),
-            spatial_squared[:, :3, :3].mean(dim=(1, 2, 3)),
-            spatial_squared[:, padding_mask].mean(dim=(1, 2)),
+            row_objectives.detach(),
+            *tuple(region_losses.detach().unbind(dim=1)),
+            *tuple(weighted_contributions.detach().unbind(dim=1)),
         ),
         dim=1,
     ).to(device="cpu", dtype=torch.float32)
     per_exposure = []
     for row, view in enumerate(views):
-        timestep, total_loss, grid_loss, padding_loss = per_row[row].tolist()
+        (
+            timestep,
+            objective_loss,
+            total_loss,
+            grid_loss,
+            boundary_loss,
+            outer_padding_loss,
+            padding_loss,
+            weighted_grid_contribution,
+            weighted_boundary_contribution,
+            weighted_outer_padding_contribution,
+        ) = per_row[row].tolist()
         stratum = (
             None
             if batch_plan.timestep_strata is None
             else batch_plan.timestep_strata[row]
         )
-        per_exposure.append(
-            {
-                "key": view.serialized_key,
-                "geometry": view.geometry.value,
-                "sampling_kind": batch_plan.kind,
-                "timestep": float(timestep),
-                "timestep_stratum": stratum,
-                "total_loss": total_loss,
-                "grid_loss": grid_loss,
-                "padding_loss": padding_loss,
-            }
-        )
+        exposure = {
+            "key": view.serialized_key,
+            "geometry": view.geometry.value,
+            "sampling_kind": batch_plan.kind,
+            "timestep": float(timestep),
+            "timestep_stratum": stratum,
+            "loss_policy": loss_policy,
+            "objective_loss": objective_loss,
+            "total_loss": total_loss,
+            "grid_loss": grid_loss,
+            "boundary_loss": boundary_loss,
+            "outer_padding_loss": outer_padding_loss,
+            "padding_loss": padding_loss,
+        }
+        if loss_policy == REGION_WEIGHTED_LOSS_POLICY:
+            exposure.update(
+                {
+                    "weighted_grid_contribution": weighted_grid_contribution,
+                    "weighted_boundary_contribution": (
+                        weighted_boundary_contribution
+                    ),
+                    "weighted_outer_padding_contribution": (
+                        weighted_outer_padding_contribution
+                    ),
+                }
+            )
+        per_exposure.append(exposure)
     return {
         "step": batch_plan.step,
         "loss": float(loss.detach().item()),
         "gradient_norm": float(gradient_norm.detach().item()),
         "gradient_clipped": bool(gradient_norm > MAX_GRAD_NORM),
         "learning_rates": [float(group["lr"]) for group in optimizer.param_groups],
+        "loss_policy": loss_policy,
         "sampling": sampling,
         "per_exposure": per_exposure,
         "seconds": time.perf_counter() - started,
@@ -1415,27 +1462,106 @@ def _optimizer_step(
     }
 
 
-def _per_row_region_losses(squared_error: Tensor) -> Tensor:
+def _region_masks(
+    target_grid: Any,
+    *,
+    device: torch.device,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    height = len(target_grid)
+    width = len(target_grid[0])
+    if not 0 < height < SPATIAL_SHAPE.height:
+        raise ValueError("Region-weighted pilot requires height in [1, 29]")
+    if not 0 < width < SPATIAL_SHAPE.width:
+        raise ValueError("Region-weighted pilot requires width in [1, 29]")
+    boundary_count = height + width + 1
+    outer_padding_count = (
+        SPATIAL_SHAPE.token_count - height * width - boundary_count
+    )
+    if outer_padding_count <= 0:
+        raise ValueError("Region-weighted pilot requires outer padding")
+    cache_key = (height, width, device.type, device.index)
+    cached = REGION_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    grid = torch.zeros(
+        (SPATIAL_SHAPE.height, SPATIAL_SHAPE.width),
+        dtype=torch.bool,
+        device=device,
+    )
+    grid[:height, :width] = True
+    boundary = torch.zeros_like(grid)
+    boundary[height, : width + 1] = True
+    boundary[:height, width] = True
+    padding = ~grid
+    outer_padding = padding & ~boundary
+    result = (grid, boundary, outer_padding, padding)
+    REGION_MASK_CACHE[cache_key] = result
+    return result
+
+
+def _per_row_region_losses(
+    squared_error: Tensor,
+    views: Sequence[PreparedView],
+) -> Tensor:
+    if squared_error.shape[0] != len(views):
+        raise ValueError("squared_error and views batch sizes differ")
     spatial = squared_error.reshape(
         squared_error.shape[0],
         SPATIAL_SHAPE.height,
         SPATIAL_SHAPE.width,
         squared_error.shape[2],
     )
-    padding_mask = torch.ones(
-        (SPATIAL_SHAPE.height, SPATIAL_SHAPE.width),
-        dtype=torch.bool,
-        device=squared_error.device,
-    )
-    padding_mask[:3, :3] = False
-    return torch.stack(
+    rows = []
+    for row, view in enumerate(views):
+        grid, boundary, outer_padding, padding = _region_masks(
+            view.target_grid,
+            device=squared_error.device,
+        )
+        rows.append(
+            torch.stack(
+                (
+                    spatial[row].mean(),
+                    spatial[row, grid].mean(),
+                    spatial[row, boundary].mean(),
+                    spatial[row, outer_padding].mean(),
+                    spatial[row, padding].mean(),
+                )
+            )
+        )
+    return torch.stack(rows)
+
+
+def _training_objective(
+    predicted_velocity: Tensor,
+    target_velocity: Tensor,
+    views: Sequence[PreparedView],
+    *,
+    loss_policy: str,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    squared_error = (
+        predicted_velocity.float() - target_velocity.float()
+    ).square()
+    region_losses = _per_row_region_losses(squared_error, views)
+    if loss_policy == UNWEIGHTED_LOSS_POLICY:
+        objective = flow_matching_loss(predicted_velocity, target_velocity)
+    elif loss_policy == REGION_WEIGHTED_LOSS_POLICY:
+        objective = (
+            REGION_LOSS_WEIGHTS["grid"] * region_losses[:, 1]
+            + REGION_LOSS_WEIGHTS["boundary"] * region_losses[:, 2]
+            + REGION_LOSS_WEIGHTS["outer_padding"] * region_losses[:, 3]
+        ).mean()
+    else:
+        raise ValueError(f"Unsupported loss policy: {loss_policy}")
+    weighted_contributions = torch.stack(
         (
-            squared_error.mean(dim=(1, 2)),
-            spatial[:, :3, :3].mean(dim=(1, 2, 3)),
-            spatial[:, padding_mask].mean(dim=(1, 2)),
+            REGION_LOSS_WEIGHTS["grid"] * region_losses[:, 1],
+            REGION_LOSS_WEIGHTS["boundary"] * region_losses[:, 2],
+            REGION_LOSS_WEIGHTS["outer_padding"] * region_losses[:, 3],
         ),
         dim=1,
-    ).to(device="cpu", dtype=torch.float32)
+    )
+    return objective, squared_error, region_losses, weighted_contributions
 
 
 def _keyed_noise(
@@ -1477,10 +1603,11 @@ def _evaluation_indices(
     *,
     evaluation_steps: Sequence[int] = EVALUATION_STEPS,
     final_step: int = OPTIMIZER_STEPS,
+    full_final_panel: bool = True,
 ) -> tuple[int, ...]:
     if step not in evaluation_steps:
         raise ValueError(f"Unsupported evaluation step: {step}")
-    if step == final_step:
+    if step == final_step and full_final_panel:
         seen_local = _balanced_subset_indices(
             train,
             per_geometry=FINAL_SEEN_PER_GEOMETRY,
@@ -1546,8 +1673,20 @@ def _summarize_t1_items(items: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 / len(selected),
                 "mean_grid_loss": sum(item["loss"]["grid_loss"] for item in selected)
                 / len(selected),
+                "mean_boundary_loss": sum(
+                    item["loss"]["boundary_loss"] for item in selected
+                )
+                / len(selected),
+                "mean_outer_padding_loss": sum(
+                    item["loss"]["outer_padding_loss"] for item in selected
+                )
+                / len(selected),
                 "mean_padding_loss": sum(
                     item["loss"]["padding_loss"] for item in selected
+                )
+                / len(selected),
+                "mean_region_weighted_loss": sum(
+                    item["loss"]["region_weighted_loss"] for item in selected
                 )
                 / len(selected),
             }
@@ -1591,7 +1730,10 @@ def _t1_diagnostic(
                 compute_dtype=compute_dtype,
             )
             squared = (predicted.float() - (noise - latents).float()).square()
-            row_losses = _per_row_region_losses(squared)
+            row_losses = _per_row_region_losses(squared, views).to(
+                device="cpu",
+                dtype=torch.float32,
+            )
             reconstructed = noise - predicted.to(dtype=noise.dtype)
             _, predictions, _ = _decode_latents(reconstructed, vae_decoder)
             expected = tuple(view.target_grid for view in views)
@@ -1599,7 +1741,13 @@ def _t1_diagnostic(
             for row, (view, diagnostic) in enumerate(
                 zip(views, diagnostics, strict=True)
             ):
-                total_loss, grid_loss, padding_loss = row_losses[row].tolist()
+                (
+                    total_loss,
+                    grid_loss,
+                    boundary_loss,
+                    outer_padding_loss,
+                    padding_loss,
+                ) = row_losses[row].tolist()
                 global_index = start + row
                 items.append(
                     {
@@ -1609,7 +1757,15 @@ def _t1_diagnostic(
                         "loss": {
                             "total_loss": total_loss,
                             "grid_loss": grid_loss,
+                            "boundary_loss": boundary_loss,
+                            "outer_padding_loss": outer_padding_loss,
                             "padding_loss": padding_loss,
+                            "region_weighted_loss": (
+                                REGION_LOSS_WEIGHTS["grid"] * grid_loss
+                                + REGION_LOSS_WEIGHTS["boundary"] * boundary_loss
+                                + REGION_LOSS_WEIGHTS["outer_padding"]
+                                * outer_padding_loss
+                            ),
                         },
                         "diagnostic": _diagnostic_payload(diagnostic),
                     }
@@ -1840,6 +1996,7 @@ def _evaluate(
     compute_dtype: torch.dtype,
     evaluation_steps: Sequence[int] = EVALUATION_STEPS,
     final_step: int = OPTIMIZER_STEPS,
+    full_final_panel: bool = True,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     all_views = tuple(train) + tuple(holdout) + (original,)
@@ -1849,6 +2006,7 @@ def _evaluate(
         holdout,
         evaluation_steps=evaluation_steps,
         final_step=final_step,
+        full_final_panel=full_final_panel,
     )
     print(
         f"[{STAGE_NAME}] evaluation step {step}: starting 641-view t=1 "
@@ -2000,13 +2158,27 @@ def _evaluate_t1_only(
 def _mean_exposure_metrics(exposures: Sequence[dict[str, Any]]) -> dict[str, float]:
     if not exposures:
         raise RuntimeError("Cannot summarize zero target exposures")
-    return {
+    result = {
         "mean_total_loss": sum(item["total_loss"] for item in exposures)
         / len(exposures),
         "mean_grid_loss": sum(item["grid_loss"] for item in exposures) / len(exposures),
         "mean_padding_loss": sum(item["padding_loss"] for item in exposures)
         / len(exposures),
     }
+    optional_metrics = (
+        "objective_loss",
+        "boundary_loss",
+        "outer_padding_loss",
+        "weighted_grid_contribution",
+        "weighted_boundary_contribution",
+        "weighted_outer_padding_contribution",
+    )
+    for name in optional_metrics:
+        if all(name in item for item in exposures):
+            result[f"mean_{name}"] = sum(item[name] for item in exposures) / len(
+                exposures
+            )
+    return result
 
 
 def _summarize_flow_sampling(
@@ -2457,6 +2629,8 @@ def _run_training(
     full_generation_steps: Sequence[int] = EVALUATION_STEPS,
     evaluate_initial: bool = True,
     checkpoint_before_final_evaluation: bool = False,
+    loss_policy: str = UNWEIGHTED_LOSS_POLICY,
+    full_final_generation_panel: bool = True,
 ) -> None:
     stage_report = REPORT["stages"][STAGE_NAME]
     stage_report["status"] = "TRAINING"
@@ -2468,19 +2642,26 @@ def _run_training(
     deferred_final_evaluation = False
     torch.cuda.reset_peak_memory_stats(DEVICE)
     if evaluate_initial:
-        _evaluate(
-            transformer=transformer,
-            vae_decoder=vae_decoder,
-            step=initial_step,
-            all_text_inputs=all_text_inputs,
-            all_latents=all_latents,
-            train=train,
-            holdout=holdout,
-            original=original,
-            compute_dtype=compute_dtype,
-            evaluation_steps=evaluation_steps,
-            final_step=final_step,
-        )
+        evaluation_arguments = {
+            "transformer": transformer,
+            "vae_decoder": vae_decoder,
+            "step": initial_step,
+            "all_text_inputs": all_text_inputs,
+            "all_latents": all_latents,
+            "train": train,
+            "holdout": holdout,
+            "original": original,
+            "compute_dtype": compute_dtype,
+        }
+        if initial_step in full_generation_steps:
+            _evaluate(
+                **evaluation_arguments,
+                evaluation_steps=evaluation_steps,
+                final_step=final_step,
+                full_final_panel=full_final_generation_panel,
+            )
+        else:
+            _evaluate_t1_only(**evaluation_arguments)
     training_started = time.perf_counter()
     with step_path.open("a", encoding="utf-8") as handle:
         for batch_plan in schedule:
@@ -2498,6 +2679,7 @@ def _run_training(
                 views=batch_views,
                 batch_plan=batch_plan,
                 compute_dtype=compute_dtype,
+                loss_policy=loss_policy,
             )
             records.append(record)
             completed_updates = len(records)
@@ -2547,6 +2729,7 @@ def _run_training(
                         **evaluation_arguments,
                         evaluation_steps=evaluation_steps,
                         final_step=final_step,
+                        full_final_panel=full_final_generation_panel,
                     )
                 else:
                     _evaluate_t1_only(**evaluation_arguments)
@@ -2557,6 +2740,7 @@ def _run_training(
         planned_batches=_schedule_payload(schedule, train),
     )
     stage_report["training"] = {
+        "loss_policy": loss_policy,
         "completed_steps": len(records),
         "initial_global_step": initial_step,
         "final_global_step": final_step,
@@ -2566,6 +2750,17 @@ def _run_training(
         "mean_loss": sum(record["loss"] for record in records) / len(records),
         "first_loss": records[0]["loss"],
         "last_loss": records[-1]["loss"],
+        "mean_gradient_norm_before_clipping": sum(
+            record["gradient_norm"] for record in records
+        )
+        / len(records),
+        "gradient_clipped_steps": sum(
+            bool(record["gradient_clipped"]) for record in records
+        ),
+        "gradient_clipped_fraction": sum(
+            bool(record["gradient_clipped"]) for record in records
+        )
+        / len(records),
         "mean_step_seconds": sum(record["seconds"] for record in records)
         / len(records),
         "flow_sampling": flow_summary,
@@ -2599,6 +2794,7 @@ def _run_training(
                 **evaluation_arguments,
                 evaluation_steps=evaluation_steps,
                 final_step=final_step,
+                full_final_panel=full_final_generation_panel,
             )
         else:
             _evaluate_t1_only(**evaluation_arguments)
@@ -2617,13 +2813,19 @@ def run(args: argparse.Namespace) -> None:
     global REPORT, REPORT_DIR, REPORT_PATH, DEVICE
 
     _validate_static_protocol()
-    if args.protocol not in (PROTOCOL, CONTINUATION_PROTOCOL):
+    supported_protocols = (
+        PROTOCOL,
+        CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_PROTOCOL,
+    )
+    if args.protocol not in supported_protocols:
         raise ValueError(
-            f"Unsupported protocol {args.protocol!r}; expected {PROTOCOL!r} or "
-            f"{CONTINUATION_PROTOCOL!r}"
+            f"Unsupported protocol {args.protocol!r}; expected one of "
+            f"{supported_protocols!r}"
         )
     _validate_source_commit(args.source_commit)
     continuation = args.protocol == CONTINUATION_PROTOCOL
+    region_weighted = args.protocol == REGION_WEIGHTED_PROTOCOL
     if continuation:
         if args.parent_report is None or args.parent_report_sha256 is None:
             raise ValueError(
@@ -2637,11 +2839,34 @@ def run(args: argparse.Namespace) -> None:
         evaluation_steps = CONTINUATION_EVALUATION_STEPS
         full_generation_steps = CONTINUATION_FULL_GENERATION_STEPS
         config_name = CONTINUATION_CONFIG_NAME
+        loss_policy = UNWEIGHTED_LOSS_POLICY
+        full_final_generation_panel = True
+        checkpoint_before_final_evaluation = True
         question = (
             "Does warm-starting from the verified step-512 transformer and giving "
             "the same 512 training augmentations three additional endpoint/regular "
             "sampling phases through global step 2048 improve seen fitting and "
             "transfer to the unchanged 128-view holdout?"
+        )
+    elif region_weighted:
+        if args.parent_report is not None or args.parent_report_sha256 is not None:
+            raise ValueError("Fresh region-weighted protocol must not receive a parent")
+        initial_step = 0
+        final_step = OPTIMIZER_STEPS
+        training_update_count = OPTIMIZER_STEPS
+        phase_start = 0
+        phase_count = 1
+        evaluation_steps = REGION_WEIGHTED_EVALUATION_STEPS
+        full_generation_steps = REGION_WEIGHTED_FULL_GENERATION_STEPS
+        config_name = CONFIG_NAME
+        loss_policy = REGION_WEIGHTED_LOSS_POLICY
+        full_final_generation_panel = False
+        checkpoint_before_final_evaluation = True
+        question = (
+            "Does a fresh full FLUX transformer learn the 3x3 content and retain "
+            "a valid padding boundary more reliably when the flow-matching MSE "
+            "is averaged separately over grid, immediate boundary, and outer "
+            "padding with weights 0.6/0.3/0.1?"
         )
     else:
         if args.parent_report is not None or args.parent_report_sha256 is not None:
@@ -2654,6 +2879,9 @@ def run(args: argparse.Namespace) -> None:
         evaluation_steps = EVALUATION_STEPS
         full_generation_steps = EVALUATION_STEPS
         config_name = CONFIG_NAME
+        loss_policy = UNWEIGHTED_LOSS_POLICY
+        full_final_generation_panel = True
+        checkpoint_before_final_evaluation = False
         question = (
             "Can a fresh full FLUX transformer trained on 512 VAE-safe "
             "augmentations of ARC task 0d3d703e fit a representative seen "
@@ -2661,6 +2889,20 @@ def run(args: argparse.Namespace) -> None:
             "when every training view receives one exact t=1 endpoint contact "
             "and seven regular trajectory contacts?"
         )
+    intermediate_generation_enabled = any(
+        step != final_step and step in full_generation_steps
+        for step in evaluation_steps
+    )
+    final_seen_per_geometry = (
+        FINAL_SEEN_PER_GEOMETRY
+        if full_final_generation_panel
+        else INTERMEDIATE_SEEN_PER_GEOMETRY
+    )
+    final_holdout_count = (
+        HOLDOUT_VIEW_COUNT
+        if full_final_generation_panel
+        else INTERMEDIATE_HOLDOUT_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES)
+    )
     volume_root = args.volume_root.resolve()
     flux_checkpoint = volume_root / "flux2-klein-base-4b"
     nvarc_checkpoint = volume_root / "nvarc-qwen3-4b-grids15-sft139"
@@ -2724,25 +2966,25 @@ def run(args: argparse.Namespace) -> None:
             "t1_only_steps": [
                 step for step in evaluation_steps if step not in full_generation_steps
             ],
-            "checkpoint_saved_before_final_evaluation": continuation,
+            "checkpoint_saved_before_final_evaluation": (
+                checkpoint_before_final_evaluation
+            ),
             "intermediate_generation_counts": {
                 "seen": (
-                    0
-                    if continuation
-                    else INTERMEDIATE_SEEN_PER_GEOMETRY
-                    * len(EFFECTIVE_GEOMETRIES)
+                    INTERMEDIATE_SEEN_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES)
+                    if intermediate_generation_enabled
+                    else 0
                 ),
                 "holdout": (
-                    0
-                    if continuation
-                    else INTERMEDIATE_HOLDOUT_PER_GEOMETRY
-                    * len(EFFECTIVE_GEOMETRIES)
+                    INTERMEDIATE_HOLDOUT_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES)
+                    if intermediate_generation_enabled
+                    else 0
                 ),
-                "original": 0 if continuation else 1,
+                "original": 1 if intermediate_generation_enabled else 0,
             },
             "final_generation_counts": {
-                "seen": FINAL_SEEN_PER_GEOMETRY * len(EFFECTIVE_GEOMETRIES),
-                "holdout": HOLDOUT_VIEW_COUNT,
+                "seen": final_seen_per_geometry * len(EFFECTIVE_GEOMETRIES),
+                "holdout": final_holdout_count,
                 "original": 1,
             },
             "t1_diagnostic_counts": {
@@ -2754,8 +2996,27 @@ def run(args: argparse.Namespace) -> None:
             "pass2_policy": "second-seed-only-for-pass1-failures",
             "inference_steps": INFERENCE_STEPS,
             "checkpoint_policy": "only-final-transformer-checkpoint",
-            "loss": "unweighted-flow-matching",
-            "padding_loss_reweighting": False,
+            "loss": loss_policy,
+            "padding_loss_reweighting": region_weighted,
+            "region_loss": (
+                {
+                    "weights": REGION_LOSS_WEIGHTS,
+                    "aggregation": "per-view-region-mean-then-weighted-sum",
+                    "boundary": "one-cell L immediately below and right of grid",
+                }
+                if region_weighted
+                else None
+            ),
+            "unweighted_control": (
+                {
+                    "run_id": CONTINUATION_PARENT_RUN_ID,
+                    "report_sha256": CONTINUATION_PARENT_REPORT_SHA256,
+                    "pool_sha256": CONTINUATION_PARENT_POOL_SHA256,
+                    "schedule_sha256": CONTINUATION_PARENT_SCHEDULE_SHA256,
+                }
+                if region_weighted
+                else None
+            ),
             "canvas": asdict(SPATIAL_SHAPE),
         },
         "paths": {
@@ -3005,6 +3266,15 @@ def run(args: argparse.Namespace) -> None:
         pool_hash = _hash_json(pool_payload)
         cumulative_exposure_audit = exposure_audit
         parent_schedule_hash = None
+        if region_weighted:
+            if pool_hash != CONTINUATION_PARENT_POOL_SHA256:
+                raise RuntimeError(
+                    "Region-weighted pool differs from the unweighted baseline"
+                )
+            if schedule_hash != CONTINUATION_PARENT_SCHEDULE_SHA256:
+                raise RuntimeError(
+                    "Region-weighted schedule differs from the unweighted baseline"
+                )
         if continuation:
             parent_pool_payload = {
                 name: parent_report["pool"][name]
@@ -3052,6 +3322,7 @@ def run(args: argparse.Namespace) -> None:
             **pool_payload,
             "pool_sha256": pool_hash,
             "matches_parent_exactly": continuation,
+            "matches_unweighted_baseline_exactly": region_weighted,
             "candidate_generation": candidate_audit,
             "selection": selection_audit,
             "vae_roundtrip_selection": vae_audit,
@@ -3080,6 +3351,10 @@ def run(args: argparse.Namespace) -> None:
         REPORT["training_schedule"] = {
             "sha256": schedule_hash,
             "parent_sha256": parent_schedule_hash,
+            "unweighted_baseline_sha256": (
+                CONTINUATION_PARENT_SCHEDULE_SHA256 if region_weighted else None
+            ),
+            "matches_unweighted_baseline_exactly": region_weighted,
             "updates": len(schedule),
             "global_step_range": [schedule[0].step, schedule[-1].step],
             "endpoint_steps": [
@@ -3125,6 +3400,7 @@ def run(args: argparse.Namespace) -> None:
             device=DEVICE,
             dtype=torch.int64,
         )
+        first_views = tuple(train[index] for index in first_plan.view_indices)
         with torch.no_grad():
             preflight_flow, _ = _sample_planned_flow_batch(
                 train_latents.index_select(0, first_indices),
@@ -3145,16 +3421,27 @@ def run(args: argparse.Namespace) -> None:
                 preflight_flow.timesteps,
                 compute_dtype=compute_dtype,
             )
-            preflight_loss = flow_matching_loss(
+            (
+                preflight_loss,
+                _,
+                preflight_region_losses,
+                preflight_weighted_contributions,
+            ) = _training_objective(
                 preflight_prediction,
                 preflight_flow.target_velocity,
+                first_views,
+                loss_policy=loss_policy,
             )
         if not bool(torch.isfinite(preflight_loss).item()):
             raise FloatingPointError("Preflight flow loss is non-finite")
         print(
-            f"[{STAGE_NAME}] preflight passed with flow loss "
+            f"[{STAGE_NAME}] preflight passed with {loss_policy} loss "
             f"{float(preflight_loss.item()):.6f}; starting training"
         )
+        mean_preflight_regions = preflight_region_losses.mean(dim=0).tolist()
+        mean_preflight_contributions = preflight_weighted_contributions.mean(
+            dim=0
+        ).tolist()
         REPORT["models"] = {
             "flux_parameter_count": parameter_count,
             "initial_transformer_fingerprint": initial_transformer_fingerprint,
@@ -3170,7 +3457,22 @@ def run(args: argparse.Namespace) -> None:
             ),
             "nvarc_frozen": True,
             "vae_frozen": True,
+            "loss_policy": loss_policy,
             "preflight_loss": float(preflight_loss.item()),
+            "preflight_region_losses": {
+                "raw_total": mean_preflight_regions[0],
+                "grid": mean_preflight_regions[1],
+                "boundary": mean_preflight_regions[2],
+                "outer_padding": mean_preflight_regions[3],
+                "combined_padding": mean_preflight_regions[4],
+            },
+            "preflight_weighted_contributions": {
+                "grid": mean_preflight_contributions[0],
+                "boundary": mean_preflight_contributions[1],
+                "outer_padding": mean_preflight_contributions[2],
+            }
+            if region_weighted
+            else None,
             "memory_after_preflight": cuda_memory("after-preflight"),
         }
         REPORT["stages"][STAGE_NAME]["schedule_sha256"] = schedule_hash
@@ -3198,7 +3500,11 @@ def run(args: argparse.Namespace) -> None:
             evaluation_steps=evaluation_steps,
             full_generation_steps=full_generation_steps,
             evaluate_initial=not continuation,
-            checkpoint_before_final_evaluation=continuation,
+            checkpoint_before_final_evaluation=(
+                checkpoint_before_final_evaluation
+            ),
+            loss_policy=loss_policy,
+            full_final_generation_panel=full_final_generation_panel,
         )
         final = REPORT["stages"][STAGE_NAME]["evaluations"][-1]
         REPORT["comparison"] = {
