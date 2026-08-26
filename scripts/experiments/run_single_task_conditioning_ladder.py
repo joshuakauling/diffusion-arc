@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the padded single-task conditioning-overfitting ladder on Modal."""
+"""Run padded single-task conditioning-overfitting protocols on Modal."""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ from diffusion_arc.arc_data import (
 )
 from diffusion_arc.inference import diagnose_exact_grids, generate_arc_batch
 from diffusion_arc.model import (
+    FlowMatchingBatch,
     FluxSpatialShape,
     FluxTextInputs,
     build_flux_image_position_ids,
@@ -63,6 +64,8 @@ from diffusion_arc.training.single_gpu_setup import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+LADDER_PROTOCOL = "conditioning-ladder"
+ENDPOINT_PROTOCOL = "endpoint-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_conditioning_ladder.json"
 TASK_ID = "0d3d703e"
 MAX_TOKENS = 192
@@ -104,6 +107,8 @@ class StageSpec:
     condition_names: tuple[str, ...]
     optimizer_steps: int
     evaluation_steps: tuple[int, ...]
+    flow_sampling: str = "stratified"
+    progress_every: int | None = None
 
     def batch_condition_names(self) -> tuple[str, ...]:
         if len(self.condition_names) == 1:
@@ -113,6 +118,17 @@ class StageSpec:
         if len(self.condition_names) == OPTIMIZER_BATCH_SIZE:
             return self.condition_names
         raise RuntimeError(f"Unsupported stage condition count: {self.name}")
+
+
+@dataclass(frozen=True)
+class ExperimentSpec:
+    name: str
+    config_name: str
+    result_family: str
+    question: str
+    stages: tuple[StageSpec, ...]
+    probe_timesteps: tuple[float, ...]
+    shared_probe_noise_across_rows: bool
 
 
 def _cyclic_color_mapping(shift: int) -> tuple[int, ...]:
@@ -186,7 +202,7 @@ CONDITION_SPECS = tuple(
     ),
 )
 
-STAGES = (
+LADDER_STAGES = (
     StageSpec(
         name="one-condition",
         condition_names=("canonical",),
@@ -207,6 +223,65 @@ STAGES = (
     ),
 )
 
+ENDPOINT_STAGES = (
+    StageSpec(
+        name="eight-condition-endpoint-overfit",
+        condition_names=_TRAIN_CONDITION_NAMES,
+        optimizer_steps=2048,
+        evaluation_steps=(0, 256, 512, 1024, 1536, 2048),
+        flow_sampling="shared-endpoint-every-eight",
+        progress_every=64,
+    ),
+)
+
+EXPERIMENT_SPECS = {
+    LADDER_PROTOCOL: ExperimentSpec(
+        name=LADDER_PROTOCOL,
+        config_name="single_gpu_0d3d703e_conditioning_ladder.json",
+        result_family="single-task-conditioning-overfitting-ladder",
+        question=(
+            "Can a fresh full FLUX transformer first memorize one fixed ARC "
+            "condition, then route two contradictory conditions, and finally "
+            "overfit eight repeated conditions when every occurrence receives "
+            "fresh stratified flow time and Gaussian noise?"
+        ),
+        stages=LADDER_STAGES,
+        probe_timesteps=(0.1, 0.5, 0.9),
+        shared_probe_noise_across_rows=False,
+    ),
+    ENDPOINT_PROTOCOL: ExperimentSpec(
+        name=ENDPOINT_PROTOCOL,
+        config_name="single_gpu_0d3d703e_conditioning_endpoint_overfit.json",
+        result_family="single-task-conditioning-endpoint-overfitting",
+        question=(
+            "Can four times more training plus one shared-noise t=1 update in "
+            "every eight-update cycle make a fresh full FLUX transformer "
+            "reliably overfit eight fixed conditions of one ARC task?"
+        ),
+        stages=ENDPOINT_STAGES,
+        probe_timesteps=(0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 1.0),
+        shared_probe_noise_across_rows=True,
+    ),
+}
+
+ACTIVE_EXPERIMENT = EXPERIMENT_SPECS[LADDER_PROTOCOL]
+STAGES = ACTIVE_EXPERIMENT.stages
+
+
+def _activate_experiment(protocol: str) -> ExperimentSpec:
+    global ACTIVE_EXPERIMENT, CONFIG_NAME, PROBE_TIMESTEPS, RESULT_FAMILY, STAGES
+
+    try:
+        experiment = EXPERIMENT_SPECS[protocol]
+    except KeyError as error:
+        raise ValueError(f"Unknown experiment protocol: {protocol}") from error
+    ACTIVE_EXPERIMENT = experiment
+    CONFIG_NAME = experiment.config_name
+    PROBE_TIMESTEPS = experiment.probe_timesteps
+    RESULT_FAMILY = experiment.result_family
+    STAGES = experiment.stages
+    return experiment
+
 MINIMUM_CLEAN_VAE_EXACT_GRIDS = len(CONDITION_SPECS) - 1
 
 
@@ -218,6 +293,11 @@ DEVICE: torch.device
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--protocol",
+        choices=tuple(EXPERIMENT_SPECS),
+        default=LADDER_PROTOCOL,
+    )
     parser.add_argument("--volume-root", type=Path, required=True)
     parser.add_argument("--volume-name", required=True)
     parser.add_argument("--run-id", required=True)
@@ -631,10 +711,82 @@ def _load_fresh_transformer(
     return transformer
 
 
+def _is_shared_endpoint_step(step: int) -> bool:
+    if isinstance(step, bool) or not isinstance(step, int) or step <= 0:
+        raise ValueError("step must be a positive integer")
+    return (step - 1) % OPTIMIZER_BATCH_SIZE == 0
+
+
+def _sample_training_flow_batch(
+    clean_latents: Tensor,
+    *,
+    stage: StageSpec,
+    step: int,
+    generator: torch.Generator,
+) -> tuple[FlowMatchingBatch, dict[str, Any]]:
+    cycle_position = (step - 1) % OPTIMIZER_BATCH_SIZE
+    metadata: dict[str, Any] = {
+        "cycle_index": (step - 1) // OPTIMIZER_BATCH_SIZE,
+        "cycle_position": cycle_position,
+        "flow_seed": FLOW_SEED + step,
+    }
+    if (
+        stage.flow_sampling == "shared-endpoint-every-eight"
+        and _is_shared_endpoint_step(step)
+    ):
+        shared_noise = torch.randn(
+            (1, *clean_latents.shape[1:]),
+            device=clean_latents.device,
+            dtype=clean_latents.dtype,
+            generator=generator,
+        )
+        noise = shared_noise.expand_as(clean_latents).clone()
+        timesteps = torch.ones(
+            (clean_latents.shape[0],),
+            device=clean_latents.device,
+            dtype=torch.float32,
+        )
+        metadata.update(
+            {
+                "kind": "shared_endpoint",
+                "shared_noise_across_condition_rows": True,
+                "timestep_stratum": None,
+            }
+        )
+        return (
+            FlowMatchingBatch(
+                noisy_latents=noise,
+                timesteps=timesteps,
+                target_velocity=noise - clean_latents,
+            ),
+            metadata,
+        )
+    if stage.flow_sampling not in {
+        "stratified",
+        "shared-endpoint-every-eight",
+    }:
+        raise RuntimeError(f"Unsupported flow sampling: {stage.flow_sampling}")
+    metadata.update(
+        {
+            "kind": "stratified",
+            "shared_noise_across_condition_rows": False,
+            "timestep_stratum": "per_exposure",
+        }
+    )
+    return (
+        sample_stratified_flow_matching_batch(
+            clean_latents,
+            generator=generator,
+        ),
+        metadata,
+    )
+
+
 def _optimizer_step(
     *,
     transformer: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
+    stage: StageSpec,
     text_inputs: FluxTextInputs,
     clean_latents: Tensor,
     condition_names: tuple[str, ...],
@@ -656,8 +808,10 @@ def _optimizer_step(
     optimizer.zero_grad(set_to_none=True)
     torch.cuda.synchronize(DEVICE)
     started = time.perf_counter()
-    flow_batch = sample_stratified_flow_matching_batch(
+    flow_batch, sampling = _sample_training_flow_batch(
         microbatch.clean_latents,
+        stage=stage,
+        step=step,
         generator=generator,
     )
     predicted_velocity = predict_flux_velocity(
@@ -711,11 +865,15 @@ def _optimizer_step(
     per_exposure = []
     for index, condition_name in enumerate(condition_names):
         timestep, total_loss, grid_loss, padding_loss = exposure_metrics[index].tolist()
+        timestep_stratum = None
+        if sampling["kind"] == "stratified":
+            timestep_stratum = min(int(float(timestep) * OPTIMIZER_BATCH_SIZE), 7)
         per_exposure.append(
             {
                 "condition": condition_name,
                 "timestep": float(timestep),
-                "timestep_stratum": min(int(float(timestep) * 8), 7),
+                "timestep_stratum": timestep_stratum,
+                "sampling_kind": sampling["kind"],
                 "total_loss": total_loss,
                 "grid_loss": grid_loss,
                 "padding_loss": padding_loss,
@@ -729,6 +887,7 @@ def _optimizer_step(
         "learning_rates": [float(group["lr"]) for group in optimizer.param_groups],
         "timesteps": [item["timestep"] for item in per_exposure],
         "per_exposure": per_exposure,
+        "sampling": sampling,
         "seconds": time.perf_counter() - started,
         "peak_allocated_gib": torch.cuda.max_memory_allocated(DEVICE) / 2**30,
     }
@@ -844,14 +1003,27 @@ def _teacher_forced_probe(
                 assignments.append(("swapped", swapped_seen_text_inputs))
 
             for timestep_index, timestep_value in enumerate(PROBE_TIMESTEPS):
+                shared_probe_noise = ACTIVE_EXPERIMENT.shared_probe_noise_across_rows
+                noise_shape = (
+                    (1, *group_latents.shape[1:])
+                    if shared_probe_noise
+                    else group_latents.shape
+                )
+                noise_seed = (
+                    PROBE_SEED + timestep_index
+                    if shared_probe_noise
+                    else PROBE_SEED + group_index * 100 + timestep_index
+                )
                 noise = torch.randn(
-                    group_latents.shape,
+                    noise_shape,
                     device=DEVICE,
                     dtype=group_latents.dtype,
                     generator=torch.Generator(device=DEVICE).manual_seed(
-                        PROBE_SEED + group_index * 100 + timestep_index
+                        noise_seed
                     ),
                 )
+                if shared_probe_noise:
+                    noise = noise.expand_as(group_latents).clone()
                 timesteps = torch.full(
                     (group_latents.shape[0],),
                     timestep_value,
@@ -887,6 +1059,15 @@ def _teacher_forced_probe(
                         "group": group_name,
                         "assignment": assignment,
                         "timestep": timestep_value,
+                        "flow_pairing": {
+                            "noise_seed": noise_seed,
+                            "shared_noise_across_condition_rows": (
+                                shared_probe_noise
+                            ),
+                            "shared_noise_across_panel_groups": (
+                                shared_probe_noise
+                            ),
+                        },
                         "loss": losses,
                         "per_condition_loss": per_condition,
                         "z0_reconstruction": {
@@ -927,6 +1108,15 @@ def _teacher_forced_probe(
         }
     return {
         "timesteps": list(PROBE_TIMESTEPS),
+        "flow_pairing": {
+            "shared_noise_across_condition_rows": (
+                ACTIVE_EXPERIMENT.shared_probe_noise_across_rows
+            ),
+            "shared_noise_across_panel_groups": (
+                ACTIVE_EXPERIMENT.shared_probe_noise_across_rows
+            ),
+            "same_flow_state_for_correct_and_swapped_assignments": True,
+        },
         "entries": entries,
         "routing_summary": routing_summary,
     }
@@ -965,54 +1155,169 @@ def _save_contact_sheet(
     sheet.save(path)
 
 
+def _display_condition_label(group_name: str, condition_name: str) -> str:
+    if group_name == "canonical" or condition_name == "canonical":
+        return "Original"
+    if group_name == "seen":
+        return f"Gesehen · {condition_name.removeprefix('train-')}"
+    if group_name == "unseen":
+        return f"Ungesehen · {condition_name.removeprefix('unseen-')}"
+    return f"{group_name} · {condition_name}"
+
+
+def _save_ground_truth_prediction_sheet(
+    expected_images: list[Tensor],
+    predicted_images: list[Tensor],
+    labels: list[str],
+    path: Path,
+) -> None:
+    if not (
+        len(expected_images) == len(predicted_images) == len(labels)
+    ):
+        raise ValueError("Comparison-sheet inputs must have the same length")
+    tile_size = 144
+    label_height = 24
+    column_label_height = 20
+    gap = 8
+    columns = 3
+    item_width = tile_size * 2 + gap
+    item_height = label_height + column_label_height + tile_size + gap
+    rows = (len(labels) + columns - 1) // columns
+    sheet = Image.new(
+        "RGB",
+        (columns * item_width, rows * item_height),
+        "white",
+    )
+    draw = ImageDraw.Draw(sheet)
+    for index, (expected, predicted, label) in enumerate(
+        zip(expected_images, predicted_images, labels, strict=True)
+    ):
+        row, column = divmod(index, columns)
+        origin_x = column * item_width
+        origin_y = row * item_height
+        draw.text((origin_x + 4, origin_y + 3), label[:42], fill="black")
+        draw.text(
+            (origin_x + 4, origin_y + label_height + 2),
+            "Ground truth",
+            fill="black",
+        )
+        draw.text(
+            (
+                origin_x + tile_size + gap + 4,
+                origin_y + label_height + 2,
+            ),
+            "Prediction",
+            fill="black",
+        )
+        image_y = origin_y + label_height + column_label_height
+        for image_index, tensor in enumerate((expected, predicted)):
+            image = Image.fromarray(
+                tensor.permute(1, 2, 0).contiguous().numpy()
+            )
+            image.thumbnail((tile_size, tile_size), Image.Resampling.NEAREST)
+            image_x = (
+                origin_x
+                + image_index * (tile_size + gap)
+                + (tile_size - image.width) // 2
+            )
+            centered_y = image_y + (tile_size - image.height) // 2
+            sheet.paste(image, (image_x, centered_y))
+    sheet.save(path)
+
+
 def _available_mean(values: Any) -> float | None:
     present = [value for value in values if value is not None]
     return None if not present else sum(present) / len(present)
 
 
+def _panel_metric_subset(
+    by_seed: list[dict[str, Any]],
+    indices: tuple[int, ...],
+) -> dict[str, Any]:
+    if len(by_seed) != 2:
+        raise RuntimeError("Panel metrics require exactly two generation seeds")
+    first = [by_seed[0]["diagnostics"][index] for index in indices]
+    second = [by_seed[1]["diagnostics"][index] for index in indices]
+    count = len(indices)
+    exact_grid_pass1 = sum(item["exact_grid"] for item in first)
+    exact_grid_pass2 = sum(
+        left["exact_grid"] or right["exact_grid"]
+        for left, right in zip(first, second, strict=True)
+    )
+    result: dict[str, Any] = {
+        "count": count,
+        "exact_grid_pass1": exact_grid_pass1,
+        "exact_grid_pass2": exact_grid_pass2,
+        "exact_grid_pass1_display": f"{exact_grid_pass1}/{count}",
+        "exact_grid_pass2_display": f"{exact_grid_pass2}/{count}",
+        "valid_grid_pass2": sum(
+            left["prediction_valid"] or right["prediction_valid"]
+            for left, right in zip(first, second, strict=True)
+        ),
+        "shape_pass2": sum(
+            left["shape_match"] or right["shape_match"]
+            for left, right in zip(first, second, strict=True)
+        ),
+        "mean_best_cell_accuracy": _available_mean(
+            max(
+                value
+                for value in (left["cell_accuracy"], right["cell_accuracy"])
+                if value is not None
+            )
+            if left["cell_accuracy"] is not None
+            or right["cell_accuracy"] is not None
+            else None
+            for left, right in zip(first, second, strict=True)
+        ),
+        "mean_best_oracle_3x3_accuracy": None,
+    }
+    if indices:
+        result["mean_best_oracle_3x3_accuracy"] = sum(
+            max(
+                by_seed[0]["oracle_3x3_accuracies"][index],
+                by_seed[1]["oracle_3x3_accuracies"][index],
+            )
+            for index in indices
+        ) / count
+    return result
+
+
 def _panel_metrics(
     by_seed: list[dict[str, Any]],
     groups: tuple[tuple[str, slice], ...],
+    *,
+    condition_names: tuple[str, ...] | None = None,
+    vae_exact_condition_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
+    if (condition_names is None) != (vae_exact_condition_names is None):
+        raise ValueError(
+            "condition_names and vae_exact_condition_names must be provided together"
+        )
     result = {}
     for group_name, group_slice in groups:
-        first = by_seed[0]["diagnostics"][group_slice]
-        second = by_seed[1]["diagnostics"][group_slice]
-        result[group_name] = {
-            "count": group_slice.stop - group_slice.start,
-            "exact_grid_pass1": sum(item["exact_grid"] for item in first),
-            "exact_grid_pass2": sum(
-                left["exact_grid"] or right["exact_grid"]
-                for left, right in zip(first, second, strict=True)
-            ),
-            "valid_grid_pass2": sum(
-                left["prediction_valid"] or right["prediction_valid"]
-                for left, right in zip(first, second, strict=True)
-            ),
-            "shape_pass2": sum(
-                left["shape_match"] or right["shape_match"]
-                for left, right in zip(first, second, strict=True)
-            ),
-            "mean_best_cell_accuracy": _available_mean(
-                max(
-                    value
-                    for value in (left["cell_accuracy"], right["cell_accuracy"])
-                    if value is not None
-                )
-                if left["cell_accuracy"] is not None
-                or right["cell_accuracy"] is not None
-                else None
-                for left, right in zip(first, second, strict=True)
-            ),
-            "mean_best_oracle_3x3_accuracy": sum(
-                max(
-                    by_seed[0]["oracle_3x3_accuracies"][index],
-                    by_seed[1]["oracle_3x3_accuracies"][index],
-                )
-                for index in range(group_slice.start, group_slice.stop)
+        indices = tuple(range(group_slice.start, group_slice.stop))
+        metrics = _panel_metric_subset(by_seed, indices)
+        if condition_names is not None and vae_exact_condition_names is not None:
+            eligible_indices = tuple(
+                index
+                for index in indices
+                if condition_names[index] in vae_exact_condition_names
             )
-            / (group_slice.stop - group_slice.start),
-        }
+            metrics["condition_names"] = [
+                condition_names[index] for index in indices
+            ]
+            metrics["vae_eligible"] = {
+                **_panel_metric_subset(by_seed, eligible_indices),
+                "condition_names": [
+                    condition_names[index] for index in eligible_indices
+                ],
+                "excluded_condition_names": [
+                    condition_names[index]
+                    for index in indices
+                    if index not in eligible_indices
+                ],
+            }
+        result[group_name] = metrics
     return result
 
 
@@ -1029,8 +1334,26 @@ def _generate_assignment(
     groups: tuple[tuple[str, slice], ...],
     compute_dtype: torch.dtype,
     image_directory: Path,
+    visual_expected_grids: tuple[Any, ...] | None = None,
 ) -> dict[str, Any]:
     by_seed = []
+    comparison_grids = (
+        expected_grids
+        if visual_expected_grids is None
+        else visual_expected_grids
+    )
+    if len(comparison_grids) != len(condition_names):
+        raise RuntimeError("Visual ground-truth count differs from condition count")
+    expected_images = list(
+        _normalized_images_to_uint8(
+            torch.stack(
+                tuple(
+                    render_grid_canvas(grid, canvas_size=SPATIAL_SHAPE.height)
+                    for grid in comparison_grids
+                )
+            )
+        )
+    )
     schedule = torch.linspace(
         1.0,
         0.0,
@@ -1068,12 +1391,24 @@ def _generate_assignment(
                 global_index = group_slice.start + local_index
                 seed_images.append(image)
                 seed_labels.append(
-                    f"{group_name}:{global_index} {condition_names[global_index]}"
+                    _display_condition_label(
+                        group_name,
+                        condition_names[global_index],
+                    )
                 )
         contact_path = image_directory / (
             f"step-{step:04d}-{assignment}-seed-{generation_seed}-contact.png"
         )
         _save_contact_sheet(seed_images, seed_labels, contact_path)
+        comparison_path = image_directory / (
+            f"step-{step:04d}-{assignment}-seed-{generation_seed}-gt-vs-pred.png"
+        )
+        _save_ground_truth_prediction_sheet(
+            expected_images,
+            seed_images,
+            seed_labels,
+            comparison_path,
+        )
         classes = torch.cat(seed_classes, dim=0)
         by_seed.append(
             {
@@ -1092,6 +1427,9 @@ def _generate_assignment(
                 "latents": torch.cat(seed_latents, dim=0),
                 "classes": classes,
                 "contact_sheet": str(contact_path.relative_to(REPORT_DIR)),
+                "ground_truth_prediction_sheet": str(
+                    comparison_path.relative_to(REPORT_DIR)
+                ),
             }
         )
     return {
@@ -1159,13 +1497,27 @@ def _evaluate_stage(
         compute_dtype=compute_dtype,
         image_directory=image_directory,
     )
+    vae_exact_condition_names = frozenset(
+        name
+        for name, payload in REPORT["vae_precompute"]["roundtrip"][
+            "per_condition"
+        ].items()
+        if payload["exact_grid"]
+    )
     entry: dict[str, Any] = {
         "step": step,
         "teacher_forced_probe": probe,
-        "panels": _panel_metrics(correct["by_seed"], groups),
+        "panels": _panel_metrics(
+            correct["by_seed"],
+            groups,
+            condition_names=panel_names,
+            vae_exact_condition_names=vae_exact_condition_names,
+        ),
         "generation": _strip_generation_tensors(correct),
     }
     if step == stage.optimizer_steps and swapped_seen_text_inputs is not None:
+        if swapped_seen_expected_grids is None:
+            raise AssertionError("Swapped expected grids are required")
         seen_slice = groups[0][1]
         seen_groups = (("seen", slice(0, len(stage.condition_names))),)
         swapped = _generate_assignment(
@@ -1182,11 +1534,10 @@ def _evaluate_stage(
             groups=seen_groups,
             compute_dtype=compute_dtype,
             image_directory=image_directory,
+            visual_expected_grids=swapped_seen_expected_grids,
         )
         routed_diagnostics = []
         sensitivity = []
-        if swapped_seen_expected_grids is None:
-            raise AssertionError("Swapped expected grids are required")
         for correct_seed, swapped_seed in zip(
             correct["by_seed"],
             swapped["by_seed"],
@@ -1381,29 +1732,158 @@ def _upload_and_verify_final_report(
     staging_path.unlink()
 
 
+def _mean_exposure_metrics(exposures: list[dict[str, Any]]) -> dict[str, float]:
+    if not exposures:
+        raise RuntimeError("Cannot summarize zero target exposures")
+    return {
+        "mean_total_loss": sum(item["total_loss"] for item in exposures)
+        / len(exposures),
+        "mean_grid_loss": sum(item["grid_loss"] for item in exposures)
+        / len(exposures),
+        "mean_padding_loss": sum(item["padding_loss"] for item in exposures)
+        / len(exposures),
+    }
+
+
 def _summarize_timestep_strata(records: list[dict[str, Any]]) -> dict[str, Any]:
+    stratified_records = [
+        record for record in records if record["sampling"]["kind"] == "stratified"
+    ]
     strata = {index: [] for index in range(8)}
-    for record in records:
+    for record in stratified_records:
         for exposure in record["per_exposure"]:
-            strata[exposure["timestep_stratum"]].append(exposure)
+            stratum = exposure["timestep_stratum"]
+            if stratum is None:
+                raise RuntimeError("Stratified exposure lacks a timestep stratum")
+            strata[stratum].append(exposure)
     result = {}
     for index, exposures in strata.items():
-        if len(exposures) != len(records):
+        if len(exposures) != len(stratified_records):
             raise RuntimeError(
                 f"Timestep stratum {index} contains {len(exposures)} exposures, "
-                f"expected {len(records)}"
+                f"expected {len(stratified_records)}"
             )
         result[str(index)] = {
             "interval": [index / 8, (index + 1) / 8],
             "count": len(exposures),
-            "mean_total_loss": sum(item["total_loss"] for item in exposures)
-            / len(exposures),
-            "mean_grid_loss": sum(item["grid_loss"] for item in exposures)
-            / len(exposures),
-            "mean_padding_loss": sum(item["padding_loss"] for item in exposures)
-            / len(exposures),
+            **_mean_exposure_metrics(exposures),
         }
     return result
+
+
+def _summarize_flow_sampling(
+    records: list[dict[str, Any]],
+    stage: StageSpec,
+) -> dict[str, Any]:
+    if len(records) != stage.optimizer_steps:
+        raise RuntimeError(
+            f"Flow summary received {len(records)} updates, "
+            f"expected {stage.optimizer_steps}"
+        )
+    endpoint_records = [
+        record
+        for record in records
+        if record["sampling"]["kind"] == "shared_endpoint"
+    ]
+    stratified_records = [
+        record for record in records if record["sampling"]["kind"] == "stratified"
+    ]
+    if len(endpoint_records) + len(stratified_records) != len(records):
+        raise RuntimeError("Flow summary encountered an unknown sampling kind")
+
+    expected_endpoint_updates = 0
+    if stage.flow_sampling == "shared-endpoint-every-eight":
+        expected_endpoint_updates = stage.optimizer_steps // OPTIMIZER_BATCH_SIZE
+    expected_stratified_updates = stage.optimizer_steps - expected_endpoint_updates
+    if len(endpoint_records) != expected_endpoint_updates:
+        raise RuntimeError(
+            f"Endpoint update count is {len(endpoint_records)}, "
+            f"expected {expected_endpoint_updates}"
+        )
+    if len(stratified_records) != expected_stratified_updates:
+        raise RuntimeError(
+            f"Stratified update count is {len(stratified_records)}, "
+            f"expected {expected_stratified_updates}"
+        )
+
+    endpoint_exposures = [
+        exposure for record in endpoint_records for exposure in record["per_exposure"]
+    ]
+    for record in records:
+        expected_cycle_index = (record["step"] - 1) // OPTIMIZER_BATCH_SIZE
+        expected_cycle_position = (record["step"] - 1) % OPTIMIZER_BATCH_SIZE
+        if record["sampling"]["cycle_index"] != expected_cycle_index:
+            raise RuntimeError("Flow record has an incorrect cycle index")
+        if record["sampling"]["cycle_position"] != expected_cycle_position:
+            raise RuntimeError("Flow record has an incorrect cycle position")
+        if record["sampling"]["flow_seed"] != FLOW_SEED + record["step"]:
+            raise RuntimeError("Flow record has an incorrect per-update seed")
+    for record in endpoint_records:
+        if not _is_shared_endpoint_step(record["step"]):
+            raise RuntimeError(f"Unexpected endpoint update: {record['step']}")
+        if record["sampling"]["cycle_position"] != 0:
+            raise RuntimeError("Endpoint update is not first in its eight-step cycle")
+        if not record["sampling"]["shared_noise_across_condition_rows"]:
+            raise RuntimeError("Endpoint update did not share noise across conditions")
+        if any(exposure["timestep"] != 1.0 for exposure in record["per_exposure"]):
+            raise RuntimeError("Endpoint exposure does not use exact t=1")
+        if any(
+            exposure["timestep_stratum"] is not None
+            for exposure in record["per_exposure"]
+        ):
+            raise RuntimeError("Endpoint exposure was assigned to a regular stratum")
+    for record in stratified_records:
+        if record["sampling"]["shared_noise_across_condition_rows"]:
+            raise RuntimeError("Stratified update unexpectedly shares noise")
+        observed_strata = {
+            exposure["timestep_stratum"] for exposure in record["per_exposure"]
+        }
+        if observed_strata != set(range(OPTIMIZER_BATCH_SIZE)):
+            raise RuntimeError(
+                f"Stratified update {record['step']} does not cover every stratum"
+            )
+
+    condition_summary = {}
+    for condition_name in stage.condition_names:
+        matching = [
+            exposure
+            for record in records
+            for exposure in record["per_exposure"]
+            if exposure["condition"] == condition_name
+        ]
+        endpoint_matching = [
+            exposure
+            for exposure in matching
+            if exposure["sampling_kind"] == "shared_endpoint"
+        ]
+        condition_summary[condition_name] = {
+            "total_exposures": len(matching),
+            "shared_endpoint_exposures": len(endpoint_matching),
+            "stratified_exposures": len(matching) - len(endpoint_matching),
+        }
+
+    endpoint_summary: dict[str, Any] = {
+        "updates": len(endpoint_records),
+        "exposures": len(endpoint_exposures),
+        "timestep": 1.0,
+        "shared_noise_across_condition_rows": True,
+    }
+    if endpoint_exposures:
+        endpoint_summary.update(_mean_exposure_metrics(endpoint_exposures))
+    return {
+        "update_counts": {
+            "shared_endpoint": len(endpoint_records),
+            "stratified": len(stratified_records),
+        },
+        "exposure_counts": {
+            "shared_endpoint": len(endpoint_exposures),
+            "stratified": len(stratified_records) * OPTIMIZER_BATCH_SIZE,
+            "total": len(records) * OPTIMIZER_BATCH_SIZE,
+        },
+        "shared_endpoint": endpoint_summary,
+        "stratified_timestep_strata": _summarize_timestep_strata(records),
+        "per_condition": condition_summary,
+    }
 
 
 def _run_stage(
@@ -1465,7 +1945,12 @@ def _run_stage(
                 name: [group_slice.start, group_slice.stop]
                 for name, group_slice in groups
             },
-            "canonical_is_seen": "canonical" in stage.condition_names,
+            "original_is_seen": "canonical" in stage.condition_names,
+            **(
+                {"canonical_is_seen": "canonical" in stage.condition_names}
+                if ACTIVE_EXPERIMENT.name == LADDER_PROTOCOL
+                else {}
+            ),
             "clean_vae_panel_reference": REPORT["vae_precompute"]["roundtrip"][
                 "stage_panel_summaries"
             ][stage.name],
@@ -1492,56 +1977,83 @@ def _run_stage(
     optimizer = build_flux_optimizer(run_config, transformer=transformer)
     step_path = REPORT_DIR / stage.name / "optimizer_steps.jsonl"
     step_path.parent.mkdir(parents=True, exist_ok=True)
-    progress = tqdm(
-        range(1, stage.optimizer_steps + 1),
-        desc=stage.name,
-        unit="update",
+    compact_progress = stage.progress_every is not None
+    progress = (
+        range(1, stage.optimizer_steps + 1)
+        if compact_progress
+        else tqdm(
+            range(1, stage.optimizer_steps + 1),
+            desc=stage.name,
+            unit="update",
+        )
     )
     records = []
+    training_started = time.perf_counter()
     torch.cuda.reset_peak_memory_stats(DEVICE)
-    for step in progress:
-        record = _optimizer_step(
-            transformer=transformer,
-            optimizer=optimizer,
-            text_inputs=batch_text_inputs,
-            clean_latents=batch_latents,
-            condition_names=batch_names,
-            step=step,
-            compute_dtype=compute_dtype,
-        )
-        records.append(record)
-        with step_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        progress.set_postfix(
-            loss=f"{record['loss']:.5f}",
-            grad=f"{record['gradient_norm']:.3f}",
-            peak_gib=f"{record['peak_allocated_gib']:.1f}",
-            refresh=False,
-        )
-        if step in stage.evaluation_steps:
-            _evaluate_stage(
+    with step_path.open("a", encoding="utf-8") as handle:
+        for step in progress:
+            record = _optimizer_step(
                 transformer=transformer,
-                vae_decoder=vae_decoder,
+                optimizer=optimizer,
                 stage=stage,
+                text_inputs=batch_text_inputs,
+                clean_latents=batch_latents,
+                condition_names=batch_names,
                 step=step,
-                panel_text_inputs=panel_text_inputs,
-                panel_latents=panel_latents,
-                expected_grids=expected_grids,
-                panel_names=panel_names,
-                groups=groups,
-                swapped_seen_text_inputs=swapped_seen_text_inputs,
-                swapped_seen_expected_grids=swapped_seen_expected_grids,
                 compute_dtype=compute_dtype,
             )
+            records.append(record)
+            handle.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
+            durable_boundary = (
+                not compact_progress
+                or step in stage.evaluation_steps
+                or step == stage.optimizer_steps
+                or step % stage.progress_every == 0
+            )
+            if durable_boundary:
+                handle.flush()
+                os.fsync(handle.fileno())
+            if compact_progress:
+                if (
+                    step == 1
+                    or step == stage.optimizer_steps
+                    or step % stage.progress_every == 0
+                ):
+                    elapsed = time.perf_counter() - training_started
+                    eta_seconds = elapsed / step * (stage.optimizer_steps - step)
+                    print(
+                        f"{stage.name}: {step}/{stage.optimizer_steps} "
+                        f"loss={record['loss']:.5f} "
+                        f"grad={record['gradient_norm']:.3f} "
+                        f"peak={record['peak_allocated_gib']:.1f}GiB "
+                        f"elapsed={elapsed / 60:.1f}m "
+                        f"eta={eta_seconds / 60:.1f}m"
+                    )
+            else:
+                progress.set_postfix(
+                    loss=f"{record['loss']:.5f}",
+                    grad=f"{record['gradient_norm']:.3f}",
+                    peak_gib=f"{record['peak_allocated_gib']:.1f}",
+                    refresh=False,
+                )
+            if step in stage.evaluation_steps:
+                _evaluate_stage(
+                    transformer=transformer,
+                    vae_decoder=vae_decoder,
+                    stage=stage,
+                    step=step,
+                    panel_text_inputs=panel_text_inputs,
+                    panel_latents=panel_latents,
+                    expected_grids=expected_grids,
+                    panel_names=panel_names,
+                    groups=groups,
+                    swapped_seen_text_inputs=swapped_seen_text_inputs,
+                    swapped_seen_expected_grids=swapped_seen_expected_grids,
+                    compute_dtype=compute_dtype,
+                )
 
-    checkpoint = _save_and_upload_checkpoint(
-        transformer=transformer,
-        stage=stage,
-        volume_name=volume_name,
-        run_id=run_id,
-    )
+    flow_sampling_summary = _summarize_flow_sampling(records, stage)
+    stage_report["status"] = "CHECKPOINTING"
     stage_report["training"] = {
         "completed_steps": len(records),
         "target_exposures": len(records) * OPTIMIZER_BATCH_SIZE,
@@ -1554,9 +2066,18 @@ def _run_stage(
         "last_loss": records[-1]["loss"],
         "gradient_clipped_steps": sum(item["gradient_clipped"] for item in records),
         "mean_step_seconds": sum(item["seconds"] for item in records) / len(records),
-        "timestep_strata": _summarize_timestep_strata(records),
+        "flow_sampling": flow_sampling_summary,
+        "timestep_strata": flow_sampling_summary["stratified_timestep_strata"],
         "memory": cuda_memory(f"{stage.name}-training-complete"),
     }
+    save_report()
+
+    checkpoint = _save_and_upload_checkpoint(
+        transformer=transformer,
+        stage=stage,
+        volume_name=volume_name,
+        run_id=run_id,
+    )
     stage_report["saved_checkpoint"] = checkpoint
     stage_report["status"] = "COMPLETE"
     save_report()
@@ -1579,10 +2100,39 @@ def _validate_static_protocol() -> None:
             raise RuntimeError(f"Condition demo pairs differ: {condition.name}")
     if {condition.geometry for condition in CONDITION_SPECS[:8]} != set(ArcGeometry):
         raise RuntimeError("Eight-condition stage does not cover every geometry")
-    if STAGES[0].condition_names != ("canonical",):
-        raise RuntimeError("Stage 1 must use the canonical condition")
-    if STAGES[1].condition_names != ("canonical", "train-id"):
-        raise RuntimeError("Stage 2 must compare canonical and color-permuted ID")
+    if ACTIVE_EXPERIMENT.name == LADDER_PROTOCOL:
+        if STAGES != LADDER_STAGES:
+            raise RuntimeError("Historical ladder stages differ from protocol")
+        if STAGES[0].condition_names != ("canonical",):
+            raise RuntimeError("Stage 1 must use the original condition")
+        if STAGES[1].condition_names != ("canonical", "train-id"):
+            raise RuntimeError(
+                "Stage 2 must compare original and color-permuted ID"
+            )
+    elif ACTIVE_EXPERIMENT.name == ENDPOINT_PROTOCOL:
+        if STAGES != ENDPOINT_STAGES or len(STAGES) != 1:
+            raise RuntimeError("Endpoint protocol must contain exactly one stage")
+        endpoint_stage = STAGES[0]
+        if endpoint_stage.condition_names != _TRAIN_CONDITION_NAMES:
+            raise RuntimeError("Endpoint stage must use all eight seen conditions")
+        if endpoint_stage.optimizer_steps != 2048:
+            raise RuntimeError("Endpoint stage must contain 2048 optimizer updates")
+        if endpoint_stage.flow_sampling != "shared-endpoint-every-eight":
+            raise RuntimeError("Endpoint stage sampling schedule differs")
+        endpoint_updates = sum(
+            _is_shared_endpoint_step(step)
+            for step in range(1, endpoint_stage.optimizer_steps + 1)
+        )
+        if endpoint_updates != 256:
+            raise RuntimeError(
+                f"Endpoint stage has {endpoint_updates} endpoint updates, expected 256"
+            )
+        if any(step % OPTIMIZER_BATCH_SIZE for step in endpoint_stage.evaluation_steps):
+            raise RuntimeError(
+                "Endpoint evaluations must occur after complete eight-update cycles"
+            )
+    else:
+        raise RuntimeError(f"Unsupported active protocol: {ACTIVE_EXPERIMENT.name}")
     if MINIMUM_CLEAN_VAE_EXACT_GRIDS != 16:
         raise RuntimeError("Clean VAE tolerance must allow exactly one failed condition")
     for stage in STAGES:
@@ -1592,6 +2142,15 @@ def _validate_static_protocol() -> None:
             raise RuntimeError(f"Stage lacks step-zero evaluation: {stage.name}")
         if stage.evaluation_steps[-1] != stage.optimizer_steps:
             raise RuntimeError(f"Stage lacks final evaluation: {stage.name}")
+        if tuple(sorted(set(stage.evaluation_steps))) != stage.evaluation_steps:
+            raise RuntimeError(f"Stage evaluation steps are not unique and sorted: {stage.name}")
+        if stage.flow_sampling not in {
+            "stratified",
+            "shared-endpoint-every-eight",
+        }:
+            raise RuntimeError(f"Stage flow sampling is unsupported: {stage.name}")
+        if stage.progress_every is not None and stage.progress_every <= 0:
+            raise RuntimeError(f"Stage progress interval is invalid: {stage.name}")
 
 
 def _summarize_stages() -> dict[str, Any]:
@@ -1600,10 +2159,37 @@ def _summarize_stages() -> dict[str, Any]:
         payload = REPORT["stages"][stage.name]
         final = payload["evaluations"][-1]
         clean_vae_reference = payload["clean_vae_panel_reference"]
+        seen = final["panels"]["seen"]
+        seen_eligible = seen["vae_eligible"]
+        unseen = final["panels"]["unseen"]
+        unseen_eligible = unseen["vae_eligible"]
+        original = final["panels"]["canonical"]
         result[stage.name] = {
-            "seen_exact_grid_pass2": final["panels"]["seen"]["exact_grid_pass2"],
-            "unseen_exact_grid_pass2": final["panels"]["unseen"]["exact_grid_pass2"],
-            "canonical_exact_grid_pass2": final["panels"]["canonical"]["exact_grid_pass2"],
+            "seen_exact_grid_pass1": seen["exact_grid_pass1"],
+            "seen_exact_grid_pass2": seen["exact_grid_pass2"],
+            "seen_raw_count": seen["count"],
+            "seen_raw_pass1_display": seen["exact_grid_pass1_display"],
+            "seen_raw_pass2_display": seen["exact_grid_pass2_display"],
+            "seen_vae_eligible_exact_grid_pass1": seen_eligible[
+                "exact_grid_pass1"
+            ],
+            "seen_vae_eligible_exact_grid_pass2": seen_eligible[
+                "exact_grid_pass2"
+            ],
+            "seen_vae_eligible_count": seen_eligible["count"],
+            "seen_vae_eligible_pass1_display": seen_eligible[
+                "exact_grid_pass1_display"
+            ],
+            "seen_vae_eligible_pass2_display": seen_eligible[
+                "exact_grid_pass2_display"
+            ],
+            "unseen_exact_grid_pass2": unseen["exact_grid_pass2"],
+            "unseen_raw_count": unseen["count"],
+            "unseen_vae_eligible_exact_grid_pass2": unseen_eligible[
+                "exact_grid_pass2"
+            ],
+            "unseen_vae_eligible_count": unseen_eligible["count"],
+            "original_exact_grid_pass2": original["exact_grid_pass2"],
             "seen_clean_vae_exact_grids": clean_vae_reference["seen"][
                 "exact_grids"
             ],
@@ -1616,12 +2202,10 @@ def _summarize_stages() -> dict[str, Any]:
             "unseen_clean_vae_total_grids": clean_vae_reference["unseen"][
                 "total_grids"
             ],
-            "canonical_clean_vae_exact_grids": clean_vae_reference[
+            "original_clean_vae_exact_grids": clean_vae_reference[
                 "canonical"
             ]["exact_grids"],
-            "seen_mean_best_cell_accuracy": final["panels"]["seen"][
-                "mean_best_cell_accuracy"
-            ],
+            "seen_mean_best_cell_accuracy": seen["mean_best_cell_accuracy"],
             "routing_probe": final["teacher_forced_probe"]["routing_summary"],
             "completed_optimizer_steps": payload["training"]["completed_steps"],
             "mean_step_seconds": payload["training"]["mean_step_seconds"],
@@ -1635,6 +2219,7 @@ def _summarize_stages() -> dict[str, Any]:
 def run(args: argparse.Namespace) -> None:
     global REPORT, REPORT_DIR, REPORT_PATH, DEVICE
 
+    experiment = _activate_experiment(args.protocol)
     volume_root = args.volume_root.resolve()
     flux_checkpoint = volume_root / "flux2-klein-base-4b"
     nvarc_checkpoint = volume_root / "nvarc-qwen3-4b-grids15-sft139"
@@ -1659,23 +2244,67 @@ def run(args: argparse.Namespace) -> None:
         "schema_version": 2,
         "status": "INITIALIZING",
         "run_id": args.run_id,
-        "question": (
-            "Can a fresh full FLUX transformer first memorize one fixed ARC "
-            "condition, then route two contradictory conditions, and finally "
-            "overfit eight repeated conditions when every occurrence receives "
-            "fresh stratified flow time and Gaussian noise?"
-        ),
+        "question": experiment.question,
         "protocol": {
+            "name": experiment.name,
             "task_id": TASK_ID,
             "target_original_pair_index": 4,
             "canvas": asdict(SPATIAL_SHAPE),
             "optimizer_batch_size": OPTIMIZER_BATCH_SIZE,
-            "flow_timestep_sampling": "one-jittered-sample-per-batch-stratum",
+            "flow_timestep_sampling": (
+                "one-jittered-sample-per-batch-stratum"
+                if experiment.name == LADDER_PROTOCOL
+                else "shared-endpoint-every-eight-plus-stratified"
+            ),
+            "stage_flow_timestep_sampling": [
+                {
+                    "stage": stage.name,
+                    "schedule": stage.flow_sampling,
+                }
+                for stage in STAGES
+            ],
             "flow_timestep_strata": OPTIMIZER_BATCH_SIZE,
             "probe_timesteps": list(PROBE_TIMESTEPS),
+            "probe_noise_pairing": {
+                "shared_across_condition_rows": (
+                    experiment.shared_probe_noise_across_rows
+                ),
+                "shared_across_panel_groups": (
+                    experiment.shared_probe_noise_across_rows
+                ),
+            },
             "generation_seeds": list(GENERATION_SEEDS),
             "inference_steps": INFERENCE_STEPS,
             "max_grad_norm": MAX_GRAD_NORM,
+            "loss": "unweighted-flow-matching",
+            "checkpoint_policy": (
+                "only-final-checkpoint"
+                if experiment.name == ENDPOINT_PROTOCOL
+                else "one-final-checkpoint-per-stage"
+            ),
+            "shared_endpoint_schedule": (
+                {
+                    "enabled": True,
+                    "rule": "steps-1-9-17-through-2041",
+                    "cycle_length_updates": OPTIMIZER_BATCH_SIZE,
+                    "cycle_position_zero_based": 0,
+                    "update_count": 256,
+                    "timestep": 1.0,
+                    "shared_noise_across_eight_condition_rows": True,
+                    "fresh_noise_seed_per_update": True,
+                    "remaining_stratified_update_count": 1792,
+                }
+                if experiment.name == ENDPOINT_PROTOCOL
+                else {"enabled": False}
+            ),
+            "score_denominators": {
+                "raw_seen_by_stage": {
+                    stage.name: len(stage.condition_names) for stage in STAGES
+                },
+                "vae_eligible_seen_by_stage": (
+                    "derived-from-clean-vae-roundtrip"
+                ),
+            },
             "clean_vae_roundtrip_gate": {
                 "canonical_must_be_exact": True,
                 "minimum_exact_grids": MINIMUM_CLEAN_VAE_EXACT_GRIDS,
@@ -1746,10 +2375,12 @@ def run(args: argparse.Namespace) -> None:
             ),
         )
         if (
-            run_config.loop.max_optimizer_steps != 512
+            run_config.loop.max_optimizer_steps
+            != max(stage.optimizer_steps for stage in STAGES)
             or run_config.loop.optimizer_batch_size != OPTIMIZER_BATCH_SIZE
             or run_config.loop.flux_microbatch_size != OPTIMIZER_BATCH_SIZE
             or run_config.loop.min_context_pairs_before_target != 4
+            or run_config.optimizer.learning_rate != 1e-5
         ):
             raise RuntimeError("Training configuration differs from protocol")
 
@@ -1825,7 +2456,7 @@ def run(args: argparse.Namespace) -> None:
         )
         if routing_cell_differences != routing_cell_count:
             raise RuntimeError(
-                "Stage 2 target grids must differ at every cell"
+                "Original and train-id target grids must differ at every cell"
             )
         vae_started = time.perf_counter()
         all_latents = _encode_target_grids(all_grids, vae_encoder)
@@ -1855,8 +2486,18 @@ def run(args: argparse.Namespace) -> None:
             "all_target_original_pair_4": True,
             "all_target_mappings_directly_demonstrated": True,
             "all_target_grids_unique": True,
-            "stage_2_target_cell_differences": routing_cell_differences,
-            "stage_2_target_cell_count": routing_cell_count,
+            "original_vs_train_id_target_cell_differences": (
+                routing_cell_differences
+            ),
+            "original_vs_train_id_target_cell_count": routing_cell_count,
+            **(
+                {
+                    "stage_2_target_cell_differences": routing_cell_differences,
+                    "stage_2_target_cell_count": routing_cell_count,
+                }
+                if experiment.name == LADDER_PROTOCOL
+                else {}
+            ),
         }
         REPORT["nvarc_precompute"] = {
             "physical_batch_size": len(condition_order),
@@ -1916,13 +2557,17 @@ def run(args: argparse.Namespace) -> None:
                 preflight_flow.target_velocity,
             )
         if not bool(torch.isfinite(preflight_loss).item()):
-            raise FloatingPointError("Conditioning-ladder preflight loss is non-finite")
+            raise FloatingPointError(
+                f"{experiment.name} preflight loss is non-finite"
+            )
 
         REPORT["models"] = {
             "flux_parameter_count": parameter_count,
             "base_fingerprint": base_fingerprint,
             "preflight_loss": float(preflight_loss.item()),
-            "memory_after_preflight": cuda_memory("after-ladder-preflight"),
+            "memory_after_preflight": cuda_memory(
+                f"after-{experiment.name}-preflight"
+            ),
         }
         REPORT["resolved_training_config"] = json.loads(
             json.dumps(asdict(run_config), default=str)
