@@ -79,6 +79,9 @@ REGION_WEIGHTED_CONTINUATION_PROTOCOL = (
 REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL = (
     "augmentation-generalization-region-weighted-endpoint-balanced-continuation"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL = (
+    "augmentation-generalization-region-weighted-endpoint-balanced-long-continuation"
+)
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
@@ -90,6 +93,9 @@ REGION_WEIGHTED_CONTINUATION_CONFIG_NAME = (
 )
 REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG_NAME = (
     "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG_NAME = (
+    "single_gpu_0d3d703e_region_weighted_endpoint_balanced_long_continuation.json"
 )
 TASK_ID = "0d3d703e"
 TARGET_ORIGINAL_PAIR_INDEX = 4
@@ -198,6 +204,34 @@ REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_SCHEDULE_SHA256 = (
 REGION_WEIGHTED_ENDPOINT_BALANCED_SCHEDULE_SHA256 = (
     "f03254d7822fcc2343371f50b6bd3bccd6039543ee35b85f2c68b81dec16b5d4"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP = 2048
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FINAL_STEP = 4096
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_OPTIMIZER_STEPS = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FINAL_STEP
+    - REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_START = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_COUNT = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_OPTIMIZER_STEPS // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_RUN_ID = "20260827T003543625091Z"
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_SOURCE_COMMIT = (
+    "974f5f519a63d56752a80e59318ac2ff548787ab"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_REPORT_SHA256 = (
+    "1edcc75976965aeafcf2bc0127e922692a1bbfa29cb139d5075ffce3f875f89d"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_POOL_SHA256 = (
+    "f512b3dc4cc5f603c3c764a45b3a4086d4b4837e63a2793a7009c2505e72e0b0"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_SCHEDULE_SHA256 = (
+    "f03254d7822fcc2343371f50b6bd3bccd6039543ee35b85f2c68b81dec16b5d4"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_SCHEDULE_SHA256 = (
+    "f54353695a2dbf66dea7bb9d80ade45cb2f40e6f60411e8a3c46658201b82cd7"
+)
 REGION_WEIGHTED_PARENT_TERMINAL_FAILURE = {
     "stage": "experiment",
     "type": "ExecutionError",
@@ -218,6 +252,8 @@ REGION_WEIGHTED_CONTINUATION_EVALUATION_STEPS = (1024, 1536)
 REGION_WEIGHTED_CONTINUATION_FULL_GENERATION_STEPS = (1536,)
 REGION_WEIGHTED_ENDPOINT_BALANCED_EVALUATION_STEPS = (1664, 1792, 2048)
 REGION_WEIGHTED_ENDPOINT_BALANCED_FULL_GENERATION_STEPS = (2048,)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_EVALUATION_STEPS = (4096,)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FULL_GENERATION_STEPS = (4096,)
 UNWEIGHTED_LOSS_POLICY = "unweighted-flow-matching"
 REGION_WEIGHTED_LOSS_POLICY = "region-weighted-flow-matching"
 REGION_LOSS_WEIGHTS = {
@@ -347,6 +383,17 @@ REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_CONTRACT = ParentRunContract(
     loss_policy=REGION_WEIGHTED_LOSS_POLICY,
     optimizer_steps=REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS,
     final_step=REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP,
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_CONTRACT = ParentRunContract(
+    run_id=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_RUN_ID,
+    source_commit=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_SOURCE_COMMIT,
+    report_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_REPORT_SHA256,
+    pool_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_POOL_SHA256,
+    schedule_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_SCHEDULE_SHA256,
+    protocol_name=REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
+    loss_policy=REGION_WEIGHTED_LOSS_POLICY,
+    optimizer_steps=REGION_WEIGHTED_ENDPOINT_BALANCED_OPTIMIZER_STEPS,
+    final_step=REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP,
 )
 
 
@@ -1223,6 +1270,78 @@ def _combine_exposure_audits(
     }
 
 
+def _subtract_exposure_audits(
+    cumulative: dict[str, Any],
+    latest: dict[str, Any],
+) -> dict[str, Any]:
+    cumulative_items = cumulative.get("items")
+    latest_items = latest.get("items")
+    if not isinstance(cumulative_items, dict) or not isinstance(latest_items, dict):
+        raise RuntimeError("Cannot subtract exposure audits without per-view items")
+    if cumulative_items.keys() != latest_items.keys():
+        raise RuntimeError("Cumulative and latest exposure keys differ")
+    expected = {
+        name: int(cumulative["expected"][name]) - int(latest["expected"][name])
+        for name in ("total", "shared_endpoint", "stratified")
+    }
+    if any(value < 0 for value in expected.values()):
+        raise RuntimeError("Latest exposure audit exceeds the cumulative audit")
+
+    items = {}
+    for key in cumulative_items:
+        total_item = cumulative_items[key]
+        latest_item = latest_items[key]
+        regular_strata = Counter(total_item["regular_strata"])
+        regular_strata.subtract(latest_item["regular_strata"])
+        if any(count < 0 for count in regular_strata.values()):
+            raise RuntimeError(
+                f"Latest regular strata exceed cumulative strata for {key}"
+            )
+        item = {
+            "total": int(total_item["total"]) - int(latest_item["total"]),
+            "shared_endpoint": int(total_item["shared_endpoint"])
+            - int(latest_item["shared_endpoint"]),
+            "stratified": int(total_item["stratified"])
+            - int(latest_item["stratified"]),
+            "regular_strata": [
+                stratum
+                for stratum in range(OPTIMIZER_BATCH_SIZE)
+                for _ in range(regular_strata[stratum])
+            ],
+        }
+        if any(
+            item[name] < 0
+            for name in ("total", "shared_endpoint", "stratified")
+        ):
+            raise RuntimeError(
+                f"Latest exposure counts exceed cumulative counts for {key}"
+            )
+        items[key] = item
+
+    all_exact = all(
+        item["total"] == expected["total"]
+        and item["shared_endpoint"] == expected["shared_endpoint"]
+        and item["stratified"] == expected["stratified"]
+        and len(item["regular_strata"]) == expected["stratified"]
+        and max(
+            Counter(item["regular_strata"])[stratum]
+            for stratum in range(OPTIMIZER_BATCH_SIZE)
+        )
+        - min(
+            Counter(item["regular_strata"])[stratum]
+            for stratum in range(OPTIMIZER_BATCH_SIZE)
+        )
+        <= 1
+        for item in items.values()
+    )
+    return {
+        "expected": expected,
+        "view_count": len(items),
+        "all_exact": all_exact,
+        "items": items,
+    }
+
+
 def _validate_static_protocol() -> None:
     if TRAIN_VIEW_COUNT != 512 or HOLDOUT_VIEW_COUNT != 128:
         raise RuntimeError("Pool sizes differ from protocol")
@@ -1286,6 +1405,19 @@ def _validate_static_protocol() -> None:
     ):
         raise RuntimeError(
             "Endpoint-balanced continuation allocation differs from protocol"
+        )
+    if (
+        REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP != 2048
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FINAL_STEP != 4096
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_OPTIMIZER_STEPS != 2048
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_START != 4
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_COUNT != 4
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_EVALUATION_STEPS != (4096,)
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FULL_GENERATION_STEPS
+        != (4096,)
+    ):
+        raise RuntimeError(
+            "Endpoint-balanced long-continuation allocation differs from protocol"
         )
     if (
         FINAL_REPORT_UPLOAD_ATTEMPTS != 3
@@ -2251,6 +2383,7 @@ def _evaluate(
     evaluation_steps: Sequence[int] = EVALUATION_STEPS,
     final_step: int = OPTIMIZER_STEPS,
     full_final_panel: bool = True,
+    include_t1_diagnostic: bool = True,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     all_views = tuple(train) + tuple(holdout) + (original,)
@@ -2262,18 +2395,25 @@ def _evaluate(
         final_step=final_step,
         full_final_panel=full_final_panel,
     )
-    print(
-        f"[{STAGE_NAME}] evaluation step {step}: starting 641-view t=1 "
-        f"diagnostic and {len(global_indices)}-view generation panel"
-    )
-    t1 = _t1_diagnostic(
-        transformer=transformer,
-        all_text_inputs=all_text_inputs,
-        all_latents=all_latents,
-        all_views=all_views,
-        compute_dtype=compute_dtype,
-        vae_decoder=vae_decoder,
-    )
+    if include_t1_diagnostic:
+        print(
+            f"[{STAGE_NAME}] evaluation step {step}: starting 641-view t=1 "
+            f"diagnostic and {len(global_indices)}-view generation panel"
+        )
+        t1 = _t1_diagnostic(
+            transformer=transformer,
+            all_text_inputs=all_text_inputs,
+            all_latents=all_latents,
+            all_views=all_views,
+            compute_dtype=compute_dtype,
+            vae_decoder=vae_decoder,
+        )
+    else:
+        print(
+            f"[{STAGE_NAME}] evaluation step {step}: starting "
+            f"{len(global_indices)}-view generation panel without t=1 diagnostic"
+        )
+        t1 = None
     seed1_records, seed1_images = _generate_seed_records(
         transformer=transformer,
         vae_decoder=vae_decoder,
@@ -2956,6 +3096,7 @@ def _run_training(
     checkpoint_before_final_evaluation: bool = False,
     loss_policy: str = UNWEIGHTED_LOSS_POLICY,
     full_final_generation_panel: bool = True,
+    include_t1_diagnostic: bool = True,
 ) -> None:
     stage_report = REPORT["stages"][STAGE_NAME]
     stage_report["status"] = "TRAINING"
@@ -2984,6 +3125,7 @@ def _run_training(
                 evaluation_steps=evaluation_steps,
                 final_step=final_step,
                 full_final_panel=full_final_generation_panel,
+                include_t1_diagnostic=include_t1_diagnostic,
             )
         else:
             _evaluate_t1_only(**evaluation_arguments)
@@ -3055,6 +3197,7 @@ def _run_training(
                         evaluation_steps=evaluation_steps,
                         final_step=final_step,
                         full_final_panel=full_final_generation_panel,
+                        include_t1_diagnostic=include_t1_diagnostic,
                     )
                 else:
                     _evaluate_t1_only(**evaluation_arguments)
@@ -3120,6 +3263,7 @@ def _run_training(
                 evaluation_steps=evaluation_steps,
                 final_step=final_step,
                 full_final_panel=full_final_generation_panel,
+                include_t1_diagnostic=include_t1_diagnostic,
             )
         else:
             _evaluate_t1_only(**evaluation_arguments)
@@ -3144,6 +3288,7 @@ def run(args: argparse.Namespace) -> None:
         REGION_WEIGHTED_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL,
     )
     if args.protocol not in supported_protocols:
         raise ValueError(
@@ -3155,14 +3300,17 @@ def run(args: argparse.Namespace) -> None:
         CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL,
     )
     region_weighted = args.protocol in (
         REGION_WEIGHTED_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL,
     )
     parent_contract: ParentRunContract | None = None
     endpoint_cycle_positions = DEFAULT_ENDPOINT_CYCLE_POSITIONS
+    include_t1_diagnostic = True
     if args.protocol == CONTINUATION_PROTOCOL:
         if args.parent_report is None or args.parent_report_sha256 is None:
             raise ValueError(
@@ -3185,6 +3333,40 @@ def run(args: argparse.Namespace) -> None:
             "the same 512 training augmentations three additional endpoint/regular "
             "sampling phases through global step 2048 improve seen fitting and "
             "transfer to the unchanged 128-view holdout?"
+        )
+    elif (
+        args.protocol
+        == REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL
+    ):
+        if args.parent_report is None or args.parent_report_sha256 is None:
+            raise ValueError(
+                "Endpoint-balanced long continuation requires --parent-report "
+                "and --parent-report-sha256"
+            )
+        parent_contract = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_CONTRACT
+        initial_step = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_START_STEP
+        final_step = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FINAL_STEP
+        training_update_count = (
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_OPTIMIZER_STEPS
+        )
+        phase_start = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_START
+        phase_count = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PHASE_COUNT
+        endpoint_cycle_positions = ENDPOINT_BALANCED_CYCLE_POSITIONS
+        evaluation_steps = REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_EVALUATION_STEPS
+        full_generation_steps = (
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_FULL_GENERATION_STEPS
+        )
+        config_name = (
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG_NAME
+        )
+        loss_policy = REGION_WEIGHTED_LOSS_POLICY
+        full_final_generation_panel = False
+        checkpoint_before_final_evaluation = True
+        include_t1_diagnostic = False
+        question = (
+            "Does continuing the verified step-2048 transformer for 2048 more "
+            "updates with the unchanged 50/50 endpoint-balanced schedule improve "
+            "seen fitting or same-task augmentation transfer by global step 4096?"
         )
     elif args.protocol == REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL:
         if args.parent_report is None or args.parent_report_sha256 is None:
@@ -3384,9 +3566,9 @@ def run(args: argparse.Namespace) -> None:
                 "original": 1,
             },
             "t1_diagnostic_counts": {
-                "seen": TRAIN_VIEW_COUNT,
-                "holdout": HOLDOUT_VIEW_COUNT,
-                "original": 1,
+                "seen": TRAIN_VIEW_COUNT if include_t1_diagnostic else 0,
+                "holdout": HOLDOUT_VIEW_COUNT if include_t1_diagnostic else 0,
+                "original": 1 if include_t1_diagnostic else 0,
             },
             "generation_seeds": list(GENERATION_SEEDS),
             "pass2_policy": "second-seed-only-for-pass1-failures",
@@ -3639,7 +3821,10 @@ def run(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
         prior_exposure_audit = None
-        if args.protocol == REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL:
+        if args.protocol in (
+            REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL,
+        ):
             prior_exposure_audit = parent_report.get("training_schedule", {}).get(
                 "cumulative_per_view_exposure_audit"
             )
@@ -3663,6 +3848,16 @@ def run(args: argparse.Namespace) -> None:
         ):
             raise RuntimeError(
                 "Endpoint-balanced training schedule differs from its pinned hash"
+            )
+        if (
+            args.protocol
+            == REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL
+            and schedule_hash
+            != REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_SCHEDULE_SHA256
+        ):
+            raise RuntimeError(
+                "Endpoint-balanced long training schedule differs from its pinned "
+                "hash"
             )
         exposure_audit = _schedule_exposure_audit(schedule, train)
         if not exposure_audit["all_exact"]:
@@ -3745,12 +3940,31 @@ def run(args: argparse.Namespace) -> None:
                     DEFAULT_ENDPOINT_CYCLE_POSITIONS,
                 )
             )
+            parent_prior_exposure_audit = None
+            if parent_endpoint_cycle_positions != DEFAULT_ENDPOINT_CYCLE_POSITIONS:
+                parent_cumulative_exposure_audit = parent_schedule.get(
+                    "cumulative_per_view_exposure_audit"
+                )
+                parent_local_exposure_audit = parent_schedule.get(
+                    "per_view_exposure_audit"
+                )
+                if not isinstance(
+                    parent_cumulative_exposure_audit, dict
+                ) or not isinstance(parent_local_exposure_audit, dict):
+                    raise RuntimeError(
+                        "Balanced parent schedule lacks cumulative or local audits"
+                    )
+                parent_prior_exposure_audit = _subtract_exposure_audits(
+                    parent_cumulative_exposure_audit,
+                    parent_local_exposure_audit,
+                )
             regenerated_parent_schedule = _schedule_payload(
                 _build_training_schedule(
                     train,
                     phase_start=parent_phase_start,
                     phase_count=parent_phase_count,
                     endpoint_cycle_positions=parent_endpoint_cycle_positions,
+                    prior_exposure_audit=parent_prior_exposure_audit,
                 ),
                 train,
             )
@@ -3958,6 +4172,7 @@ def run(args: argparse.Namespace) -> None:
             ),
             loss_policy=loss_policy,
             full_final_generation_panel=full_final_generation_panel,
+            include_t1_diagnostic=include_t1_diagnostic,
         )
         final = REPORT["stages"][STAGE_NAME]["evaluations"][-1]
         REPORT["comparison"] = {

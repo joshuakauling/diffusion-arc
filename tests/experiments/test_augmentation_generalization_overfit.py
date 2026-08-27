@@ -48,6 +48,12 @@ REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG = (
     / "training"
     / "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG = (
+    REPOSITORY_ROOT
+    / "configs"
+    / "training"
+    / "single_gpu_0d3d703e_region_weighted_endpoint_balanced_long_continuation.json"
+)
 NOTEBOOK = (
     REPOSITORY_ROOT
     / "experiments"
@@ -77,6 +83,12 @@ REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_NOTEBOOK = (
     / "experiments"
     / "training"
     / "single-task-region-weighted-endpoint-balanced-continuation-modal.ipynb"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_NOTEBOOK = (
+    REPOSITORY_ROOT
+    / "experiments"
+    / "training"
+    / "single-task-region-weighted-endpoint-balanced-long-continuation-modal.ipynb"
 )
 
 
@@ -401,6 +413,77 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
         self.assertEqual(
             cumulative["expected"],
             {"total": 32, "shared_endpoint": 7, "stratified": 25},
+        )
+
+    def test_endpoint_balanced_long_continuation_runs_only_final_evaluation(
+        self,
+    ) -> None:
+        train = self._views(128)
+        build = self.namespace["_build_training_schedule"]
+        audit = self.namespace["_schedule_exposure_audit"]
+        combine = self.namespace["_combine_exposure_audits"]
+        subtract = self.namespace["_subtract_exposure_audits"]
+        endpoint_positions = self.namespace["ENDPOINT_BALANCED_CYCLE_POSITIONS"]
+
+        first_phase = audit(build(train), train)
+        middle_phases = audit(build(train, phase_start=1, phase_count=2), train)
+        through_step_1536 = combine(first_phase, middle_phases)
+        endpoint_schedule = build(
+            train,
+            phase_start=3,
+            phase_count=1,
+            endpoint_cycle_positions=endpoint_positions,
+            prior_exposure_audit=through_step_1536,
+        )
+        endpoint_phase = audit(endpoint_schedule, train)
+        through_step_2048 = combine(through_step_1536, endpoint_phase)
+        recovered_step_1536 = subtract(through_step_2048, endpoint_phase)
+        replayed_endpoint_schedule = build(
+            train,
+            phase_start=3,
+            phase_count=1,
+            endpoint_cycle_positions=endpoint_positions,
+            prior_exposure_audit=recovered_step_1536,
+        )
+        self.assertEqual(replayed_endpoint_schedule, endpoint_schedule)
+        self.assertEqual(
+            recovered_step_1536["expected"],
+            through_step_1536["expected"],
+        )
+        self.assertTrue(recovered_step_1536["all_exact"])
+        continuation = build(
+            train,
+            phase_start=4,
+            phase_count=4,
+            endpoint_cycle_positions=endpoint_positions,
+            prior_exposure_audit=through_step_2048,
+        )
+        continuation_audit = audit(continuation, train)
+        cumulative = combine(through_step_2048, continuation_audit)
+
+        self.assertEqual(len(continuation), 2048)
+        self.assertEqual(
+            (continuation[0].step, continuation[-1].step),
+            (2049, 4096),
+        )
+        self.assertEqual(continuation[-1].kind, "stratified")
+        self.assertEqual(
+            continuation_audit["expected"],
+            {"total": 32, "shared_endpoint": 16, "stratified": 16},
+        )
+        self.assertEqual(
+            continuation_audit["expected_update_counts"],
+            {"shared_endpoint": 1024, "stratified": 1024, "total": 2048},
+        )
+        self.assertTrue(continuation_audit["all_exact"])
+        self.assertEqual(
+            cumulative["expected"],
+            {"total": 64, "shared_endpoint": 23, "stratified": 41},
+        )
+        self.assertTrue(cumulative["all_exact"])
+        self.assertEqual(
+            self.namespace["REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_EVALUATION_STEPS"],
+            (4096,),
         )
 
     def test_parent_and_continuation_audits_combine_to_32_contacts(self) -> None:
@@ -766,6 +849,80 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
             )
             self.assertEqual(resolved, checkpoint_path.resolve())
             self.assertEqual(checkpoint["step"], 1536)
+
+    def test_endpoint_balanced_long_parent_accepts_complete_step_2048_run(
+        self,
+    ) -> None:
+        validate = self.namespace["_validate_parent_report_payload"]
+        contract = self.namespace[
+            "REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_PARENT_CONTRACT"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            volume_root = (Path(temporary) / "vo-internal-id").resolve()
+            volume_name = "diffusion-arc-models"
+            report_path = (
+                volume_root
+                / "results"
+                / self.namespace["RESULT_FAMILY"]
+                / contract.run_id
+                / "report.json"
+            )
+            checkpoint_path = (
+                report_path.parent
+                / self.namespace["STAGE_NAME"]
+                / "flux-transformer-step-2048"
+            )
+            parent = {
+                "status": "COMPLETE",
+                "run_id": contract.run_id,
+                "source": {"resolved_commit": contract.source_commit},
+                "durability": {"remote_content_verified": True},
+                "protocol": {
+                    "name": contract.protocol_name,
+                    "optimizer_steps": contract.optimizer_steps,
+                    "final_optimizer_step": contract.final_step,
+                    "loss": contract.loss_policy,
+                    "region_loss": {
+                        "weights": self.namespace["REGION_LOSS_WEIGHTS"]
+                    },
+                },
+                "pool": {
+                    "pool_sha256": contract.pool_sha256,
+                    "counts": {"train": 512, "holdout": 128, "original": 1},
+                },
+                "stages": {
+                    self.namespace["STAGE_NAME"]: {
+                        "status": "COMPLETE",
+                        "training": {
+                            "completed_steps": contract.optimizer_steps,
+                            "target_exposures": contract.optimizer_steps * 8,
+                        },
+                        "saved_checkpoint": {
+                            "step": contract.final_step,
+                            "state_scope": "transformer_only",
+                            "remote_file_sizes_verified": True,
+                            "path": str(checkpoint_path),
+                            "volume_name": volume_name,
+                            "volume_relative_path": "/" + str(
+                                checkpoint_path.relative_to(volume_root)
+                            ),
+                            "manifest": {
+                                "config.json": {"bytes": 1, "sha256": "x"}
+                            },
+                        },
+                    }
+                },
+            }
+
+            resolved, checkpoint = validate(
+                parent,
+                parent_report_path=report_path,
+                volume_root=volume_root,
+                volume_name=volume_name,
+                contract=contract,
+            )
+            self.assertEqual(resolved, checkpoint_path.resolve())
+            self.assertEqual(checkpoint["step"], 2048)
 
     def test_final_report_upload_retries_a_transient_block_failure(self) -> None:
         upload = self.namespace["_upload_and_verify_final_report"]
@@ -1151,6 +1308,21 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
         self.assertEqual(continuation.models, base.models)
         self.assertEqual(continuation.data, base.data)
 
+    def test_endpoint_balanced_long_continuation_config_uses_2048_updates(
+        self,
+    ) -> None:
+        base = load_single_gpu_training_config(CONFIG)
+        continuation = load_single_gpu_training_config(
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG
+        )
+        self.assertEqual(continuation.loop.max_optimizer_steps, 2048)
+        self.assertEqual(continuation.loop.optimizer_batch_size, 8)
+        self.assertEqual(continuation.loop.flux_microbatch_size, 8)
+        self.assertEqual(continuation.loop.min_context_pairs_before_target, 4)
+        self.assertEqual(continuation.optimizer, base.optimizer)
+        self.assertEqual(continuation.models, base.models)
+        self.assertEqual(continuation.data, base.data)
+
     def test_notebook_is_clean_and_all_code_cells_compile(self) -> None:
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         self.assertEqual(len(notebook["cells"]), 6)
@@ -1218,6 +1390,26 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
             compile(
                 "".join(cell["source"]),
                 f"endpoint-balanced-continuation-cell-{index}",
+                "exec",
+            )
+
+    def test_endpoint_balanced_long_continuation_notebook_is_clean_and_compiles(
+        self,
+    ) -> None:
+        notebook = json.loads(
+            REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_NOTEBOOK.read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(len(notebook["cells"]), 6)
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            self.assertEqual(cell.get("outputs", []), [])
+            self.assertIsNone(cell.get("execution_count"))
+            compile(
+                "".join(cell["source"]),
+                f"endpoint-balanced-long-continuation-cell-{index}",
                 "exec",
             )
 
