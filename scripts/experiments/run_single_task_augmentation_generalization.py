@@ -76,6 +76,9 @@ REGION_WEIGHTED_PROTOCOL = "augmentation-generalization-region-weighted-overfit"
 REGION_WEIGHTED_CONTINUATION_PROTOCOL = (
     "augmentation-generalization-region-weighted-overfit-continuation"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL = (
+    "augmentation-generalization-region-weighted-endpoint-balanced-continuation"
+)
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
 CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
@@ -84,6 +87,9 @@ CONTINUATION_CONFIG_NAME = (
 )
 REGION_WEIGHTED_CONTINUATION_CONFIG_NAME = (
     "single_gpu_0d3d703e_region_weighted_continuation.json"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG_NAME = (
+    "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
 )
 TASK_ID = "0d3d703e"
 TARGET_ORIGINAL_PAIR_INDEX = 4
@@ -164,6 +170,34 @@ REGION_WEIGHTED_CONTINUATION_PARENT_POOL_SHA256 = (
 REGION_WEIGHTED_CONTINUATION_PARENT_SCHEDULE_SHA256 = (
     "eac20d584ecb44e78ba7dc22f6fbc7033ee0c5eac12e704affe1287e30636947"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP = 1536
+REGION_WEIGHTED_ENDPOINT_BALANCED_FINAL_STEP = 2048
+REGION_WEIGHTED_ENDPOINT_BALANCED_OPTIMIZER_STEPS = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_FINAL_STEP
+    - REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_START = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_COUNT = (
+    REGION_WEIGHTED_ENDPOINT_BALANCED_OPTIMIZER_STEPS // OPTIMIZER_STEPS
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_RUN_ID = "20260826T231644245954Z"
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_SOURCE_COMMIT = (
+    "5a1bcf69e7b119f7714396ca6ae6da868a810e9c"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_REPORT_SHA256 = (
+    "3011769bad7a007308fd457208c24b56978561064c45414366f5f186067937e7"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_POOL_SHA256 = (
+    "f512b3dc4cc5f603c3c764a45b3a4086d4b4837e63a2793a7009c2505e72e0b0"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_SCHEDULE_SHA256 = (
+    "74b1055519639ef11e0af0b3bdf8ed43acd6d15f5eff8cd20e576840ae3ee38a"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_SCHEDULE_SHA256 = (
+    "f03254d7822fcc2343371f50b6bd3bccd6039543ee35b85f2c68b81dec16b5d4"
+)
 REGION_WEIGHTED_PARENT_TERMINAL_FAILURE = {
     "stage": "experiment",
     "type": "ExecutionError",
@@ -173,9 +207,8 @@ UPDATE_CYCLE_LENGTH = 8
 ENDPOINT_UPDATE_COUNT = OPTIMIZER_STEPS // UPDATE_CYCLE_LENGTH
 REGULAR_UPDATE_COUNT = OPTIMIZER_STEPS - ENDPOINT_UPDATE_COUNT
 EXPOSURES_PER_VIEW = 8
-ENDPOINT_EXPOSURES_PER_VIEW = 1
-REGULAR_EXPOSURES_PER_VIEW = 7
-REGULAR_GROUP_OFFSETS = (8, 16, 24, 32, 40, 48, 56)
+DEFAULT_ENDPOINT_CYCLE_POSITIONS = (0,)
+ENDPOINT_BALANCED_CYCLE_POSITIONS = (0, 2, 4, 6)
 EVALUATION_STEPS = (0, 128, 256, 512)
 CONTINUATION_EVALUATION_STEPS = (1024, 2048)
 CONTINUATION_FULL_GENERATION_STEPS = (2048,)
@@ -183,6 +216,8 @@ REGION_WEIGHTED_EVALUATION_STEPS = EVALUATION_STEPS
 REGION_WEIGHTED_FULL_GENERATION_STEPS = (512,)
 REGION_WEIGHTED_CONTINUATION_EVALUATION_STEPS = (1024, 1536)
 REGION_WEIGHTED_CONTINUATION_FULL_GENERATION_STEPS = (1536,)
+REGION_WEIGHTED_ENDPOINT_BALANCED_EVALUATION_STEPS = (1664, 1792, 2048)
+REGION_WEIGHTED_ENDPOINT_BALANCED_FULL_GENERATION_STEPS = (2048,)
 UNWEIGHTED_LOSS_POLICY = "unweighted-flow-matching"
 REGION_WEIGHTED_LOSS_POLICY = "region-weighted-flow-matching"
 REGION_LOSS_WEIGHTS = {
@@ -274,6 +309,7 @@ class ParentRunContract:
     schedule_sha256: str
     protocol_name: str
     loss_policy: str
+    optimizer_steps: int
     final_step: int
     accept_terminal_report_upload_failure: bool = False
 
@@ -286,6 +322,7 @@ UNWEIGHTED_PARENT_CONTRACT = ParentRunContract(
     schedule_sha256=CONTINUATION_PARENT_SCHEDULE_SHA256,
     protocol_name=PROTOCOL,
     loss_policy=UNWEIGHTED_LOSS_POLICY,
+    optimizer_steps=OPTIMIZER_STEPS,
     final_step=CONTINUATION_START_STEP,
 )
 REGION_WEIGHTED_PARENT_CONTRACT = ParentRunContract(
@@ -296,8 +333,20 @@ REGION_WEIGHTED_PARENT_CONTRACT = ParentRunContract(
     schedule_sha256=REGION_WEIGHTED_CONTINUATION_PARENT_SCHEDULE_SHA256,
     protocol_name=REGION_WEIGHTED_PROTOCOL,
     loss_policy=REGION_WEIGHTED_LOSS_POLICY,
+    optimizer_steps=OPTIMIZER_STEPS,
     final_step=REGION_WEIGHTED_CONTINUATION_START_STEP,
     accept_terminal_report_upload_failure=True,
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_CONTRACT = ParentRunContract(
+    run_id=REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_RUN_ID,
+    source_commit=REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_SOURCE_COMMIT,
+    report_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_REPORT_SHA256,
+    pool_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_POOL_SHA256,
+    schedule_sha256=REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_SCHEDULE_SHA256,
+    protocol_name=REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+    loss_policy=REGION_WEIGHTED_LOSS_POLICY,
+    optimizer_steps=REGION_WEIGHTED_CONTINUATION_OPTIMIZER_STEPS,
+    final_step=REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP,
 )
 
 
@@ -781,11 +830,24 @@ def _build_training_schedule(
     *,
     phase_start: int = 0,
     phase_count: int = 1,
+    endpoint_cycle_positions: tuple[int, ...] = DEFAULT_ENDPOINT_CYCLE_POSITIONS,
+    prior_exposure_audit: dict[str, Any] | None = None,
 ) -> tuple[TrainingBatchPlan, ...]:
     if phase_start < 0:
         raise ValueError("phase_start must be non-negative")
     if phase_count <= 0:
         raise ValueError("phase_count must be positive")
+    if (
+        not endpoint_cycle_positions
+        or tuple(sorted(set(endpoint_cycle_positions))) != endpoint_cycle_positions
+        or any(
+            position < 0 or position >= UPDATE_CYCLE_LENGTH
+            for position in endpoint_cycle_positions
+        )
+    ):
+        raise ValueError(
+            "endpoint_cycle_positions must be sorted, unique, and inside the cycle"
+        )
     if len(train) != TRAIN_VIEW_COUNT:
         raise ValueError(f"train must contain {TRAIN_VIEW_COUNT} views")
     by_geometry = {
@@ -796,6 +858,19 @@ def _build_training_schedule(
     }
     if any(len(indices) != TRAIN_PER_GEOMETRY for indices in by_geometry.values()):
         raise ValueError("Training geometry counts differ from protocol")
+
+    cumulative_stratum_counts: dict[str, Counter[int]] | None = None
+    phase_stratum_counts: dict[str, Counter[int]] | None = None
+    if prior_exposure_audit is not None:
+        prior_items = prior_exposure_audit.get("items")
+        expected_keys = {view.serialized_key for view in train}
+        if not isinstance(prior_items, dict) or set(prior_items) != expected_keys:
+            raise ValueError("prior_exposure_audit keys differ from training views")
+        cumulative_stratum_counts = {
+            key: Counter(item.get("regular_strata", ()))
+            for key, item in prior_items.items()
+        }
+        phase_stratum_counts = {key: Counter() for key in prior_items}
 
     groups: list[tuple[int, ...]] = []
     for group_index in range(ENDPOINT_UPDATE_COUNT):
@@ -819,10 +894,12 @@ def _build_training_schedule(
             cycle_index = phase_index * ENDPOINT_UPDATE_COUNT + local_cycle_index
             for cycle_position in range(UPDATE_CYCLE_LENGTH):
                 step = cycle_index * UPDATE_CYCLE_LENGTH + cycle_position + 1
-                if cycle_position == 0:
-                    group_index = (
-                        local_cycle_index + group_rotation
-                    ) % ENDPOINT_UPDATE_COUNT
+                group_index = (
+                    local_cycle_index
+                    + group_rotation
+                    + cycle_position * OPTIMIZER_BATCH_SIZE
+                ) % ENDPOINT_UPDATE_COUNT
+                if cycle_position in endpoint_cycle_positions:
                     plans.append(
                         TrainingBatchPlan(
                             step=step,
@@ -834,11 +911,65 @@ def _build_training_schedule(
                         )
                     )
                     continue
-                group_index = (
-                    local_cycle_index
-                    + group_rotation
-                    + REGULAR_GROUP_OFFSETS[cycle_position - 1]
-                ) % ENDPOINT_UPDATE_COUNT
+                if cumulative_stratum_counts is None:
+                    timestep_strata = tuple(
+                        (slot + cycle_position + phase_index)
+                        % OPTIMIZER_BATCH_SIZE
+                        for slot in range(OPTIMIZER_BATCH_SIZE)
+                    )
+                else:
+                    if phase_stratum_counts is None:
+                        raise AssertionError("Balanced schedule lacks phase counters")
+                    states: dict[
+                        int, tuple[int, int, int, tuple[int, ...]]
+                    ] = {
+                        0: (0, 0, 0, ())
+                    }
+                    for row, view_index in enumerate(groups[group_index]):
+                        key = train[view_index].serialized_key
+                        next_states: dict[
+                            int, tuple[int, int, int, tuple[int, ...]]
+                        ] = {}
+                        for mask, (
+                            phase_cost,
+                            cumulative_cost,
+                            tie_cost,
+                            assignment,
+                        ) in states.items():
+                            for stratum in range(OPTIMIZER_BATCH_SIZE):
+                                if mask & (1 << stratum):
+                                    continue
+                                candidate = (
+                                    phase_cost + phase_stratum_counts[key][stratum],
+                                    cumulative_cost
+                                    + cumulative_stratum_counts[key][stratum],
+                                    tie_cost
+                                    + (
+                                        stratum
+                                        - row
+                                        - cycle_position
+                                        - phase_index
+                                    )
+                                    % OPTIMIZER_BATCH_SIZE,
+                                    assignment + (stratum,),
+                                )
+                                next_mask = mask | (1 << stratum)
+                                if (
+                                    next_mask not in next_states
+                                    or candidate < next_states[next_mask]
+                                ):
+                                    next_states[next_mask] = candidate
+                        states = next_states
+                    timestep_strata = states[(1 << OPTIMIZER_BATCH_SIZE) - 1][3]
+                    for view_index, stratum in zip(
+                        groups[group_index], timestep_strata, strict=True
+                    ):
+                        cumulative_stratum_counts[
+                            train[view_index].serialized_key
+                        ][stratum] += 1
+                        phase_stratum_counts[
+                            train[view_index].serialized_key
+                        ][stratum] += 1
                 plans.append(
                     TrainingBatchPlan(
                         step=step,
@@ -846,15 +977,7 @@ def _build_training_schedule(
                         cycle_position=cycle_position,
                         kind="stratified",
                         view_indices=groups[group_index],
-                        timestep_strata=tuple(
-                            (
-                                slot
-                                + cycle_position
-                                + phase_index
-                            )
-                            % OPTIMIZER_BATCH_SIZE
-                            for slot in range(OPTIMIZER_BATCH_SIZE)
-                        ),
+                        timestep_strata=timestep_strata,
                     )
                 )
     result = tuple(plans)
@@ -863,6 +986,7 @@ def _build_training_schedule(
         train,
         phase_start=phase_start,
         phase_count=phase_count,
+        endpoint_cycle_positions=endpoint_cycle_positions,
     )
     return result
 
@@ -873,6 +997,7 @@ def _validate_training_schedule(
     *,
     phase_start: int = 0,
     phase_count: int = 1,
+    endpoint_cycle_positions: tuple[int, ...] = DEFAULT_ENDPOINT_CYCLE_POSITIONS,
 ) -> None:
     expected_updates = OPTIMIZER_STEPS * phase_count
     if len(schedule) != expected_updates:
@@ -908,10 +1033,16 @@ def _validate_training_schedule(
             raise RuntimeError("Training batch geometry counts differ")
         if batch.kind == "shared_endpoint":
             endpoint_steps.append(batch.step)
-            if batch.cycle_position != 0 or batch.timestep_strata is not None:
+            if (
+                batch.cycle_position not in endpoint_cycle_positions
+                or batch.timestep_strata is not None
+            ):
                 raise RuntimeError("Endpoint schedule metadata differs")
         elif batch.kind == "stratified":
-            if batch.cycle_position == 0 or batch.timestep_strata is None:
+            if (
+                batch.cycle_position in endpoint_cycle_positions
+                or batch.timestep_strata is None
+            ):
                 raise RuntimeError("Regular schedule metadata differs")
             if set(batch.timestep_strata) != set(range(OPTIMIZER_BATCH_SIZE)):
                 raise RuntimeError("Regular batch does not cover all eight strata")
@@ -925,15 +1056,22 @@ def _validate_training_schedule(
                 counts["strata"][batch.timestep_strata[row]] += 1
 
     final_step = (phase_start + phase_count) * OPTIMIZER_STEPS
-    expected_endpoint_steps = list(range(first_step, final_step + 1, 8))
+    expected_endpoint_steps = [
+        cycle_start + position
+        for cycle_start in range(first_step, final_step + 1, UPDATE_CYCLE_LENGTH)
+        for position in endpoint_cycle_positions
+    ]
     if endpoint_steps != expected_endpoint_steps:
-        raise RuntimeError("Endpoint steps differ from the first update of each cycle")
+        raise RuntimeError("Endpoint steps differ from the configured cycle positions")
+    endpoint_exposures_per_view = len(endpoint_cycle_positions) * phase_count
+    regular_exposures_per_view = (
+        UPDATE_CYCLE_LENGTH - len(endpoint_cycle_positions)
+    ) * phase_count
     for view_index, counts in exposure_counts.items():
         if (
             counts["total"] != EXPOSURES_PER_VIEW * phase_count
-            or counts["shared_endpoint"]
-            != ENDPOINT_EXPOSURES_PER_VIEW * phase_count
-            or counts["stratified"] != REGULAR_EXPOSURES_PER_VIEW * phase_count
+            or counts["shared_endpoint"] != endpoint_exposures_per_view
+            or counts["stratified"] != regular_exposures_per_view
         ):
             raise RuntimeError(f"View {view_index} exposure counts differ: {counts}")
         stratum_counts = [counts["strata"][stratum] for stratum in range(8)]
@@ -946,8 +1084,14 @@ def _validate_training_schedule(
                 phase_count - count
             )
     for geometry, counts in omitted_by_geometry.items():
+        omissions_per_stratum = (
+            TRAIN_PER_GEOMETRY
+            * (UPDATE_CYCLE_LENGTH - regular_exposures_per_view // phase_count)
+            * phase_count
+            // UPDATE_CYCLE_LENGTH
+        )
         expected_omissions = Counter(
-            {stratum: 16 * phase_count for stratum in range(8)}
+            {stratum: omissions_per_stratum for stratum in range(8)}
         )
         if counts != expected_omissions:
             raise RuntimeError(
@@ -1128,6 +1272,20 @@ def _validate_static_protocol() -> None:
     ):
         raise RuntimeError(
             "Region-weighted continuation allocation differs from protocol"
+        )
+    if (
+        REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP != 1536
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_FINAL_STEP != 2048
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_OPTIMIZER_STEPS != 512
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_START != 3
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_COUNT != 1
+        or ENDPOINT_BALANCED_CYCLE_POSITIONS != (0, 2, 4, 6)
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_EVALUATION_STEPS
+        != (1664, 1792, 2048)
+        or REGION_WEIGHTED_ENDPOINT_BALANCED_FULL_GENERATION_STEPS != (2048,)
+    ):
+        raise RuntimeError(
+            "Endpoint-balanced continuation allocation differs from protocol"
         )
     if (
         FINAL_REPORT_UPLOAD_ATTEMPTS != 3
@@ -2517,8 +2675,11 @@ def _validate_parent_report_payload(
     protocol = parent.get("protocol", {})
     if protocol.get("name") != contract.protocol_name:
         raise RuntimeError("Parent report protocol differs from the fresh run")
-    if protocol.get("optimizer_steps") != OPTIMIZER_STEPS:
-        raise RuntimeError("Parent report does not end at optimizer step 512")
+    if (
+        protocol.get("optimizer_steps") != contract.optimizer_steps
+        or protocol.get("final_optimizer_step") != contract.final_step
+    ):
+        raise RuntimeError("Parent report training allocation differs")
     if protocol.get("loss") != contract.loss_policy:
         raise RuntimeError("Parent report loss policy differs")
     if contract.loss_policy == REGION_WEIGHTED_LOSS_POLICY and protocol.get(
@@ -2539,9 +2700,9 @@ def _validate_parent_report_payload(
     training = stage.get("training")
     if (
         not isinstance(training, dict)
-        or training.get("completed_steps") != OPTIMIZER_STEPS
+        or training.get("completed_steps") != contract.optimizer_steps
         or training.get("target_exposures")
-        != OPTIMIZER_STEPS * OPTIMIZER_BATCH_SIZE
+        != contract.optimizer_steps * OPTIMIZER_BATCH_SIZE
     ):
         raise RuntimeError("Parent training budget differs")
     checkpoint = stage.get("saved_checkpoint")
@@ -2982,6 +3143,7 @@ def run(args: argparse.Namespace) -> None:
         CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
     )
     if args.protocol not in supported_protocols:
         raise ValueError(
@@ -2992,12 +3154,15 @@ def run(args: argparse.Namespace) -> None:
     continuation = args.protocol in (
         CONTINUATION_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
     )
     region_weighted = args.protocol in (
         REGION_WEIGHTED_PROTOCOL,
         REGION_WEIGHTED_CONTINUATION_PROTOCOL,
+        REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL,
     )
     parent_contract: ParentRunContract | None = None
+    endpoint_cycle_positions = DEFAULT_ENDPOINT_CYCLE_POSITIONS
     if args.protocol == CONTINUATION_PROTOCOL:
         if args.parent_report is None or args.parent_report_sha256 is None:
             raise ValueError(
@@ -3020,6 +3185,32 @@ def run(args: argparse.Namespace) -> None:
             "the same 512 training augmentations three additional endpoint/regular "
             "sampling phases through global step 2048 improve seen fitting and "
             "transfer to the unchanged 128-view holdout?"
+        )
+    elif args.protocol == REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL:
+        if args.parent_report is None or args.parent_report_sha256 is None:
+            raise ValueError(
+                "Endpoint-balanced continuation requires --parent-report and "
+                "--parent-report-sha256"
+            )
+        parent_contract = REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_CONTRACT
+        initial_step = REGION_WEIGHTED_ENDPOINT_BALANCED_START_STEP
+        final_step = REGION_WEIGHTED_ENDPOINT_BALANCED_FINAL_STEP
+        training_update_count = REGION_WEIGHTED_ENDPOINT_BALANCED_OPTIMIZER_STEPS
+        phase_start = REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_START
+        phase_count = REGION_WEIGHTED_ENDPOINT_BALANCED_PHASE_COUNT
+        endpoint_cycle_positions = ENDPOINT_BALANCED_CYCLE_POSITIONS
+        evaluation_steps = REGION_WEIGHTED_ENDPOINT_BALANCED_EVALUATION_STEPS
+        full_generation_steps = (
+            REGION_WEIGHTED_ENDPOINT_BALANCED_FULL_GENERATION_STEPS
+        )
+        config_name = REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG_NAME
+        loss_policy = REGION_WEIGHTED_LOSS_POLICY
+        full_final_generation_panel = False
+        checkpoint_before_final_evaluation = True
+        question = (
+            "Does a 50/50 endpoint-balanced continuation from the verified "
+            "step-1536 transformer improve condition-dependent color prediction "
+            "without discarding regular trajectory training through step 2048?"
         )
     elif args.protocol == REGION_WEIGHTED_CONTINUATION_PROTOCOL:
         if args.parent_report is None or args.parent_report_sha256 is None:
@@ -3162,6 +3353,10 @@ def run(args: argparse.Namespace) -> None:
             "initial_optimizer_step": initial_step,
             "final_optimizer_step": final_step,
             "optimizer_batch_size": OPTIMIZER_BATCH_SIZE,
+            "endpoint_cycle_positions": list(endpoint_cycle_positions),
+            "endpoint_update_fraction": (
+                len(endpoint_cycle_positions) / UPDATE_CYCLE_LENGTH
+            ),
             "evaluation_steps": list(evaluation_steps),
             "full_generation_steps": list(full_generation_steps),
             "t1_only_steps": [
@@ -3443,13 +3638,32 @@ def run(args: argparse.Namespace) -> None:
         gc.collect()
         torch.cuda.empty_cache()
 
+        prior_exposure_audit = None
+        if args.protocol == REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL:
+            prior_exposure_audit = parent_report.get("training_schedule", {}).get(
+                "cumulative_per_view_exposure_audit"
+            )
+            if not isinstance(prior_exposure_audit, dict):
+                raise RuntimeError(
+                    "Endpoint-balanced parent lacks its cumulative exposure audit"
+                )
         schedule = _build_training_schedule(
             train,
             phase_start=phase_start,
             phase_count=phase_count,
+            endpoint_cycle_positions=endpoint_cycle_positions,
+            prior_exposure_audit=prior_exposure_audit,
         )
         schedule_payload = _schedule_payload(schedule, train)
         schedule_hash = _hash_json(schedule_payload)
+        if (
+            args.protocol
+            == REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_PROTOCOL
+            and schedule_hash != REGION_WEIGHTED_ENDPOINT_BALANCED_SCHEDULE_SHA256
+        ):
+            raise RuntimeError(
+                "Endpoint-balanced training schedule differs from its pinned hash"
+            )
         exposure_audit = _schedule_exposure_audit(schedule, train)
         if not exposure_audit["all_exact"]:
             raise RuntimeError("Training exposure audit is not exact")
@@ -3507,13 +3721,44 @@ def run(args: argparse.Namespace) -> None:
                 or _hash_json(parent_batches) != parent_schedule_hash
             ):
                 raise RuntimeError("Parent training schedule does not match its hash")
+            parent_global_step_range = parent_schedule.get("global_step_range")
+            parent_update_count = parent_schedule.get("updates")
+            if (
+                not isinstance(parent_global_step_range, list)
+                or len(parent_global_step_range) != 2
+                or not isinstance(parent_update_count, int)
+                or parent_update_count <= 0
+                or parent_update_count % OPTIMIZER_STEPS
+                or parent_global_step_range[0] < 1
+                or parent_global_step_range[1]
+                != parent_global_step_range[0] + parent_update_count - 1
+                or (parent_global_step_range[0] - 1) % OPTIMIZER_STEPS
+            ):
+                raise RuntimeError("Parent schedule allocation is invalid")
+            parent_phase_start = (
+                parent_global_step_range[0] - 1
+            ) // OPTIMIZER_STEPS
+            parent_phase_count = parent_update_count // OPTIMIZER_STEPS
+            parent_endpoint_cycle_positions = tuple(
+                parent_report.get("protocol", {}).get(
+                    "endpoint_cycle_positions",
+                    DEFAULT_ENDPOINT_CYCLE_POSITIONS,
+                )
+            )
             regenerated_parent_schedule = _schedule_payload(
-                _build_training_schedule(train),
+                _build_training_schedule(
+                    train,
+                    phase_start=parent_phase_start,
+                    phase_count=parent_phase_count,
+                    endpoint_cycle_positions=parent_endpoint_cycle_positions,
+                ),
                 train,
             )
             if _hash_json(regenerated_parent_schedule) != parent_schedule_hash:
                 raise RuntimeError("Regenerated base schedule differs from parent")
-            parent_exposure_audit = parent_schedule.get("per_view_exposure_audit")
+            parent_exposure_audit = parent_schedule.get(
+                "cumulative_per_view_exposure_audit"
+            ) or parent_schedule.get("per_view_exposure_audit")
             if not isinstance(parent_exposure_audit, dict):
                 raise RuntimeError("Parent schedule lacks a per-view exposure audit")
             cumulative_exposure_audit = _combine_exposure_audits(

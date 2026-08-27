@@ -42,6 +42,12 @@ REGION_WEIGHTED_CONTINUATION_CONFIG = (
     / "training"
     / "single_gpu_0d3d703e_region_weighted_continuation.json"
 )
+REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG = (
+    REPOSITORY_ROOT
+    / "configs"
+    / "training"
+    / "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
+)
 NOTEBOOK = (
     REPOSITORY_ROOT
     / "experiments"
@@ -65,6 +71,12 @@ REGION_WEIGHTED_CONTINUATION_NOTEBOOK = (
     / "experiments"
     / "training"
     / "single-task-region-weighted-loss-continuation-modal.ipynb"
+)
+REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_NOTEBOOK = (
+    REPOSITORY_ROOT
+    / "experiments"
+    / "training"
+    / "single-task-region-weighted-endpoint-balanced-continuation-modal.ipynb"
 )
 
 
@@ -315,6 +327,82 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
             {"shared_endpoint": 128, "stratified": 896, "total": 1024},
         )
 
+    def test_endpoint_balanced_continuation_splits_updates_evenly(self) -> None:
+        train = self._views(128)
+        build = self.namespace["_build_training_schedule"]
+        audit = self.namespace["_schedule_exposure_audit"]
+        combine = self.namespace["_combine_exposure_audits"]
+        endpoint_positions = self.namespace["ENDPOINT_BALANCED_CYCLE_POSITIONS"]
+        parent = combine(
+            audit(build(train), train),
+            audit(build(train, phase_start=1, phase_count=2), train),
+        )
+
+        continuation = build(
+            train,
+            phase_start=3,
+            phase_count=1,
+            endpoint_cycle_positions=endpoint_positions,
+            prior_exposure_audit=parent,
+        )
+        self.assertEqual(len(continuation), 512)
+        self.assertEqual((continuation[0].step, continuation[-1].step), (1537, 2048))
+        self.assertEqual(
+            [plan.step for plan in continuation if plan.kind == "shared_endpoint"],
+            [
+                cycle_start + position
+                for cycle_start in range(1537, 2049, 8)
+                for position in endpoint_positions
+            ],
+        )
+        self.assertEqual(continuation[-1].kind, "stratified")
+
+        exposure_audit = audit(continuation, train)
+        self.assertTrue(exposure_audit["all_exact"])
+        self.assertEqual(
+            exposure_audit["expected"],
+            {"total": 8, "shared_endpoint": 4, "stratified": 4},
+        )
+        self.assertEqual(
+            exposure_audit["expected_update_counts"],
+            {"shared_endpoint": 256, "stratified": 256, "total": 512},
+        )
+        for item in exposure_audit["items"].values():
+            self.assertEqual(len(item["regular_strata"]), 4)
+            self.assertEqual(len(set(item["regular_strata"])), 4)
+
+    def test_endpoint_balanced_schedule_preserves_cumulative_strata_balance(
+        self,
+    ) -> None:
+        train = self._views(128)
+        build = self.namespace["_build_training_schedule"]
+        audit = self.namespace["_schedule_exposure_audit"]
+        combine = self.namespace["_combine_exposure_audits"]
+
+        parent = combine(
+            audit(build(train), train),
+            audit(build(train, phase_start=1, phase_count=2), train),
+        )
+        continuation = audit(
+            build(
+                train,
+                phase_start=3,
+                phase_count=1,
+                endpoint_cycle_positions=self.namespace[
+                    "ENDPOINT_BALANCED_CYCLE_POSITIONS"
+                ],
+                prior_exposure_audit=parent,
+            ),
+            train,
+        )
+        cumulative = combine(parent, continuation)
+
+        self.assertTrue(cumulative["all_exact"])
+        self.assertEqual(
+            cumulative["expected"],
+            {"total": 32, "shared_endpoint": 7, "stratified": 25},
+        )
+
     def test_parent_and_continuation_audits_combine_to_32_contacts(self) -> None:
         train = self._views(128)
         build = self.namespace["_build_training_schedule"]
@@ -471,6 +559,7 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
                 "protocol": {
                     "name": self.namespace["PROTOCOL"],
                     "optimizer_steps": 512,
+                    "final_optimizer_step": 512,
                     "loss": self.namespace["UNWEIGHTED_LOSS_POLICY"],
                 },
                 "pool": {
@@ -554,6 +643,7 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
                 "protocol": {
                     "name": contract.protocol_name,
                     "optimizer_steps": 512,
+                    "final_optimizer_step": contract.final_step,
                     "loss": contract.loss_policy,
                     "region_loss": {
                         "weights": self.namespace["REGION_LOSS_WEIGHTS"]
@@ -604,6 +694,78 @@ class AugmentationGeneralizationProtocolTest(unittest.TestCase):
                     volume_name=volume_name,
                     contract=contract,
                 )
+
+    def test_endpoint_balanced_parent_accepts_complete_step_1536_run(self) -> None:
+        validate = self.namespace["_validate_parent_report_payload"]
+        contract = self.namespace[
+            "REGION_WEIGHTED_ENDPOINT_BALANCED_PARENT_CONTRACT"
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            volume_root = (Path(temporary) / "vo-internal-id").resolve()
+            volume_name = "diffusion-arc-models"
+            report_path = (
+                volume_root
+                / "results"
+                / self.namespace["RESULT_FAMILY"]
+                / contract.run_id
+                / "report.json"
+            )
+            checkpoint_path = (
+                report_path.parent
+                / self.namespace["STAGE_NAME"]
+                / "flux-transformer-step-1536"
+            )
+            parent = {
+                "status": "COMPLETE",
+                "run_id": contract.run_id,
+                "source": {"resolved_commit": contract.source_commit},
+                "durability": {"remote_content_verified": True},
+                "protocol": {
+                    "name": contract.protocol_name,
+                    "optimizer_steps": contract.optimizer_steps,
+                    "final_optimizer_step": contract.final_step,
+                    "loss": contract.loss_policy,
+                    "region_loss": {
+                        "weights": self.namespace["REGION_LOSS_WEIGHTS"]
+                    },
+                },
+                "pool": {
+                    "pool_sha256": contract.pool_sha256,
+                    "counts": {"train": 512, "holdout": 128, "original": 1},
+                },
+                "stages": {
+                    self.namespace["STAGE_NAME"]: {
+                        "status": "COMPLETE",
+                        "training": {
+                            "completed_steps": contract.optimizer_steps,
+                            "target_exposures": contract.optimizer_steps * 8,
+                        },
+                        "saved_checkpoint": {
+                            "step": contract.final_step,
+                            "state_scope": "transformer_only",
+                            "remote_file_sizes_verified": True,
+                            "path": str(checkpoint_path),
+                            "volume_name": volume_name,
+                            "volume_relative_path": "/" + str(
+                                checkpoint_path.relative_to(volume_root)
+                            ),
+                            "manifest": {
+                                "config.json": {"bytes": 1, "sha256": "x"}
+                            },
+                        },
+                    }
+                },
+            }
+
+            resolved, checkpoint = validate(
+                parent,
+                parent_report_path=report_path,
+                volume_root=volume_root,
+                volume_name=volume_name,
+                contract=contract,
+            )
+            self.assertEqual(resolved, checkpoint_path.resolve())
+            self.assertEqual(checkpoint["step"], 1536)
 
     def test_final_report_upload_retries_a_transient_block_failure(self) -> None:
         upload = self.namespace["_upload_and_verify_final_report"]
@@ -976,6 +1138,19 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
         self.assertEqual(continuation.models, base.models)
         self.assertEqual(continuation.data, base.data)
 
+    def test_endpoint_balanced_continuation_config_uses_512_updates(self) -> None:
+        base = load_single_gpu_training_config(CONFIG)
+        continuation = load_single_gpu_training_config(
+            REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG
+        )
+        self.assertEqual(continuation.loop.max_optimizer_steps, 512)
+        self.assertEqual(continuation.loop.optimizer_batch_size, 8)
+        self.assertEqual(continuation.loop.flux_microbatch_size, 8)
+        self.assertEqual(continuation.loop.min_context_pairs_before_target, 4)
+        self.assertEqual(continuation.optimizer, base.optimizer)
+        self.assertEqual(continuation.models, base.models)
+        self.assertEqual(continuation.data, base.data)
+
     def test_notebook_is_clean_and_all_code_cells_compile(self) -> None:
         notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
         self.assertEqual(len(notebook["cells"]), 6)
@@ -1023,6 +1198,26 @@ class AugmentationGeneralizationArtifactTest(unittest.TestCase):
             compile(
                 "".join(cell["source"]),
                 f"region-loss-continuation-cell-{index}",
+                "exec",
+            )
+
+    def test_endpoint_balanced_continuation_notebook_is_clean_and_compiles(
+        self,
+    ) -> None:
+        notebook = json.loads(
+            REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_NOTEBOOK.read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(len(notebook["cells"]), 6)
+        for index, cell in enumerate(notebook["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            self.assertEqual(cell.get("outputs", []), [])
+            self.assertIsNone(cell.get("execution_count"))
+            compile(
+                "".join(cell["source"]),
+                f"endpoint-balanced-continuation-cell-{index}",
                 "exec",
             )
 
