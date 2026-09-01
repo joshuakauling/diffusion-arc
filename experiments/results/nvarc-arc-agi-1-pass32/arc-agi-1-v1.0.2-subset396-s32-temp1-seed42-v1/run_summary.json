@@ -1,0 +1,14 @@
+{
+  "run_dir": "/content/drive/MyDrive/diffusion-arc/results/nvarc-arc-agi-1-pass32/arc-agi-1-v1.0.2-subset396-s32-temp1-seed42-v1",
+  "tasks": 396,
+  "outputs": 415,
+  "excluded_task_ids": [
+    "47996f11",
+    "981571dc",
+    "af22c60d",
+    "f9d67f8b"
+  ],
+  "strict_task_pass_at_32": 0.4292929292929293,
+  "strict_solved_tasks_at_32": 170,
+  "valid_sample_rate": 0.9988704819277109
+}

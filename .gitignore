@@ -10,3 +10,15 @@ __pycache__/
 *.safetensors
 /checkpoints/
 /visualization_ui/
+
+# Local executed copies of the clean VAE experiment notebooks.
+/experiments/vae/conditioning_ladder_roundtrip_diagnosis_colab.ipynb
+/experiments/vae/vae_training_output_roundtrip_audit_colab.ipynb
+
+# Raw per-request NVARC baseline artifacts; aggregate results are tracked.
+/experiments/results/nvarc-arc-agi-1-pass32/**/batch_events/
+/experiments/results/nvarc-arc-agi-1-pass32/**/output_results/
+/experiments/results/nvarc-arc-agi-1-pass32/**/sessions/
+
+# Per-step telemetry is retained in the experiment volume, not in Git.
+/experiments/results/single-task-conditioning-overfitting-ladder/**/optimizer_steps.jsonl

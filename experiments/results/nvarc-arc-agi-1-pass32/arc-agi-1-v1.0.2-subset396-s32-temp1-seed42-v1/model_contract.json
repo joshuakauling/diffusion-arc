@@ -1,0 +1,33 @@
+{
+  "source_handle": "sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1",
+  "drive_path": "/content/drive/MyDrive/diffusion-arc/models/nvarc-qwen3-4b-grids15-sft139",
+  "local_path": "/content/checkpoints/nvarc-qwen3-4b-grids15-sft139",
+  "source_size_bytes": 7267271302,
+  "copy_seconds": 2.9905411750000894,
+  "architecture": [
+    "Qwen3ForCausalLM"
+  ],
+  "model_type": "qwen3",
+  "vocab_size": 16,
+  "eos_token_id": 15,
+  "weight_shard_sizes": {
+    "model-00001-of-00002.safetensors": 4996836472,
+    "model-00002-of-00002.safetensors": 2270397024
+  },
+  "tensor_contract": {
+    "model.embed_tokens.weight": {
+      "shape": [
+        16,
+        2560
+      ],
+      "dtype": "torch.bfloat16"
+    },
+    "lm_head.weight": {
+      "shape": [
+        16,
+        2560
+      ],
+      "dtype": "torch.bfloat16"
+    }
+  }
+}

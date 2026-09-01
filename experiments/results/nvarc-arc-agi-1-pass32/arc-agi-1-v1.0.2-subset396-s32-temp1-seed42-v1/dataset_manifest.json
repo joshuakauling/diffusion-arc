@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/fchollet/ARC-AGI",
+  "release": "v1.0.2",
+  "archive_url": "https://codeload.github.com/fchollet/ARC-AGI/tar.gz/refs/tags/v1.0.2",
+  "archive_sha256": "159676f5c7c6e3b74e89403edda319ff2be714b630e9594ac64914ba1e788466",
+  "evaluation_task_count": 400,
+  "evaluation_output_count": 419,
+  "excluded_task_ids": [
+    "47996f11",
+    "981571dc",
+    "af22c60d",
+    "f9d67f8b"
+  ],
+  "exclusion_reason": "Complete canonical prompt plus maximum shape-agnostic output has a proven minimum of 9,292 tokens, exceeding the established 8,192-token protocol.",
+  "selected_task_count": 396,
+  "selected_output_count": 415,
+  "task_files_sha256": "b9e4932b457de4bce75200fbc2772e17e8f8d2feeee58c9b62471c1fb38016a4"
+}
