@@ -79,7 +79,7 @@ PAD in all remaining rows
 
 The valid region contains ARC color IDs `0` through `9`, rendered through the
 fixed `greedy_rgb_maximin_v1` target palette selected by the measured
-[VAE palette experiment](../experiments/vae-palette-experiments.md):
+[VAE palette experiment](../experiments/vae/palette-and-roundtrip.md):
 
 ```text
 0 #000000   1 #0055FF   2 #55FF00   3 #FF0055   4 #00FFAA
@@ -300,7 +300,7 @@ evaluated.
 - [Project scope and milestones](../../README.md)
 - [Architecture diagram](diagrams/architecture.svg)
 - [FLUX.2 Klein architecture and flow matching](flux2-klein-architecture.md)
-- [FLUX.2 VAE smoke test](../experiments/flux2-vae-smoke-test.md)
-- [FLUX.2 VAE ARC palette experiments](../experiments/vae-palette-experiments.md)
+- [FLUX.2 VAE smoke test](../experiments/vae/smoke-test.md)
+- [FLUX.2 VAE ARC palette experiments](../experiments/vae/palette-and-roundtrip.md)
 - [FLUX target-image encoding](../training/flux-image-encoding.md)
 - [NVARC overview](nvarc-overview.md)

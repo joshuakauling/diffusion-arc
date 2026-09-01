@@ -53,6 +53,15 @@ the broader VAE representation issue is investigated separately. It does not
 reclassify a VAE-limited condition as an exact model success, regenerate data,
 or change the target palette after inspecting the failure.
 
+The subsequent
+[full training-output VAE audit](../../vae/palette-and-roundtrip.md#full-training-output-round-trip-audit)
+confirmed that the 16/17 observation belongs to a broader but sharply bounded
+failure regime. The production round trip was exact for 4,260 of 4,308 original
+training-directory outputs; all 48 failures were at most 5x5, and all recovered
+on their minimum square canvas. Purple class 5 dominated the cell errors. This
+supports the ladder's decision to expose the clean-VAE reference without
+crediting it as model success or changing the raw exact-grid metric.
+
 ## Conditions
 
 The runner constructs 17 deterministic conditions directly from the raw task:
@@ -161,9 +170,9 @@ report upload completed. It never implies that a learning criterion passed.
 ## Artifacts and non-goals
 
 The executable notebook is
-[`experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb`](../../experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb).
+[`experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb`](../../../../experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb).
 The source-controlled runner is
-[`scripts/experiments/run_single_task_conditioning_ladder.py`](../../scripts/experiments/run_single_task_conditioning_ladder.py).
+[`scripts/experiments/run_single_task_conditioning_ladder.py`](../../../../scripts/experiments/run_single_task_conditioning_ladder.py).
 
 Results are written under:
 

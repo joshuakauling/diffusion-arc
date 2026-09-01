@@ -78,6 +78,29 @@ convention:
 constructs `z_t`; calling the clean output the final FLUX input would conflate
 these two contracts.
 
+## Known decode ceiling
+
+A valid deterministic `clean_latent` does not guarantee that a subsequent
+frozen-VAE decode and nearest-palette classification reproduces the source ARC
+grid exactly. The encoder contract establishes the target latent used by flow
+matching; exact RGB reconstruction is a separate measured property of the
+frozen VAE representation.
+
+The full audit of 4,308 original outputs in the ARC-AGI-2 `training` directory
+found 4,260 exact production round trips. All 48 failures retained the correct
+PAD-inferred shape, involved grids no larger than 5x5, and reconstructed
+exactly on their minimum square canvas. Purple class 5 accounted for 54 of the
+74 misclassified cells. The measured protocol, color analysis, artifacts, and
+limitations are documented in
+[`palette-and-roundtrip.md`](../experiments/vae/palette-and-roundtrip.md#full-training-output-round-trip-audit).
+
+These failures do not invalidate the corresponding flow targets: each remains
+a deterministic latent produced by the frozen encoder. They do bound the raw
+exact-grid result obtainable after decoding for those particular clean target
+contexts. Experiments must therefore preserve raw exact-grid scoring while
+recording the clean-VAE reference separately; they must not silently substitute
+the VAE reconstruction or remove a held-out target after inspecting it.
+
 ## Validation boundaries
 
 Construction checks the stable structural interface needed from the injected

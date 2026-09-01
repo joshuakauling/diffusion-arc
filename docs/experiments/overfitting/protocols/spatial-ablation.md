@@ -27,7 +27,7 @@ complete demonstrations. This removes prefix underdetermination without
 introducing ground-truth information at inference.
 
 The split under
-[`data/splits/overfitting_0d3d703e_final_target`](../../data/splits/overfitting_0d3d703e_final_target)
+[`data/splits/overfitting_0d3d703e_final_target`](../../../../data/splits/overfitting_0d3d703e_final_target)
 contains:
 
 | View | Count | Role |
@@ -132,7 +132,7 @@ or provide an NVARC autoregressive baseline.
 ## Notebook and outputs
 
 The executable entrypoint is
-[`experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb`](../../experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb).
+[`experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb`](../../../../experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb).
 It runs the source-controlled experiment runner, streams progress, writes a
 single comparison report, and uploads one validated Safetensors checkpoint per
 variant through the Modal Volume batch-upload API.
