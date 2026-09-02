@@ -19,13 +19,13 @@ from diffusion_arc.arc_data import (
     tokenize_nvarc_training_sample,
     validate_augmentation_for_task,
 )
-from diffusion_arc.arc_data._layout import resolve_split_layout
 from diffusion_arc.arc_data._split_io import (
     load_string_array,
     load_task_splits,
     resolve_inside,
     validate_task_split_boundary,
 )
+from diffusion_arc.arc_data._split_layout import resolve_split_layout
 
 
 class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):

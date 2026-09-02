@@ -61,7 +61,7 @@ from diffusion_arc.model import (
     predict_flux_velocity,
 )
 from diffusion_arc.training import FluxMicrobatch
-from diffusion_arc.training.config import load_single_gpu_training_config
+from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 from diffusion_arc.training.single_gpu_setup import (
     build_flux_optimizer,
     load_single_gpu_models,

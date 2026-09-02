@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from diffusion_arc.training.config import load_single_gpu_training_config
+from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 
 
 def _payload() -> dict:

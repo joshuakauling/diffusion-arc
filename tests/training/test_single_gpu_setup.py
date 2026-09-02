@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from diffusion_arc.model import NVARC_HIDDEN_SIZE, NVARC_VOCAB_SIZE
-from diffusion_arc.training.config import (
+from diffusion_arc.training.single_gpu_config import (
     AdamWConfig,
     SingleGpuDataConfig,
     SingleGpuLoopConfig,

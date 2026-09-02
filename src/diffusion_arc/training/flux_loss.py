@@ -5,8 +5,11 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from diffusion_arc.model.flow import flow_matching_loss, sample_flow_matching_batch
-from diffusion_arc.model.flux_execution import predict_flux_velocity
+from diffusion_arc.model.flow_matching import (
+    flow_matching_loss,
+    sample_flow_matching_batch,
+)
+from diffusion_arc.model.flux_velocity import predict_flux_velocity
 
 from .flux_microbatch import FluxMicrobatch
 

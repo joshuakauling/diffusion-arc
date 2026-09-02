@@ -14,7 +14,7 @@ and numerical behavior remain a separate required smoke or preflight
 experiment.
 
 The runner lives in
-[`src/diffusion_arc/model/nvarc.py`](../../src/diffusion_arc/model/nvarc.py), and
+[`src/diffusion_arc/model/nvarc_encoder.py`](../../src/diffusion_arc/model/nvarc_encoder.py), and
 its public tensor contracts live in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 

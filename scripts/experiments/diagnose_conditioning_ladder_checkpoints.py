@@ -53,7 +53,7 @@ from diffusion_arc.model import (
     predict_flux_velocity,
 )
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
-from diffusion_arc.training.config import load_single_gpu_training_config
+from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 from diffusion_arc.training.single_gpu_setup import (
     load_single_gpu_models,
     prepare_single_gpu_device,

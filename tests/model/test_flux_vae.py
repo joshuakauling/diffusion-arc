@@ -1,4 +1,4 @@
-"""Tests for frozen FLUX.2 VAE target-image encoding."""
+"""Tests for frozen FLUX.2 VAE encoding and decoding."""
 
 from __future__ import annotations
 

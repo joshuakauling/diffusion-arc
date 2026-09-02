@@ -1,4 +1,4 @@
-"""Tests for target-aware FLUX text-input preparation."""
+"""Tests for FLUX conditioning tensor preparation."""
 
 from __future__ import annotations
 

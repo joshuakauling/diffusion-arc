@@ -25,12 +25,12 @@ from diffusion_arc.model.contracts import (
     NVARC_VOCAB_SIZE,
     TARGET_LATENT_CHANNELS,
 )
-from diffusion_arc.model.flux_image import FluxVaeDecoder, FluxVaeEncoder
+from diffusion_arc.model.flux_vae import FluxVaeDecoder, FluxVaeEncoder
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
-from diffusion_arc.model.nvarc import NvarcBatchRunner
+from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
-from .config import SingleGpuTrainingConfig
 from .dataset import ArcTrainingDataset
+from .single_gpu_config import SingleGpuTrainingConfig
 
 
 _TORCH_DTYPES = {

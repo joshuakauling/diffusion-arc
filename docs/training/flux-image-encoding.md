@@ -8,7 +8,7 @@ FLUX.2 VAE in evaluation mode, uses the posterior mode, applies FLUX.2's native
 2×2 packing and frozen BatchNorm normalization, and returns the clean latents.
 
 The implementation lives in
-[`src/diffusion_arc/model/flux_image.py`](../../src/diffusion_arc/model/flux_image.py).
+[`src/diffusion_arc/model/flux_vae.py`](../../src/diffusion_arc/model/flux_vae.py).
 
 This component does not choose the palette, sample flow noise or timesteps,
 construct image position IDs or a noisy state, execute the FLUX transformer, or

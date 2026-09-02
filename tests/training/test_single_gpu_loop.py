@@ -115,7 +115,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
         recording_loss = RecordingLoss()
 
         with patch(
-            "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+            "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
             side_effect=recording_loss,
         ):
             run_single_gpu_training(
@@ -161,7 +161,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
         recording_loss = RecordingLoss()
 
         with patch(
-            "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+            "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
             side_effect=recording_loss,
         ):
             run_single_gpu_training(
@@ -199,7 +199,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
         recording_loss = RecordingLoss()
 
         with patch(
-            "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+            "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
             side_effect=recording_loss,
         ):
             run_single_gpu_training(
@@ -235,7 +235,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
 
         with (
             patch(
-                "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+                "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
                 return_value=transformer.weight * torch.tensor(float("nan")),
             ),
             self.assertRaisesRegex(FloatingPointError, "non-finite"),
@@ -263,7 +263,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
 
         with (
             patch(
-                "diffusion_arc.training.single_gpu.compute_flux_microbatch_loss",
+                "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
                 side_effect=lambda model, *_args, **_kwargs: torch.sqrt(model.weight),
             ),
             self.assertRaisesRegex(RuntimeError, "non-finite"),

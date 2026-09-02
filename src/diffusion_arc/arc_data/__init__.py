@@ -15,20 +15,18 @@ from .augmentation import (
     validate_augmentation_for_task,
 )
 from .canvas import (
+    ArcGridPrediction,
     CANVAS_SIZE,
     CELL_SIZE,
-    render_grid_canvas,
-    render_training_target_canvases,
-)
-from .decoding import (
-    ArcGridPrediction,
     classify_arc_cells,
     decode_arc_grid,
     decode_arc_grids,
     decode_fixed_arc_grid,
     decode_fixed_arc_grids,
+    render_grid_canvas,
+    render_training_target_canvases,
 )
-from .loading import (
+from .task_loading import (
     align_evaluation_targets,
     load_evaluation_targets,
     load_evaluation_task,

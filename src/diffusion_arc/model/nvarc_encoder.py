@@ -1,4 +1,4 @@
-"""Frozen batched NVARC execution over packed complete source sequences."""
+"""Frozen batched NVARC encoding of packed complete source sequences."""
 
 from __future__ import annotations
 

@@ -99,7 +99,7 @@ class FixedFlowProbeTests(unittest.TestCase):
             return torch.rand((), generator=generator) + microbatch.target_count
 
         with patch(
-            "diffusion_arc.training.probes.compute_flux_microbatch_loss",
+            "diffusion_arc.training.flow_probes.compute_flux_microbatch_loss",
             side_effect=sampled_loss,
         ):
             first = evaluate_fixed_flow_probe(

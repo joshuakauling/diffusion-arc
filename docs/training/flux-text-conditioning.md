@@ -13,7 +13,7 @@ Prefix selection and lifetime management belong to the training-side
 `build_flux_microbatch` operation.
 
 The implementation lives in
-[`src/diffusion_arc/model/flux_text.py`](../../src/diffusion_arc/model/flux_text.py),
+[`src/diffusion_arc/model/flux_conditioning.py`](../../src/diffusion_arc/model/flux_conditioning.py),
 and the immutable `FluxTextInputs` contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 
@@ -162,7 +162,7 @@ Run it with:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
-  .venv/bin/python -B -m unittest tests.model.test_flux_text
+  .venv/bin/python -B -m unittest tests.model.test_flux_conditioning
 ```
 
 Training-side tests separately verify successful microbatch construction,

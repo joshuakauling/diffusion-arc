@@ -10,10 +10,10 @@ from torch import nn
 
 from diffusion_arc.arc_data import Grid, render_grid_canvas
 from diffusion_arc.model import FluxTextInputs
-from diffusion_arc.model.flux_execution import build_flux_image_position_ids
-from diffusion_arc.model.flux_image import FluxVaeEncoder
+from diffusion_arc.model.flux_vae import FluxVaeEncoder
+from diffusion_arc.model.flux_velocity import build_flux_image_position_ids
 
-from .flux_forward import compute_flux_microbatch_loss
+from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import FluxMicrobatch
 
 

@@ -10,8 +10,8 @@ from torch import Tensor
 
 from diffusion_arc.arc_data.canvas import _render_valid_grid_canvas
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
-from diffusion_arc.model.flux_image import FluxVaeEncoder
-from diffusion_arc.model.nvarc import NvarcBatchRunner
+from diffusion_arc.model.flux_vae import FluxVaeEncoder
+from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
 
 class NvarcSequenceState:

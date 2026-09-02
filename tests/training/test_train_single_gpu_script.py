@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from diffusion_arc.training.config import (
+from diffusion_arc.training.single_gpu_config import (
     AdamWConfig,
     SingleGpuDataConfig,
     SingleGpuLoopConfig,

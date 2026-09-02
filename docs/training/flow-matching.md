@@ -18,11 +18,11 @@ mask, executes the injected FLUX transformer, and returns the unscaled mean
 loss.
 
 The implementation lives in
-[`src/diffusion_arc/model/flow.py`](../../src/diffusion_arc/model/flow.py). Its
+[`src/diffusion_arc/model/flow_matching.py`](../../src/diffusion_arc/model/flow_matching.py). Its
 immutable `FlowMatchingBatch` output contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 The complete microbatch composition lives in
-[`src/diffusion_arc/training/flux_forward.py`](../../src/diffusion_arc/training/flux_forward.py).
+[`src/diffusion_arc/training/flux_loss.py`](../../src/diffusion_arc/training/flux_loss.py).
 
 ## Input and per-target sampling
 

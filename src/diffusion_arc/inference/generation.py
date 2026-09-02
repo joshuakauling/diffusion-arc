@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from diffusion_arc.arc_data._grid import validate_arc_grid
-from diffusion_arc.arc_data.decoding import (
+from diffusion_arc.arc_data.canvas import (
     ArcGridPrediction,
     classify_arc_cells,
     decode_arc_grids,
@@ -22,7 +22,7 @@ from diffusion_arc.model.contracts import (
     FluxSpatialShape,
     FluxTextInputs,
 )
-from diffusion_arc.model.flux_execution import (
+from diffusion_arc.model.flux_velocity import (
     build_flux_image_position_ids,
     flux_transformer_device,
     predict_flux_velocity,

@@ -11,7 +11,7 @@ from .contracts import (
     FluxSpatialShape,
     FluxTextInputs,
 )
-from .flux_text import build_flux_joint_attention_mask
+from .flux_conditioning import build_flux_joint_attention_mask
 
 
 def flux_transformer_device(transformer: nn.Module) -> torch.device:

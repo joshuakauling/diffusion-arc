@@ -13,8 +13,8 @@ from diffusion_arc.model.contracts import (
     FluxSpatialShape,
     FluxTextInputs,
 )
-from diffusion_arc.model.flux_execution import build_flux_image_position_ids
-from diffusion_arc.model.flux_text import pad_flux_text_prefixes
+from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
+from diffusion_arc.model.flux_velocity import build_flux_image_position_ids
 
 from .flux_input import FluxInput, NvarcSequenceState
 

@@ -54,7 +54,7 @@ from diffusion_arc.model import (
 )
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
 from diffusion_arc.training import FluxMicrobatch
-from diffusion_arc.training.config import load_single_gpu_training_config
+from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 from diffusion_arc.training.single_gpu_setup import (
     build_flux_optimizer,
     load_single_gpu_models,

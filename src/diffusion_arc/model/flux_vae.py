@@ -1,4 +1,4 @@
-"""Frozen FLUX.2 VAE encoding for fixed ARC target canvases."""
+"""Frozen FLUX.2 VAE encoding and decoding for ARC canvases."""
 
 from __future__ import annotations
 

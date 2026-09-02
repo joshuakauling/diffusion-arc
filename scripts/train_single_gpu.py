@@ -13,10 +13,12 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from diffusion_arc.training.config import (  # noqa: E402
+from diffusion_arc.training.single_gpu_config import (  # noqa: E402
     load_single_gpu_training_config,
 )
-from diffusion_arc.training.single_gpu import run_single_gpu_training  # noqa: E402
+from diffusion_arc.training.single_gpu_loop import (  # noqa: E402
+    run_single_gpu_training,
+)
 from diffusion_arc.training.single_gpu_setup import (  # noqa: E402
     build_flow_generator,
     build_flux_optimizer,

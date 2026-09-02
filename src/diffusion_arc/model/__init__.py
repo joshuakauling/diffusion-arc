@@ -25,19 +25,22 @@ from .contracts import (
     validate_packed_source_sequences,
     validate_packed_training_batch,
 )
-from .flow import (
+from .flow_matching import (
     flow_matching_loss,
     sample_flow_matching_batch,
     sample_stratified_flow_matching_batch,
 )
-from .flux_execution import (
+from .flux_conditioning import (
+    build_flux_joint_attention_mask,
+    pad_flux_text_prefixes,
+)
+from .flux_vae import FluxVaeDecoder, FluxVaeEncoder
+from .flux_velocity import (
     build_flux_image_position_ids,
     flux_transformer_device,
     predict_flux_velocity,
 )
-from .flux_image import FluxVaeDecoder, FluxVaeEncoder
-from .flux_text import build_flux_joint_attention_mask, pad_flux_text_prefixes
-from .nvarc import NvarcBatchRunner
+from .nvarc_encoder import NvarcBatchRunner
 
 __all__ = [
     "DEFAULT_FLUX_SPATIAL_SHAPE",

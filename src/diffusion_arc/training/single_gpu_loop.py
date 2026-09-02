@@ -1,4 +1,4 @@
-"""Initial consumer-first single-GPU training policy."""
+"""Initial consumer-first single-GPU training loop."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
-from diffusion_arc.model.flux_image import FluxVaeEncoder
-from diffusion_arc.model.nvarc import NvarcBatchRunner
+from diffusion_arc.model.flux_vae import FluxVaeEncoder
+from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
-from .flux_forward import compute_flux_microbatch_loss
 from .flux_input import FluxInput, prepare_flux_inputs
+from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
 
 

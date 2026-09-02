@@ -8,7 +8,7 @@ import torch
 
 from diffusion_arc.arc_data import ArcTokenizedEvaluationSample
 from diffusion_arc.model import FluxTextInputs, NvarcBatchRunner
-from diffusion_arc.model.flux_text import pad_flux_text_prefixes
+from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
 
 
 def prepare_evaluation_text_inputs(

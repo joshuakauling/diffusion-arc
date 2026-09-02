@@ -15,7 +15,7 @@ from unittest.mock import patch
 import torch
 
 from diffusion_arc.arc_data import ArcAugmentationKey, ArcAugmentationSpec
-from diffusion_arc.training.config import load_single_gpu_training_config
+from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = (
