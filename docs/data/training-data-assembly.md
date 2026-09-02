@@ -2,12 +2,21 @@
 
 ## Status and scope
 
-This document describes the implemented CPU-side training path from one
-configured ARC training view to the tensors passed across the model boundary.
+This document describes the implemented dataset contract and the auxiliary
+CPU-side packed-collation path. The packed path is useful for diagnostics,
+tests, and future source batching, but it is not the input path used by the
+current `scripts/train_single_gpu.py` entrypoint.
+
+The current trainer instead configures `DataLoader(batch_size=None)`, consumes
+one `ArcTokenizedTrainingSample` at a time, and passes it directly to
+`prepare_flux_inputs`. See the
+[training system overview](../training/README.md) for that end-to-end runtime
+path.
+
 The project scope and milestones in the root [`README.md`](../../README.md) remain
 authoritative. The upstream loading, augmentation, prompt, and tokenization
-rules are documented in [`data-pipeline.md`](data-pipeline.md). Future batching
-optimizations are documented separately in
+rules are documented in [`data-pipeline.md`](data-pipeline.md). Batching design
+and future efficiency work are documented separately in
 [`batching-and-efficiency-roadmap.md`](../training/batching-and-efficiency-roadmap.md).
 The target-blind execution of packed sources through frozen NVARC is documented
 in [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
@@ -18,7 +27,7 @@ Frozen target-image encoding is documented in
 Per-target flow-noise and timestep sampling is documented in
 [`flow-matching.md`](../training/flow-matching.md).
 
-The implemented path is:
+The auxiliary packed path is:
 
 ```text
 split config + augmentation keys + raw ARC tasks
@@ -31,8 +40,9 @@ split config + augmentation keys + raw ARC tasks
        `- TrainingBatchMetadata sidecar
 ```
 
-This is a host transport path. It prepares aligned CPU tensors but does not
-define how NVARC or FLUX execute them on an accelerator.
+This is a host transport contract. It prepares aligned CPU tensors but does
+not define how NVARC or FLUX execute them on an accelerator. The current
+single-GPU runner follows the separate single-sample path described above.
 
 The implemented dataset and collator live in
 [`src/diffusion_arc/training`](../../src/diffusion_arc/training). Their tensor
@@ -44,7 +54,7 @@ contract lives in
 | Component | Responsible for | Not responsible for |
 | --- | --- | --- |
 | `ArcTrainingDataset` | Selecting a configured view, validating split, key, and task boundaries, loading the referenced task for each item, applying stored augmentations, rendering prompts, tokenizing complete samples | Task caching, shuffling, batching, target budgeting, canvas rendering, model execution |
-| PyTorch `DataLoader` | Selecting dataset indices, source-level batch size, shuffle/sampler policy, workers, invoking the collator | ARC semantics, target selection, packed tensor meaning |
+| PyTorch `DataLoader` | Selecting dataset indices, shuffle/sampler policy, and workers; optionally forming source-level batches and invoking a collator | ARC semantics, target selection, packed tensor meaning |
 | `TrainingCollator` | Assembling trusted tokenized samples by selecting suffix targets, truncating sources, rendering target canvases, and building the packed tensor contract and metadata sidecar | Validating alternate sample producers, sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
 | `NvarcBatchRunner` | Executing trusted packed sources by right-padding, constructing the attention mask, running one frozen batch forward, and returning one independent unpadded hidden-state tensor per source | Revalidating stable checkpoint contracts, targets, target-prefix derivation, target images, VAE or FLUX execution |
 | `prepare_flux_inputs` | Selecting eligible targets for one `ArcTokenizedTrainingSample`, executing its frozen NVARC and VAE preparation once, and creating shared-state `FluxInput` objects | Buffer selection, FLUX execution, flow sampling, loss normalization |
@@ -156,8 +166,9 @@ one batching policy.
 
 ## PyTorch `DataLoader`
 
-The standard PyTorch loader determines which dataset items form one
-source-level batch and passes them as a sequence to the collator:
+When the auxiliary packed path is selected, the standard PyTorch loader
+determines which dataset items form one source-level batch and passes them as a
+sequence to the collator:
 
 ```python
 from torch.utils.data import DataLoader
@@ -179,6 +190,12 @@ Here, `batch_size=2` means two source samples. It does not guarantee two or
 four target exposures: the number of available targets may differ by source.
 Shuffle policy, a future length-aware sampler, worker count, and distributed
 sampling remain explicit loader or runner decisions.
+
+The current single-GPU entrypoint deliberately uses `batch_size=None` and no
+`collate_fn`, so each loader item remains one `ArcTokenizedTrainingSample`.
+That sample is sent directly to `prepare_flux_inputs`; neither
+`TrainingCollator` nor `PackedTrainingBatch` participates in the current
+training loop.
 
 The current returned batch uses custom dataclasses without a `pin_memory()`
 method. Consequently, `DataLoader(pin_memory=True)` does not automatically pin
@@ -323,7 +340,8 @@ diagnostics, tests, and alternate batch producers. Such producers must invoke
 it at their own ingestion or preflight boundary instead of relying on the
 collator to validate arbitrary objects.
 
-`NvarcBatchRunner` likewise trusts packed sources produced through this path.
+On the auxiliary packed path, `NvarcBatchRunner` likewise trusts packed sources
+produced through this path.
 It right-pads them to their batch maximum, supplies a boolean attention mask,
 executes frozen NVARC once, and returns one independent owning `[L_s, 7680]`
 tensor for each source after discarding every padded position. The input
@@ -335,12 +353,13 @@ forward call. The runner's exact contract and measured real-checkpoint evidence
 are documented in
 [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
-The initial scheduling path operates on one `ArcTokenizedTrainingSample` at a
-time through `prepare_flux_inputs`. It determines eligible targets before model
-execution, sends the retained complete source through NVARC once, encodes all
-eligible targets through the VAE, and creates one `FluxInput` per target. Those
-inputs share one `NvarcSequenceState`; each stores only its relative
-`prefix_end` and clean latent alongside the shared state reference.
+The current single-GPU scheduling path is separate from that packed-collation
+contract. It operates on one `ArcTokenizedTrainingSample` at a time through
+`prepare_flux_inputs`. It determines eligible targets before model execution,
+sends the retained complete source through NVARC once, encodes all eligible
+targets through the VAE, and creates one `FluxInput` per target. Those inputs
+share one `NvarcSequenceState`; each stores only its relative `prefix_end` and
+clean latent alongside the shared state reference.
 
 `build_flux_microbatch` retrieves each exact `hidden_states[:prefix_end]` view
 and passes the ordered views to the pure `pad_flux_text_prefixes` operation. It
@@ -378,7 +397,7 @@ target_images
 
 Each selected target exposure receives its own target image and therefore its
 own latent, noise sample, and uniform timestep. The optional generator lets the
-future training runner control and record sampling reproducibly.
+training runner control and record sampling reproducibly.
 
 ## Inspection
 
@@ -409,6 +428,7 @@ The implemented dataset and collator intentionally do not own:
 
 These responsibilities remain separate from the stable host contract. The
 current training-side path already provides frozen-model preparation, FLUX
-microbatch assembly, flow loss computation, and the initial step-limited
-single-GPU FIFO loop. Length-aware scheduling, distributed sampling, and the
-remaining run infrastructure stay future measured stages.
+microbatch assembly, flow loss computation, the step-limited single-GPU FIFO
+loop, and optional update callbacks. Length-aware scheduling, durable run
+telemetry, profiling, checkpoint/resume, and distributed sampling remain future
+measured stages.

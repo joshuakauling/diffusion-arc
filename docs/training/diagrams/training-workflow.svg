@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1470" viewBox="0 0 1600 1470" role="img" aria-labelledby="title desc">
+  <title id="title">Training workflow: shared NVARC states and target-level FLUX batching</title>
+  <desc id="desc">ARC source sequences enter a bounded lookahead buffer and are grouped into an NVARC batch. Frozen NVARC encodes each source once. Target-level FluxInput objects in a ready-input buffer reference one shared NVARC sequence state per source. A planner selects a fixed optimizer batch, another planner groups it into physical FLUX microbatches, and all microbatches accumulate gradients before one optimizer step.</desc>
+
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#57606a"/>
+    </marker>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24292f; }
+      .title { font-size: 30px; font-weight: 700; }
+      .subtitle { font-size: 16px; fill: #57606a; }
+      .section-title { font-size: 19px; font-weight: 700; }
+      .label { font-size: 16px; font-weight: 650; }
+      .body { font-size: 14px; fill: #424a53; }
+      .small { font-size: 12px; fill: #57606a; }
+      .tiny { font-size: 11px; fill: #57606a; }
+      .band { stroke-width: 1.5; rx: 22; }
+      .band-frozen { fill: #f2f7ff; stroke: #4c82c3; }
+      .band-scheduling { fill: #fff9f0; stroke: #bc6b00; }
+      .band-trainable { fill: #faf7ff; stroke: #8250df; }
+      .node { fill: #ffffff; stroke: #8c959f; stroke-width: 1.8; rx: 14; }
+      .frozen-node { fill: #ffffff; stroke: #4c82c3; stroke-width: 2; rx: 14; }
+      .schedule-node { fill: #fff5e8; stroke: #bc6b00; stroke-width: 2; rx: 14; }
+      .trainable-node { fill: #ffffff; stroke: #8250df; stroke-width: 2.2; rx: 14; }
+      .buffer { fill: #fffaf3; stroke: #bc6b00; stroke-width: 2; rx: 18; }
+      .state-panel { fill: #f6f9ff; stroke: #4c82c3; stroke-width: 1.8; rx: 14; }
+      .item { fill: #ffffff; stroke: #8c959f; stroke-width: 1.4; rx: 10; }
+      .target-item { fill: #ffffff; stroke: #bc6b00; stroke-width: 1.5; rx: 10; }
+      .state-item { fill: #ffffff; stroke: #4c82c3; stroke-width: 1.6; rx: 10; }
+      .ref-pill { fill: #eaf3ff; stroke: #4c82c3; stroke-width: 1; rx: 9; }
+      .micro-pill { fill: #faf7ff; stroke: #8250df; stroke-width: 1.2; rx: 9; }
+      .note { fill: #fffdf8; stroke: #d4a15d; stroke-width: 1.2; rx: 12; }
+      .divider { stroke: #d0d7de; stroke-width: 1.2; }
+      .arrow { fill: none; stroke: #57606a; stroke-width: 2.2; marker-end: url(#arrow); }
+      .reference { fill: none; stroke: #4c82c3; stroke-width: 1.8; stroke-dasharray: 5 4; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="1470" fill="#ffffff"/>
+
+  <text x="70" y="48" class="title">Training workflow: shared NVARC states and target-level FLUX batching</text>
+  <text x="70" y="78" class="subtitle">Logical optimizer-batch selection and physical FLUX microbatch grouping are deliberately separate decisions.</text>
+
+  <g transform="translate(1090,69)">
+    <rect x="0" y="0" width="24" height="16" class="frozen-node" rx="4"/>
+    <text x="34" y="13" class="small">frozen model / state</text>
+    <rect x="180" y="0" width="24" height="16" class="schedule-node" rx="4"/>
+    <text x="214" y="13" class="small">buffer / planner</text>
+    <rect x="350" y="0" width="24" height="16" class="trainable-node" rx="4"/>
+    <text x="384" y="13" class="small">trainable</text>
+  </g>
+
+  <!-- 1. Source selection and frozen encoding -->
+  <rect x="45" y="110" width="1510" height="300" class="band band-frozen"/>
+  <text x="75" y="147" class="section-title">1. Source selection and frozen encoding</text>
+
+  <!-- Dataset as a stack of task cards -->
+  <g>
+    <rect x="96" y="198" width="210" height="118" class="item" fill="#eaeef2"/>
+    <rect x="86" y="188" width="210" height="118" class="item" fill="#f0f3f6"/>
+    <rect x="76" y="178" width="210" height="118" class="node"/>
+    <text x="181" y="214" class="label" text-anchor="middle">Training dataset</text>
+    <line x1="101" y1="229" x2="261" y2="229" class="divider"/>
+    <text x="181" y="253" class="body" text-anchor="middle">task-level split</text>
+    <text x="181" y="276" class="body" text-anchor="middle">source sequences + targets</text>
+    <text x="296" y="334" class="small" text-anchor="end">ARC task views</text>
+  </g>
+
+  <!-- Source lookahead buffer with variable sequence lengths -->
+  <g>
+    <rect x="390" y="168" width="285" height="174" class="buffer"/>
+    <text x="532.5" y="200" class="label" text-anchor="middle">NvarcInputBuffer</text>
+    <text x="532.5" y="222" class="small" text-anchor="middle">bounded source lookahead</text>
+    <rect x="420" y="242" width="210" height="14" rx="7" fill="#d9e8fb" stroke="#4c82c3"/>
+    <rect x="420" y="266" width="150" height="14" rx="7" fill="#d9e8fb" stroke="#4c82c3"/>
+    <rect x="420" y="290" width="225" height="14" rx="7" fill="#d9e8fb" stroke="#4c82c3"/>
+    <rect x="420" y="314" width="175" height="14" rx="7" fill="#d9e8fb" stroke="#4c82c3"/>
+  </g>
+
+  <!-- Source batch planner -->
+  <g>
+    <rect x="750" y="180" width="285" height="148" class="schedule-node"/>
+    <text x="892.5" y="213" class="label" text-anchor="middle">NvarcBatchPlanner</text>
+    <line x1="775" y1="228" x2="1010" y2="228" class="divider"/>
+    <text x="892.5" y="253" class="body" text-anchor="middle">group similar sequence lengths</text>
+    <text x="892.5" y="277" class="body" text-anchor="middle">fill the configured batch budget</text>
+    <text x="892.5" y="305" class="small" text-anchor="middle">length-aware selection</text>
+  </g>
+
+  <!-- Frozen NVARC -->
+  <g>
+    <rect x="1125" y="170" width="385" height="168" class="frozen-node"/>
+    <rect x="1148" y="188" width="78" height="24" rx="12" fill="#ddf4ff" stroke="#4c82c3"/>
+    <text x="1187" y="205" class="small" text-anchor="middle">frozen</text>
+    <text x="1317.5" y="236" class="label" text-anchor="middle">NVARC batch execution</text>
+    <line x1="1155" y1="251" x2="1480" y2="251" class="divider"/>
+    <text x="1317.5" y="277" class="body" text-anchor="middle">encode every selected source once</text>
+    <text x="1317.5" y="302" class="body" text-anchor="middle">produce one shared state per source</text>
+    <text x="1317.5" y="324" class="small" text-anchor="middle">S source states leave the batch in source order</text>
+  </g>
+
+  <path d="M306 253 H377" class="arrow"/>
+  <text x="341.5" y="238" class="small" text-anchor="middle">seeded stream</text>
+  <path d="M675 253 H737" class="arrow"/>
+  <path d="M1035 253 H1112" class="arrow"/>
+  <text x="1073.5" y="238" class="small" text-anchor="middle">S sources</text>
+
+  <!-- 2. Target-level objects, scheduling, and physical batches -->
+  <rect x="45" y="440" width="1510" height="710" class="band band-scheduling"/>
+  <text x="75" y="477" class="section-title">2. Shared sequence states and target-level scheduling</text>
+
+  <!-- Build target objects directly below NVARC -->
+  <g>
+    <rect x="1112.5" y="480" width="410" height="105" class="node"/>
+    <text x="1317.5" y="512" class="label" text-anchor="middle">Create one FluxInput per eligible target</text>
+    <line x1="1142.5" y1="527" x2="1492.5" y2="527" class="divider"/>
+    <text x="1317.5" y="551" class="body" text-anchor="middle">attach a reference to the source's shared state</text>
+    <text x="1317.5" y="571" class="small" text-anchor="middle">target data stays separate; hidden states are not copied</text>
+  </g>
+  <path d="M1317.5 338 V467" class="arrow"/>
+
+  <!-- Prepared state: FluxInputBuffer plus shared state objects -->
+  <g>
+    <rect x="70" y="635" width="1460" height="290" class="node"/>
+    <text x="100" y="668" class="label">Prepared target objects</text>
+    <text x="322" y="668" class="small">many target inputs · one shared hidden-state owner per source</text>
+
+    <!-- Shared states -->
+    <rect x="100" y="690" width="330" height="205" class="state-panel"/>
+    <text x="265" y="720" class="label" text-anchor="middle">Shared NVARC sequence states</text>
+    <text x="265" y="741" class="small" text-anchor="middle">one owner for every encoded source</text>
+
+    <rect x="145" y="760" width="235" height="48" class="state-item"/>
+    <text x="185" y="790" class="label">H<tspan baseline-shift="sub" font-size="11">1</tspan></text>
+    <text x="226" y="790" class="small">source 1 hidden states</text>
+
+    <rect x="145" y="823" width="235" height="48" class="state-item"/>
+    <text x="185" y="853" class="label">H<tspan baseline-shift="sub" font-size="11">2</tspan></text>
+    <text x="226" y="853" class="small">source 2 hidden states</text>
+
+    <text x="400" y="875" class="small" text-anchor="end">… H<tspan baseline-shift="sub" font-size="9">S</tspan></text>
+
+    <!-- FluxInput buffer and its contents -->
+    <rect x="470" y="680" width="1030" height="220" class="buffer"/>
+    <text x="500" y="711" class="label">FluxInputBuffer</text>
+    <text x="675" y="711" class="small">bounded pool of ready target-level inputs from all encoded sources</text>
+
+    <!-- Source 1 target row -->
+    <rect x="500" y="735" width="220" height="58" class="target-item"/>
+    <text x="610" y="758" class="body" text-anchor="middle">FluxInput(1, 1)</text>
+    <rect x="569" y="766" width="82" height="18" class="ref-pill"/>
+    <text x="610" y="779" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">1</tspan></text>
+
+    <rect x="740" y="735" width="220" height="58" class="target-item"/>
+    <text x="850" y="758" class="body" text-anchor="middle">FluxInput(1, 2)</text>
+    <rect x="809" y="766" width="82" height="18" class="ref-pill"/>
+    <text x="850" y="779" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">1</tspan></text>
+
+    <rect x="980" y="735" width="220" height="58" class="target-item"/>
+    <text x="1090" y="758" class="body" text-anchor="middle">…</text>
+    <rect x="1049" y="766" width="82" height="18" class="ref-pill"/>
+    <text x="1090" y="779" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">1</tspan></text>
+
+    <rect x="1220" y="735" width="250" height="58" class="target-item"/>
+    <text x="1345" y="758" class="body" text-anchor="middle">FluxInput(1, last)</text>
+    <rect x="1304" y="766" width="82" height="18" class="ref-pill"/>
+    <text x="1345" y="779" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">1</tspan></text>
+
+    <!-- Source 2 target row -->
+    <rect x="500" y="815" width="220" height="58" class="target-item"/>
+    <text x="610" y="838" class="body" text-anchor="middle">FluxInput(2, 1)</text>
+    <rect x="569" y="846" width="82" height="18" class="ref-pill"/>
+    <text x="610" y="859" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">2</tspan></text>
+
+    <rect x="740" y="815" width="220" height="58" class="target-item"/>
+    <text x="850" y="838" class="body" text-anchor="middle">FluxInput(2, 2)</text>
+    <rect x="809" y="846" width="82" height="18" class="ref-pill"/>
+    <text x="850" y="859" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">2</tspan></text>
+
+    <rect x="980" y="815" width="220" height="58" class="target-item"/>
+    <text x="1090" y="838" class="body" text-anchor="middle">…</text>
+    <rect x="1049" y="846" width="82" height="18" class="ref-pill"/>
+    <text x="1090" y="859" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">2</tspan></text>
+
+    <rect x="1220" y="815" width="250" height="58" class="target-item"/>
+    <text x="1345" y="838" class="body" text-anchor="middle">FluxInput(2, last)</text>
+    <rect x="1304" y="846" width="82" height="18" class="ref-pill"/>
+    <text x="1345" y="859" class="tiny" text-anchor="middle">ref H<tspan baseline-shift="sub" font-size="8">2</tspan></text>
+
+    <path d="M470 764 H393" class="reference"/>
+    <path d="M470 844 H393" class="reference"/>
+  </g>
+
+  <path d="M1317.5 585 V622" class="arrow"/>
+
+  <!-- Scheduling row runs right to left, then drops into FLUX below -->
+  <g>
+    <rect x="1220" y="960" width="280" height="118" class="schedule-node"/>
+    <text x="1360" y="991" class="label" text-anchor="middle">OptimizerBatchPlanner</text>
+    <line x1="1245" y1="1006" x2="1475" y2="1006" class="divider"/>
+    <text x="1360" y="1030" class="body" text-anchor="middle">select B ready targets</text>
+    <text x="1360" y="1053" class="small" text-anchor="middle">configured deterministic policy</text>
+  </g>
+  <path d="M1360 900 V947" class="arrow"/>
+
+  <g>
+    <rect x="900" y="960" width="250" height="118" class="schedule-node"/>
+    <text x="1025" y="996" class="label" text-anchor="middle">OptimizerBatch</text>
+    <text x="1025" y="1023" class="body" text-anchor="middle">B selected targets</text>
+    <text x="1025" y="1047" class="small" text-anchor="middle">membership is now fixed</text>
+  </g>
+  <path d="M1220 1019 H1163" class="arrow"/>
+
+  <g>
+    <rect x="580" y="960" width="260" height="118" class="schedule-node"/>
+    <text x="710" y="991" class="label" text-anchor="middle">MicrobatchPlanner</text>
+    <line x1="605" y1="1006" x2="815" y2="1006" class="divider"/>
+    <text x="710" y="1030" class="body" text-anchor="middle">group similar prefix lengths</text>
+    <text x="710" y="1053" class="small" text-anchor="middle">only within the fixed B targets</text>
+  </g>
+  <path d="M900 1019 H853" class="arrow"/>
+
+  <g>
+    <rect x="100" y="950" width="410" height="138" class="node"/>
+    <text x="305" y="981" class="label" text-anchor="middle">Physical FLUX microbatches</text>
+    <rect x="125" y="1001" width="112" height="29" class="micro-pill"/>
+    <text x="181" y="1020" class="small" text-anchor="middle">Microbatch 1</text>
+    <rect x="249" y="1001" width="112" height="29" class="micro-pill"/>
+    <text x="305" y="1020" class="small" text-anchor="middle">Microbatch 2</text>
+    <rect x="373" y="1001" width="112" height="29" class="micro-pill"/>
+    <text x="429" y="1020" class="small" text-anchor="middle">…</text>
+    <text x="305" y="1053" class="body" text-anchor="middle">each up to the configured microbatch size</text>
+    <text x="305" y="1074" class="small" text-anchor="middle">together they contain all B selected targets</text>
+  </g>
+  <path d="M580 1019 H523" class="arrow"/>
+
+  <g>
+    <rect x="580" y="1095" width="920" height="38" class="note"/>
+    <text x="1040" y="1119" class="small" text-anchor="middle">Shared state H<tspan baseline-shift="sub" font-size="9">s</tspan> is released after its last target has been copied into a physical microbatch.</text>
+  </g>
+
+  <!-- 3. FLUX execution and update -->
+  <rect x="45" y="1175" width="1510" height="230" class="band band-trainable"/>
+  <text x="600" y="1212" class="section-title">3. Trainable FLUX execution and one optimizer update</text>
+
+  <g>
+    <rect x="100" y="1250" width="420" height="108" class="trainable-node"/>
+    <rect x="122" y="1267" width="88" height="24" rx="12" fill="#ede6ff" stroke="#8250df"/>
+    <text x="166" y="1284" class="small" text-anchor="middle">trainable</text>
+    <text x="310" y="1309" class="label" text-anchor="middle">FLUX forward + backward</text>
+    <text x="310" y="1334" class="body" text-anchor="middle">execute every physical microbatch</text>
+  </g>
+
+  <g>
+    <rect x="650" y="1250" width="300" height="108" class="node"/>
+    <text x="800" y="1286" class="label" text-anchor="middle">Accumulate gradients</text>
+    <text x="800" y="1313" class="body" text-anchor="middle">all B targets contribute</text>
+    <text x="800" y="1336" class="small" text-anchor="middle">before parameters change</text>
+  </g>
+
+  <g>
+    <rect x="1080" y="1250" width="320" height="108" class="trainable-node"/>
+    <text x="1240" y="1287" class="label" text-anchor="middle">AdamW optimizer.step()</text>
+    <text x="1240" y="1314" class="body" text-anchor="middle">exactly once</text>
+    <text x="1240" y="1337" class="small" text-anchor="middle">per optimizer batch</text>
+  </g>
+
+  <path d="M305 1088 V1237" class="arrow"/>
+  <path d="M520 1304 H637" class="arrow"/>
+  <path d="M950 1304 H1067" class="arrow"/>
+
+  <text x="800" y="1445" class="small" text-anchor="middle">Source selection determines NVARC efficiency · target selection determines the training schedule · microbatch grouping determines physical FLUX efficiency.</text>
+</svg>

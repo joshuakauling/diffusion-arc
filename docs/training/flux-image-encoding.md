@@ -1,5 +1,8 @@
 # FLUX Target-Image Encoding
 
+For the current end-to-end training path and documentation reading order, see
+the [training system overview](README.md).
+
 ## Status and scope
 
 `FluxVaeEncoder` is the implemented boundary between canonical ARC target

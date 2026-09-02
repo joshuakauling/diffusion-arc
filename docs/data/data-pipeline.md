@@ -279,15 +279,15 @@ validation run still requires selecting task IDs for that file.
 ## PyTorch training assembly
 
 `ArcTrainingDataset` builds a map-style PyTorch dataset directly from one
-configured split view. The standard `DataLoader` groups source samples and
-invokes `TrainingCollator`:
+configured split view. The current single-GPU entrypoint uses a standard
+`DataLoader` with automatic batching disabled:
 
 ```python
 from pathlib import Path
 
 from torch.utils.data import DataLoader
 
-from diffusion_arc.training import ArcTrainingDataset, TrainingCollator
+from diffusion_arc.training import ArcTrainingDataset
 
 
 dataset = ArcTrainingDataset(
@@ -297,15 +297,22 @@ dataset = ArcTrainingDataset(
 )
 loader = DataLoader(
     dataset,
-    batch_size=2,
+    batch_size=None,
     shuffle=False,
-    collate_fn=TrainingCollator(max_targets_per_source=2),
 )
 ```
 
-The complete constructor semantics, item contract, suffix-target selection,
-packed tensor fields, metadata sidecar, CPU boundary, and responsibility split
-are documented in
+Each loader item therefore remains one `ArcTokenizedTrainingSample`. The
+single-GPU loop sends that sample to `prepare_flux_inputs`, which performs the
+frozen NVARC and VAE preparation and appends the resulting targets to its
+internal `FluxInput` queue. The complete runtime path is documented in the
+[training system overview](../training/README.md).
+
+`TrainingCollator` and `PackedTrainingBatch` provide a separate implemented
+host-side contract for diagnostics, tests, and future source batching. They are
+not invoked by the current single-GPU entrypoint. Their suffix-target
+selection, packed tensor fields, metadata sidecar, CPU boundary, and
+responsibility split are documented in
 [`training-data-assembly.md`](training-data-assembly.md).
 
 ## Manual inspection
@@ -328,7 +335,7 @@ collator inspection command is documented in
 
 ## Current boundaries
 
-The current data and training assembly deliberately does not provide:
+The data-pipeline layer documented here deliberately does not provide:
 
 - a custom sampler or distributed `DataLoader` setup,
 - NVARC hidden-state extraction,
@@ -341,7 +348,8 @@ Those responsibilities belong to the training and evaluation runners. They
 should compose the immutable objects produced here rather than duplicating the
 loading, augmentation, prompt, tokenization, or target-alignment logic.
 
-The training package provides the config-driven map-style dataset and the
-initial host-side collator. They consume the objects and configuration from
-`arc_data` but do not add model execution, accelerator placement, flow-noise
-sampling, or timestep sampling to the data pipeline.
+The training package provides both the config-driven map-style dataset and the
+auxiliary host-side collator. Higher training layers consume the dataset
+objects and add model execution, accelerator placement, flow sampling, and
+optimizer updates; those operations are deliberately outside this data-pipeline
+document rather than absent from the repository.

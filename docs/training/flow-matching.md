@@ -1,5 +1,8 @@
 # Flow-Matching Training State
 
+For the current end-to-end training path and documentation reading order, see
+the [training system overview](README.md).
+
 ## Status and scope
 
 `sample_flow_matching_batch` is the implemented stochastic boundary between

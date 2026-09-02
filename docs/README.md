@@ -19,6 +19,7 @@ details.
 
 ## Training
 
+- [Training system overview](training/README.md)
 - [Batching and efficiency roadmap](training/batching-and-efficiency-roadmap.md)
 - [NVARC batch runner](training/nvarc-batch-runner.md)
 - [FLUX text conditioning](training/flux-text-conditioning.md)

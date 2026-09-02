@@ -1,5 +1,8 @@
 # FLUX Text Conditioning
 
+For the current end-to-end training path and documentation reading order, see
+the [training system overview](README.md).
+
 ## Status and scope
 
 `pad_flux_text_prefixes` is the implemented pure tensor boundary between exact

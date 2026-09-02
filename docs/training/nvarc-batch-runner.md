@@ -1,5 +1,8 @@
 # NVARC Batch Runner
 
+For the current end-to-end training path and documentation reading order, see
+the [training system overview](README.md).
+
 ## Status and scope
 
 `NvarcBatchRunner` is the implemented target-blind boundary between packed ARC

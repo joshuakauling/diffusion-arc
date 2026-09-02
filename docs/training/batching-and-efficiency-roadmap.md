@@ -1,5 +1,8 @@
 # NVARC and FLUX Batching Roadmap
 
+For the current end-to-end training path and documentation reading order, see
+the [training system overview](README.md).
+
 ## The problem
 
 One ARC sequence produces several FLUX inputs. Running NVARC, VAE, and FLUX
@@ -17,9 +20,10 @@ The three models also have different useful batch boundaries:
 An optimizer update introduces a fourth boundary: its FLUX inputs must be fixed
 before physical grouping, or a planner could change the training order or objective.
 
-The design therefore separates the input sample stream, prepared FLUX input
-queue, logical optimizer batches, and physical FLUX microbatches. A separate
-NVARC lookahead buffer is introduced only when length-aware batching needs it.
+The design therefore separates source lookahead, frozen NVARC execution,
+prepared target buffering, logical optimizer-batch selection, and physical
+FLUX microbatch grouping. The current FIFO implementation is the correctness
+baseline; the two-buffer, length-aware scheduler is the planned optimization.
 
 ## Buffers, batches, and bucketing
 
@@ -31,12 +35,12 @@ object.
 | Term | Meaning |
 | --- | --- |
 | `ArcTokenizedTrainingSample` | One tokenized ARC sequence with all recorded target positions and target grids. |
-| `NvarcInputBuffer` | Optional future lookahead buffer for length-aware NVARC selection. |
+| `NvarcInputBuffer` | Planned bounded lookahead pool for length-aware NVARC selection. |
 | `NvarcBatch` | A physical batch of complete NVARC sequences, normally grouped by similar length. |
 | `NvarcBatchOutput` | One independent, unpadded hidden-state tensor for each sequence in an `NvarcBatch`. |
 | `NvarcSequenceState` | The owner of one sequence tensor and the prefix ends that still need it. |
 | `FluxInput` | One target containing a shared sequence-state reference, relative `prefix_end`, and clean VAE latent. |
-| `FluxInputBuffer` | Prepared FLUX inputs waiting to be selected for training. |
+| `FluxInputBuffer` | Prepared target-level inputs waiting for optimizer-batch selection; currently represented by a private FIFO queue. |
 | `OptimizerBatch` | The complete logical set of FLUX inputs contributing to one local optimizer update. |
 | `FluxMicrobatch` | Independently allocated padded text and stacked image tensors for one physical FLUX forward/backward. |
 | `GlobalOptimizerBatch` | The union of all per-rank `OptimizerBatch` objects for one distributed update. |
@@ -94,6 +98,44 @@ Preparation and FLUX training interleave throughout the run. The initial FIFO
 queue is in-memory state owned by `run_single_gpu_training`; it is not an
 offline cache and does not persist across runs. A separate `NvarcInputBuffer`
 is deferred until lookahead bucketing is implemented.
+
+## Target two-buffer scheduler
+
+The planned scheduler makes both waiting pools and all three selection
+boundaries explicit:
+
+```text
+training dataset
+    -> NvarcInputBuffer(capacity C_N)
+    -> NvarcBatchPlanner selects S similarly sized sources
+    -> frozen NVARC executes each selected source once
+    -> each source s expands to T_s FluxInput entries sharing H_s
+    -> FluxInputBuffer(capacity C_F)
+    -> OptimizerBatchPlanner selects B ready targets
+    -> fixed OptimizerBatch
+    -> MicrobatchPlanner groups similar prefix lengths within B
+    -> M_1 ... M_r, each |M_i| <= m
+    -> FLUX forward/backward for every M_i
+    -> one optimizer.step()
+```
+
+The `NvarcBatchPlanner` uses length-aware bucketing to combine compatible
+source sequences and fill a configured NVARC batch budget. It does not simply
+take the globally longest sequences. Each selected source produces one shared
+`NvarcSequenceState`; its `T_s` eligible target entries retain references to
+that owner instead of duplicating the large hidden-state tensor.
+
+The `OptimizerBatchPlanner` chooses the complete set of `B` ready targets from
+the `FluxInputBuffer`. That choice can change the training order and batch
+composition relative to FIFO, so its policy is part of the experiment rather
+than a transparent systems optimization. Once those `B` targets are selected,
+membership is fixed. The `MicrobatchPlanner` may then reorder and group only
+those targets to reduce prefix padding; it cannot pull replacements from the
+buffer.
+
+The overview diagram in [`README.md`](README.md) visualizes this target design
+and marks its planned components. The next section remains the implemented
+reference against which it must be compared.
 
 ## Initial single-GPU scheduling policy
 
@@ -175,24 +217,32 @@ accepted ARC sequences, eligible FLUX inputs, and excluded targets.
 
 ## Input order and physical reordering
 
-The seeded sampler and the target positions inside each
-`ArcTokenizedTrainingSample` define the stable logical input order. The initial
-FIFO scheduler preserves that order outside the model objects; `FluxInput`
-does not duplicate sampler, task, or augmentation metadata.
+In the current baseline, the seeded sampler and the target positions inside
+each `ArcTokenizedTrainingSample` define a stable logical order. The FIFO queue
+preserves it when selecting each optimizer batch. `FluxInput` does not
+duplicate sampler, task, or augmentation metadata.
 
-The next `OptimizerBatch` is selected from this order before any FLUX backward
-call. NVARC and VAE preparation may run in a different physical order. The
-selected inputs may also be sorted by prefix length when splitting that already
-fixed optimizer batch into `FluxMicrobatch` objects.
+The target scheduler intentionally introduces two configured selections:
+
+1. `NvarcBatchPlanner` chooses `S` compatible sources from the source
+   lookahead buffer.
+2. `OptimizerBatchPlanner` chooses the next `B` targets from all ready entries
+   in the `FluxInputBuffer`.
+
+Those choices may alter the order and membership of an update relative to the
+FIFO baseline. The policies must therefore be deterministic under the recorded
+seed and configuration, define fair progress with no starvation, and expose
+enough sidecar identity to audit the resulting schedule. They must not silently
+prefer cheap inputs indefinitely.
+
+After the optimizer planner has selected `B`, physical reordering is narrower:
+the `MicrobatchPlanner` may sort or bucket only those fixed targets by prefix
+length. This reduces padding without changing which targets contribute to that
+update or what weight each target receives.
 
 If later checkpointing, exact per-input randomness, or diagnostics require a
-stable occurrence key, the scheduler must retain it in a separate sidecar. It
-does not belong to the tensor-bearing `FluxInput` contract.
-
-This reordering may reduce padding, but it must not change which inputs
-contribute to an update. Selecting cheaper inputs from a larger buffer would
-change the training schedule and must be treated as a separately configured
-experiment rather than a transparent optimization.
+stable occurrence key, the scheduler retains it in a separate sidecar. It does
+not belong to the tensor-bearing `FluxInput` contract.
 
 ## NVARC preparation and prefix reuse
 
@@ -247,11 +297,14 @@ the owner itself when the buffer, inputs, and local variables no longer refer
 to it. CUDA may retain released blocks in its caching allocator, so allocator
 reservation is not the same as live tensor allocation.
 
-The `FluxInputBuffer` has explicit count, token, and byte limits. Backpressure
-pauses preparation before staged state grows without bound. Configuration must
-prove that at least one complete optimizer batch can be formed within these
-limits. An unusually large single sequence needs an explicit one-source
-oversize rule; it must not deadlock the producer and consumer.
+The planned `FluxInputBuffer` will have explicit capacity accounting, with
+count, token, or byte limits chosen from measurement. Backpressure must pause
+preparation before staged state grows without bound. Configuration must prove
+that at least one complete optimizer batch can be formed within those limits.
+An unusually large single sequence needs an explicit one-source oversize rule;
+it must not deadlock the producer and consumer. The current private deque has
+no separately configurable capacity because preparation and FIFO consumption
+interleave after every source.
 
 ## FLUX execution and loss normalization
 
@@ -289,9 +342,10 @@ keys stored in its sidecar rather than adding metadata to `FluxInput`.
 
 Distributed planning is deferred until the single-GPU policy is validated.
 Its primary setting will be `global_optimizer_batch_size`; all ranks must agree
-on target weight, synchronization points, tail handling, and loss scaling. DDP
-and FSDP2 must preserve the validated global FLUX input order without sampler
-duplicates or silently dropped inputs.
+on target weight, synchronization points, tail handling, loss scaling, and the
+configured global selection policy. DDP and FSDP2 must reproduce the validated
+global schedule without sampler duplicates, starvation, or silently dropped
+inputs.
 
 ## Implementation order
 
@@ -323,16 +377,19 @@ and end-to-end throughput comparisons with the preceding validated path.
 - A source tensor is released immediately after its final dependent input has
   been copied into an independent physical microbatch.
 - Buffer limits create backpressure, not silent target loss.
+- Pool-based planners are deterministic under the recorded seed and
+  configuration and cannot starve eligible sources or targets.
 - Optimized execution must pass predefined numerical gates before training.
 - Task-level train/validation separation remains unchanged.
 
 ## Measurements and open performance choices
 
-Every stage records complete-path throughput, real and padded tokens, buffer
-occupancy and bytes, component timings, peak memory, loss, gradient norm, and
-numerical differences from its reference. Buffer limits, physical batch sizes,
-device placement, attention backend, activation checkpointing, and later
-cost-based selection remain measurement-driven settings.
+Scheduler experiments must measure complete-path throughput, real and padded
+tokens, buffer occupancy and bytes, component timings, peak memory, loss,
+gradient norm, and numerical differences from the FIFO reference. Buffer
+limits, physical batch sizes, device placement, attention backend, activation
+checkpointing, and selection policy remain measurement-driven settings. The
+current runner does not yet persist this complete measurement set.
 
 Dense padded attention scales with physical batch maxima, and planning must
 also account for the transient `[batch_size, max_prefix, 7680]` conditioning
@@ -343,24 +400,23 @@ model work. None of these choices may appear as a silent runtime fallback.
 
 ## Current implementation boundary
 
-The repository now implements the independent `NvarcBatchOutput` tensors,
+The repository implements the independent `NvarcBatchOutput` tensors,
 single-source `prepare_flux_inputs`, explicit `NvarcSequenceState` ownership,
 pure `pad_flux_text_prefixes`, and transactional `build_flux_microbatch`
-assembly. `compute_flux_microbatch_loss` now composes flow sampling, joint-mask
+assembly. `compute_flux_microbatch_loss` composes flow sampling, joint-mask
 construction, one trainable FLUX forward, and the unscaled velocity loss. The
-step-limited `run_single_gpu_training` loop now consumes an
+step-limited `run_single_gpu_training` loop consumes an
 `ArcTokenizedTrainingSample` stream, maintains its private FIFO queue, forms
 optimizer and FLUX microbatches, scales losses, accumulates gradients, performs
 optimizer updates, flushes only a true stream tail, and exposes an optional
 backend-neutral update callback. A separate `NvarcInputBuffer` remains
 unnecessary while NVARC batch size is one and no lookahead bucketing is used.
-The initial offline `train_single_gpu.py` entrypoint and strict JSON run
-configuration now compose these pieces without changing their ownership. The
-single-GPU path keeps persistent FLUX parameters, gradients, and AdamW state in
-FP32 while executing the FLUX forward under BF16 autocast. The optimizer loop
-can report the accumulated loss, pre-clip global gradient norm, clipping state,
-learning rate, target count, physical microbatch count, and synchronized step
-time through an optional structured callback. Scalar loss and global gradient
-non-finites fail before an optimizer update. A real CUDA end-to-end precision
-and memory preflight has passed; the complete logging, profiling, and
-checkpoint/resume systems remain subsequent implementation layers.
+The offline `train_single_gpu.py` entrypoint and strict JSON run configuration
+compose these pieces without changing their ownership. The single-GPU path
+keeps persistent FLUX parameters, gradients, and AdamW state in FP32 while
+executing the FLUX forward under BF16 autocast. Scalar loss and global gradient
+non-finites fail before an optimizer update.
+
+The offline entrypoint currently uses the strict schema-v1 JSON configuration.
+Durable run telemetry, profiling, checkpoint writing, resume support, the
+two-buffer scheduler, and distributed execution remain later work.
