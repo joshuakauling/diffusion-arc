@@ -1,6 +1,7 @@
 /data/benchmarks/
 /data/raw/
 /data/evaluation_runs/
+/data/nvarc_data/
 .venv/
 .cache/
 /artifacts/
