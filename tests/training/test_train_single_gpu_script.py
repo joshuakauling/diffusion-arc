@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 
 import torch
 
@@ -17,7 +17,16 @@ from diffusion_arc.training.single_gpu_config import (
     SingleGpuModelConfig,
     SingleGpuTrainingConfig,
 )
-from scripts.train_single_gpu import main, train_from_config
+from scripts.train_single_gpu import _ProfiledModule, main, train_from_config
+
+
+class _AcceptAnyModule(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, *args: object, **kwargs: object) -> tuple[object, ...]:
+        return args + tuple(kwargs.values())
 
 
 def _config(root: Path) -> SingleGpuTrainingConfig:
@@ -64,14 +73,22 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
             device = torch.device("cuda:0")
             models = SimpleNamespace(
                 tokenizer=object(),
-                nvarc_runner=object(),
-                vae_encoder=object(),
-                transformer=object(),
+                nvarc_runner=_AcceptAnyModule(),
+                vae_encoder=_AcceptAnyModule(),
+                transformer=_AcceptAnyModule(),
                 flux_compute_dtype=torch.bfloat16,
             )
             samples = object()
             optimizer = object()
             flow_generator = object()
+            profiler_context = MagicMock()
+            profiler = Mock()
+            profiler_context.__enter__.return_value = profiler
+            profiler_schedule = object()
+
+            def run_training(*_args, **kwargs) -> None:
+                kwargs["on_optimizer_step"](torch.tensor(1.0), 5, 3)
+
             with (
                 patch(
                     "scripts.train_single_gpu.load_single_gpu_training_config",
@@ -99,10 +116,26 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
                     return_value=flow_generator,
                 ) as build_generator,
                 patch(
-                    "scripts.train_single_gpu.run_single_gpu_training"
-                ) as run_training,
+                    "scripts.train_single_gpu.run_single_gpu_training",
+                    side_effect=run_training,
+                ) as run_training_mock,
+                patch(
+                    "scripts.train_single_gpu.torch.profiler.schedule",
+                    return_value=profiler_schedule,
+                ) as build_schedule,
+                patch(
+                    "scripts.train_single_gpu.torch.profiler.profile",
+                    return_value=profiler_context,
+                ) as build_profiler,
+                patch(
+                    "scripts.train_single_gpu.PROFILER_OUTPUT_ROOT",
+                    root / "profiling",
+                ),
             ):
                 train_from_config(config_path)
+
+                export_trace = build_profiler.call_args.kwargs["on_trace_ready"]
+                export_trace(profiler)
 
         load_config.assert_called_once_with(config_path)
         prepare_device.assert_called_once_with(config)
@@ -114,19 +147,72 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
             transformer=models.transformer,
         )
         build_generator.assert_called_once_with(config, device=device)
-        run_training.assert_called_once_with(
-            samples,
-            nvarc_runner=models.nvarc_runner,
-            vae_encoder=models.vae_encoder,
-            transformer=models.transformer,
-            optimizer=optimizer,
-            flux_compute_dtype=torch.bfloat16,
-            max_optimizer_steps=7,
-            optimizer_batch_size=5,
-            flux_microbatch_size=2,
-            min_context_pairs_before_target=2,
-            generator=flow_generator,
+        build_schedule.assert_called_once_with(
+            wait=2,
+            warmup=2,
+            active=3,
+            repeat=1,
         )
+        build_profiler.assert_called_once_with(
+            activities=(
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ),
+            schedule=profiler_schedule,
+            on_trace_ready=ANY,
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+        )
+        run_training_mock.assert_called_once()
+        training_args, training_kwargs = run_training_mock.call_args
+        self.assertEqual(training_args, (samples,))
+        self.assertEqual(training_kwargs["optimizer"], optimizer)
+        self.assertEqual(training_kwargs["flux_compute_dtype"], torch.bfloat16)
+        self.assertEqual(training_kwargs["max_optimizer_steps"], 7)
+        self.assertEqual(training_kwargs["optimizer_batch_size"], 5)
+        self.assertEqual(training_kwargs["flux_microbatch_size"], 2)
+        self.assertEqual(training_kwargs["min_context_pairs_before_target"], 2)
+        self.assertEqual(training_kwargs["generator"], flow_generator)
+        self.assertIsNotNone(training_kwargs["on_optimizer_step"])
+        expected_profiled_modules = (
+            ("nvarc_runner", models.nvarc_runner, "prepare/nvarc"),
+            ("vae_encoder", models.vae_encoder, "prepare/vae"),
+            ("transformer", models.transformer, "train/flux_forward"),
+        )
+        for argument_name, wrapped_module, range_name in expected_profiled_modules:
+            profiled_module = training_kwargs[argument_name]
+            self.assertIsInstance(profiled_module, _ProfiledModule)
+            self.assertIs(profiled_module.wrapped_module, wrapped_module)
+            self.assertEqual(profiled_module.range_name, range_name)
+        profiler.step.assert_called_once_with()
+        profiler.export_chrome_trace.assert_called_once_with(
+            str(root / "profiling/training/trace.json")
+        )
+
+    def test_profiled_module_records_its_named_forward_range(self) -> None:
+        module = _AcceptAnyModule()
+        profiled_module = _ProfiledModule(module, range_name="prepare/nvarc")
+        range_context = MagicMock()
+
+        with patch(
+            "scripts.train_single_gpu.torch.profiler.record_function",
+            return_value=range_context,
+        ) as record_function:
+            result = profiled_module("input", flag="value")
+
+        self.assertEqual(result, ("input", "value"))
+        record_function.assert_called_once_with("prepare/nvarc")
+        range_context.__enter__.assert_called_once_with()
+        range_context.__exit__.assert_called_once()
+        self.assertEqual(
+            tuple(profiled_module.parameters()),
+            tuple(module.parameters()),
+        )
+        profiled_module.eval()
+        self.assertFalse(module.training)
+        profiled_module.train()
+        self.assertTrue(module.training)
 
     def test_cli_accepts_only_the_required_config_option(self) -> None:
         with patch("scripts.train_single_gpu.train_from_config") as train:
