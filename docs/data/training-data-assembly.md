@@ -4,14 +4,14 @@
 
 This document describes the implemented dataset contract and the auxiliary
 CPU-side packed-collation path. The packed path is useful for diagnostics,
-tests, and future source batching, but it is not the input path used by the
+tests, and alternate source batching, but it is not the input path used by the
 current `scripts/train_single_gpu.py` entrypoint.
 
-The current trainer instead configures `DataLoader(batch_size=None)`, consumes
-one `ArcTokenizedTrainingSample` at a time, and passes it directly to
-`prepare_flux_inputs`. See the
-[training system overview](../training/README.md) for that end-to-end runtime
-path.
+The current trainer instead configures `DataLoader(batch_size=None)` and groups
+consecutive `ArcTokenizedTrainingSample` items inside the training loop. It
+passes each fixed source batch to `prepare_flux_inputs_batch`; the auxiliary
+collator still does not participate. See the [training system
+overview](../training/README.md) for that end-to-end runtime path.
 
 The project scope and milestones in the root [`README.md`](../../README.md) remain
 authoritative. The upstream loading, augmentation, prompt, and tokenization
@@ -42,7 +42,7 @@ split config + augmentation keys + raw ARC tasks
 
 This is a host transport contract. It prepares aligned CPU tensors but does
 not define how NVARC or FLUX execute them on an accelerator. The current
-single-GPU runner follows the separate single-sample path described above.
+single-GPU runner follows the separate fixed-source-batch path described above.
 
 The implemented dataset and collator live in
 [`src/diffusion_arc/training`](../../src/diffusion_arc/training). Their tensor
@@ -57,7 +57,8 @@ contract lives in
 | PyTorch `DataLoader` | Selecting dataset indices, shuffle/sampler policy, and workers; optionally forming source-level batches and invoking a collator | ARC semantics, target selection, packed tensor meaning |
 | `TrainingCollator` | Assembling trusted tokenized samples by selecting suffix targets, truncating sources, rendering target canvases, and building the packed tensor contract and metadata sidecar | Validating alternate sample producers, sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
 | `NvarcBatchRunner` | Executing trusted packed sources by right-padding, constructing the attention mask, running one frozen batch forward, and returning one independent unpadded hidden-state tensor per source | Revalidating stable checkpoint contracts, targets, target-prefix derivation, target images, VAE or FLUX execution |
-| `prepare_flux_inputs` | Selecting eligible targets for one `ArcTokenizedTrainingSample`, executing its frozen NVARC and VAE preparation once, and creating shared-state `FluxInput` objects | Buffer selection, FLUX execution, flow sampling, loss normalization |
+| `prepare_flux_inputs_batch` | Selecting eligible targets for consecutive source samples, packing one NVARC source batch, chunking target images into bounded VAE batches, and creating source-major shared-state `FluxInput` objects | Lookahead selection, length bucketing, buffer selection, FLUX execution, flow sampling, loss normalization |
+| `prepare_flux_inputs` | Preserving the original one-source, one-VAE-call preparation interface through the batched implementation | Source scheduling, VAE chunk configuration, FLUX execution |
 | `NvarcSequenceState` | Owning one source hidden-state tensor and tracking the exact prefix ends that still require it | Prefix padding, target tensors, FLUX execution |
 | `pad_flux_text_prefixes` | Right-padding an ordered sequence of already selected exact NVARC prefixes and constructing FLUX text position IDs and the text key mask | Prefix selection, ownership, target images, VAE encoding, FLUX execution |
 | `build_flux_microbatch` | Copying exact prefixes into padded text inputs, stacking clean latents, generating fixed image position IDs, and committing prefix consumption only after successful construction | Flow sampling, joint-mask construction, FLUX execution, loss normalization |
@@ -193,9 +194,9 @@ sampling remain explicit loader or runner decisions.
 
 The current single-GPU entrypoint deliberately uses `batch_size=None` and no
 `collate_fn`, so each loader item remains one `ArcTokenizedTrainingSample`.
-That sample is sent directly to `prepare_flux_inputs`; neither
-`TrainingCollator` nor `PackedTrainingBatch` participates in the current
-training loop.
+The training loop groups those items into fixed consecutive source batches and
+sends them to `prepare_flux_inputs_batch`; neither `TrainingCollator` nor
+`PackedTrainingBatch` participates in the current training loop.
 
 The current returned batch uses custom dataclasses without a `pin_memory()`
 method. Consequently, `DataLoader(pin_memory=True)` does not automatically pin
@@ -354,10 +355,11 @@ are documented in
 [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
 
 The current single-GPU scheduling path is separate from that packed-collation
-contract. It operates on one `ArcTokenizedTrainingSample` at a time through
-`prepare_flux_inputs`. It determines eligible targets before model execution,
-sends the retained complete source through NVARC once, encodes all eligible
-targets through the VAE, and creates one `FluxInput` per target. Those inputs
+contract. It groups consecutive `ArcTokenizedTrainingSample` items and passes
+them to `prepare_flux_inputs_batch`. Eligibility is determined before model
+execution, retained complete sources run through one padded NVARC batch, and
+eligible target images run through bounded VAE batches. The function creates
+one `FluxInput` per target in source-major order. Inputs from the same source
 share one `NvarcSequenceState`; each stores only its relative `prefix_end` and
 clean latent alongside the shared state reference.
 

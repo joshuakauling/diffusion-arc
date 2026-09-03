@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-SINGLE_GPU_TRAINING_SCHEMA_VERSION = 1
+SINGLE_GPU_TRAINING_SCHEMA_VERSION = 2
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -44,6 +45,8 @@ class SingleGpuLoopConfig:
     optimizer_batch_size: int
     flux_microbatch_size: int
     min_context_pairs_before_target: int
+    nvarc_source_batch_size: int = 1
+    vae_microbatch_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,7 @@ def load_single_gpu_training_config(
         name="config",
     )
     schema_version = _integer(payload["schema_version"], name="schema_version")
-    if schema_version != SINGLE_GPU_TRAINING_SCHEMA_VERSION:
+    if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported schema_version: {schema_version!r}")
 
     seed = _integer(payload["seed"], name="seed")
@@ -174,12 +177,28 @@ def load_single_gpu_training_config(
         "flux_microbatch_size",
         "min_context_pairs_before_target",
     }
+    if schema_version == 2:
+        loop_fields.update(
+            {
+                "nvarc_source_batch_size",
+                "vae_microbatch_size",
+            }
+        )
     _fields(loop_payload, loop_fields, name="loop")
     loop_values = {
         field: _positive_integer(loop_payload[field], name=f"loop.{field}")
         for field in loop_fields
     }
-    loop = SingleGpuLoopConfig(**loop_values)
+    loop = SingleGpuLoopConfig(
+        max_optimizer_steps=loop_values["max_optimizer_steps"],
+        optimizer_batch_size=loop_values["optimizer_batch_size"],
+        flux_microbatch_size=loop_values["flux_microbatch_size"],
+        min_context_pairs_before_target=loop_values[
+            "min_context_pairs_before_target"
+        ],
+        nvarc_source_batch_size=loop_values.get("nvarc_source_batch_size", 1),
+        vae_microbatch_size=loop_values.get("vae_microbatch_size"),
+    )
 
     optimizer_payload = _object(payload["optimizer"], name="optimizer")
     _fields(

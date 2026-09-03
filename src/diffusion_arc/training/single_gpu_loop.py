@@ -7,6 +7,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import islice
 
 import torch
 from torch import Tensor, nn
@@ -16,7 +17,7 @@ from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
-from .flux_input import FluxInput, prepare_flux_inputs
+from .flux_input import FluxInput, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
 
@@ -161,6 +162,8 @@ def run_single_gpu_training(
     optimizer_batch_size: int,
     flux_microbatch_size: int = 1,
     min_context_pairs_before_target: int = 1,
+    nvarc_source_batch_size: int = 1,
+    vae_microbatch_size: int | None = None,
     generator: torch.Generator | None = None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None = None,
     max_grad_norm: float | None = None,
@@ -168,18 +171,28 @@ def run_single_gpu_training(
 ) -> None:
     """Train from one sample stream until its end or an exact step limit.
 
-    A FIFO queue holds prepared targets until a complete optimizer batch is
-    available. Stream exhaustion flushes one smaller tail batch. Reaching
-    ``max_optimizer_steps`` stops immediately without consuming that tail.
+    Consecutive source sequences are prepared in fixed NVARC batches without
+    reordering. A FIFO queue holds their targets until a complete optimizer
+    batch is available. Stream exhaustion flushes one smaller tail batch.
+    Reaching ``max_optimizer_steps`` stops without consuming that tail.
     """
 
     _require_positive_integer(max_optimizer_steps, name="max_optimizer_steps")
     _require_positive_integer(optimizer_batch_size, name="optimizer_batch_size")
     _require_positive_integer(flux_microbatch_size, name="flux_microbatch_size")
     _require_positive_integer(
+        nvarc_source_batch_size,
+        name="nvarc_source_batch_size",
+    )
+    _require_positive_integer(
         min_context_pairs_before_target,
         name="min_context_pairs_before_target",
     )
+    if vae_microbatch_size is not None:
+        _require_positive_integer(
+            vae_microbatch_size,
+            name="vae_microbatch_size",
+        )
     if generator is not None and not isinstance(generator, torch.Generator):
         raise TypeError("generator must be a torch.Generator")
     if on_optimizer_step is not None and not callable(on_optimizer_step):
@@ -201,14 +214,21 @@ def run_single_gpu_training(
     transformer.train()
     flux_input_buffer: deque[FluxInput] = deque()
     optimizer_steps = 0
+    training_iterator = iter(training_samples)
+    stream_exhausted = False
 
-    for sample in training_samples:
+    while optimizer_steps < max_optimizer_steps:
+        source_batch = tuple(islice(training_iterator, nvarc_source_batch_size))
+        if not source_batch:
+            stream_exhausted = True
+            break
         flux_input_buffer.extend(
-            prepare_flux_inputs(
-                sample,
+            prepare_flux_inputs_batch(
+                source_batch,
                 nvarc_runner=nvarc_runner,
                 vae_encoder=vae_encoder,
                 min_context_pairs_before_target=min_context_pairs_before_target,
+                vae_microbatch_size=vae_microbatch_size,
             )
         )
 
@@ -233,21 +253,18 @@ def run_single_gpu_training(
             )
             optimizer_steps += 1
 
-        if optimizer_steps == max_optimizer_steps:
-            break
-    else:
-        if flux_input_buffer and optimizer_steps < max_optimizer_steps:
-            _train_optimizer_batch(
-                tuple(flux_input_buffer),
-                transformer=transformer,
-                optimizer=optimizer,
-                flux_compute_dtype=flux_compute_dtype,
-                flux_microbatch_size=flux_microbatch_size,
-                generator=generator,
-                on_optimizer_step=on_optimizer_step,
-                max_grad_norm=max_grad_norm,
-                on_optimizer_step_metrics=on_optimizer_step_metrics,
-            )
+    if stream_exhausted and flux_input_buffer and optimizer_steps < max_optimizer_steps:
+        _train_optimizer_batch(
+            tuple(flux_input_buffer),
+            transformer=transformer,
+            optimizer=optimizer,
+            flux_compute_dtype=flux_compute_dtype,
+            flux_microbatch_size=flux_microbatch_size,
+            generator=generator,
+            on_optimizer_step=on_optimizer_step,
+            max_grad_norm=max_grad_norm,
+            on_optimizer_step_metrics=on_optimizer_step_metrics,
+        )
 
 
 __all__ = ["OptimizerStepMetrics", "run_single_gpu_training"]

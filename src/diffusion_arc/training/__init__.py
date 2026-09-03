@@ -15,6 +15,7 @@ from .flux_input import (
     FluxInput,
     NvarcSequenceState,
     prepare_flux_inputs,
+    prepare_flux_inputs_batch,
 )
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import FluxMicrobatch, build_flux_microbatch
@@ -34,6 +35,7 @@ __all__ = [
     "compute_flux_microbatch_loss",
     "evaluate_fixed_flow_probe",
     "prepare_flux_inputs",
+    "prepare_flux_inputs_batch",
     "prepare_flow_probe_microbatch",
     "run_single_gpu_training",
 ]

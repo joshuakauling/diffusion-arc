@@ -31,8 +31,8 @@ below. Frozen VAE target encoding is omitted from the diagram for clarity.
 
 | Area | Current single-GPU baseline | Target scheduler shown above |
 | --- | --- | --- |
-| Source scheduling | Read one source at a time from an ordered `DataLoader` stream. | Keep a bounded lookahead of source sequences. |
-| NVARC batching | Run one source per NVARC forward. | Group similar-length sources into one NVARC batch. |
+| Source scheduling | Read an ordered `DataLoader` stream in fixed consecutive source batches. | Keep a bounded lookahead of source sequences. |
+| NVARC batching | Run up to the configured number of consecutive sources per padded NVARC forward. | Group similar-length sources into one NVARC batch. |
 | Target buffering | Append prepared targets to a private FIFO queue. | Keep a bounded pool of ready targets from several encoded sources. |
 | Optimizer batch | Take the next targets in FIFO order. | Select ready targets with a configured deterministic policy. |
 | FLUX microbatches | Split the optimizer batch into contiguous chunks. | Group targets with similar prefix lengths inside the fixed optimizer batch. |
@@ -43,8 +43,11 @@ exactly one AdamW update for each optimizer batch.
 The current entrypoint is
 [`scripts/train_single_gpu.py`](../../scripts/train_single_gpu.py). Its
 `DataLoader` uses `batch_size=None`, so the runner receives one
-`ArcTokenizedTrainingSample` at a time. It does not invoke `TrainingCollator` or
-construct `PackedTrainingBatch` objects.
+`ArcTokenizedTrainingSample` at a time. The training loop groups consecutive
+items according to `nvarc_source_batch_size`; this does not invoke
+`TrainingCollator` or construct `PackedTrainingBatch` objects. Eligible target
+images from that group are encoded in chunks bounded by
+`vae_microbatch_size`.
 
 ## Model boundaries
 
@@ -124,9 +127,11 @@ remain explicit smoke or preflight tests.
 ## Current boundaries
 
 - Training is single-process and single-GPU; DDP and FSDP2 are not implemented.
-- The length-aware two-buffer scheduler shown above is not implemented; the
-  current runner remains the FIFO baseline.
-- The current configuration is schema v1. Durable telemetry, profiling,
-  checkpoint writing, and resume support remain future work.
+- The length-aware two-buffer scheduler shown above is not implemented; fixed
+  consecutive source batching remains part of the FIFO baseline.
+- Training configuration schema v2 adds explicit NVARC source and VAE physical
+  batch sizes. Schema v1 remains supported as the original single-source
+  compatibility mode.
+- Durable telemetry, checkpoint writing, and resume support remain future work.
 - The packed `TrainingCollator` path is not used by the current training
   entrypoint.

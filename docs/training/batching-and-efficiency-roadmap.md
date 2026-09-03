@@ -53,17 +53,18 @@ Buffer capacity and batch capacity are separate settings. Buffer capacity
 limits waiting state and determines how much choice bucketing has. Batch
 capacity limits one execution. For example, 32 sequences may wait in the
 `NvarcInputBuffer` while only four similar-length sequences form the next
-`NvarcBatch`. The NVARC buffer is unnecessary while `NvarcBatch` size remains
-one and no lookahead selection is used. Likewise, FLUX buffer capacity limits
-staged inputs, FLUX microbatch capacity limits one forward, and optimizer batch
-size defines one parameter update.
+`NvarcBatch`. The current fixed consecutive batching needs no separate NVARC
+lookahead buffer; such a buffer becomes necessary only when a planner selects
+sources by length or cost. Likewise, FLUX buffer capacity limits staged inputs,
+FLUX microbatch capacity limits one forward, and optimizer batch size defines
+one parameter update.
 
 ## Object and execution model
 
 ```text
-ArcTokenizedTrainingSample
+consecutive ArcTokenizedTrainingSample items
     |
-    | prepare_flux_inputs(...)
+    | prepare_flux_inputs_batch(...)
     |
     +-- input_ids + sequence_offsets
     |       -> NvarcBatchRunner
@@ -94,10 +95,10 @@ ArcTokenizedTrainingSample
               flow sampling + FLUX forward/backward
 ```
 
-Preparation and FLUX training interleave throughout the run. The initial FIFO
+Preparation and FLUX training interleave throughout the run. The fixed-batch FIFO
 queue is in-memory state owned by `run_single_gpu_training`; it is not an
 offline cache and does not persist across runs. A separate `NvarcInputBuffer`
-is deferred until lookahead bucketing is implemented.
+remains deferred until lookahead bucketing is implemented.
 
 ## Target two-buffer scheduler
 
@@ -139,12 +140,13 @@ reference against which it must be compared.
 
 ## Initial single-GPU scheduling policy
 
-The first implementation is consumer-first and uses the simplest physical
-execution:
+The implemented consumer-first baseline uses fixed consecutive source batches
+without length-aware selection:
 
 ```text
 Input source        = one DataLoader or dataset sample stream
-NvarcBatch size     = 1 sequence
+NvarcBatch size     = configured consecutive source count S
+VAE batch size      = configured physical target count V
 FluxMicrobatch size = configured physical target count M
 OptimizerBatch size = configured logical target count B
 Run length          = exact max_optimizer_steps
@@ -154,8 +156,10 @@ The trainer always prefers a parameter update over producing more staged
 inputs:
 
 ```python
-for sample in training_samples:
-    flux_input_buffer.extend(prepare_flux_inputs(sample))
+for source_batch in consecutive_batches(training_samples, size=S):
+    flux_input_buffer.extend(
+        prepare_flux_inputs_batch(source_batch, vae_microbatch_size=V)
+    )
 
     while len(flux_input_buffer) >= optimizer_batch_size:
         train_one_optimizer_batch()
@@ -170,19 +174,21 @@ if sample_stream_exhausted and flux_input_buffer:
 ```
 
 The sample stream normally comes from a DataLoader over `ArcTrainingDataset`.
-Each sample runs through one frozen NVARC forward and the required frozen VAE
-work, then appends all of its eligible inputs to the internal FIFO queue. The
-loop immediately consumes every available complete `OptimizerBatch` before it
-requests another sample.
+The loop collects up to `S` consecutive samples, removes ineligible sources,
+runs the retained sources through one frozen NVARC forward, and encodes their
+targets through VAE chunks of at most `V`. It then appends all eligible inputs
+in source-major order to the internal FIFO queue. The loop immediately consumes
+every available complete `OptimizerBatch` before it requests another source
+batch.
 
 For example, let `S1`, `S2`, and `S3` produce two, three, and one FLUX inputs,
-respectively. With optimizer batch size four and FLUX microbatch size one:
+respectively. With NVARC source batch size two, optimizer batch size four, and
+FLUX microbatch size one:
 
 | Action | Remaining sample stream | Internal `FluxInput` queue |
 | --- | --- | --- |
 | Initial state | `S1, S2, S3` | empty |
-| Prepare `S1` | `S2, S3` | `S1-T1, S1-T2` |
-| Prepare `S2` | `S3` | `S1-T1, S1-T2, S2-T1, S2-T2, S2-T3` |
+| Prepare source batch `S1, S2` | `S3` | `S1-T1, S1-T2, S2-T1, S2-T2, S2-T3` |
 | Select update | `S3` | retain `S2-T3` |
 
 The selected `OptimizerBatch` is
@@ -250,9 +256,9 @@ The correctness oracle executes every conditioning prefix separately and
 without padding through NVARC. It establishes the expected downstream FLUX
 output, loss, gradients, and parameter update.
 
-The intended optimized path executes each complete retained NVARC sequence
-once, stores its unpadded hidden states, and lets all inputs from that
-sequence reference their `prefix_end`. Full-sequence reuse is accepted only if
+The implemented fixed-batch path executes each complete retained NVARC sequence
+once, stores its unpadded hidden states, and lets all inputs from that sequence
+reference their `prefix_end`. Full-sequence reuse is accepted only if
 it passes a predefined real-checkpoint comparison against the exact-prefix
 oracle under the selected precision and attention backend.
 
@@ -304,7 +310,7 @@ that at least one complete optimizer batch can be formed within those limits.
 An unusually large single sequence needs an explicit one-source oversize rule;
 it must not deadlock the producer and consumer. The current private deque has
 no separately configurable capacity because preparation and FIFO consumption
-interleave after every source.
+interleave after every fixed source batch.
 
 ## FLUX execution and loss normalization
 
@@ -400,23 +406,29 @@ model work. None of these choices may appear as a silent runtime fallback.
 
 ## Current implementation boundary
 
-The repository implements the independent `NvarcBatchOutput` tensors,
-single-source `prepare_flux_inputs`, explicit `NvarcSequenceState` ownership,
-pure `pad_flux_text_prefixes`, and transactional `build_flux_microbatch`
-assembly. `compute_flux_microbatch_loss` composes flow sampling, joint-mask
+The repository implements independent `NvarcBatchOutput` tensors, fixed
+consecutive source preparation through `prepare_flux_inputs_batch`, bounded VAE
+microbatches, explicit `NvarcSequenceState` ownership, pure
+`pad_flux_text_prefixes`, and transactional `build_flux_microbatch` assembly.
+`compute_flux_microbatch_loss` composes flow sampling, joint-mask
 construction, one trainable FLUX forward, and the unscaled velocity loss. The
 step-limited `run_single_gpu_training` loop consumes an
 `ArcTokenizedTrainingSample` stream, maintains its private FIFO queue, forms
 optimizer and FLUX microbatches, scales losses, accumulates gradients, performs
 optimizer updates, flushes only a true stream tail, and exposes an optional
 backend-neutral update callback. A separate `NvarcInputBuffer` remains
-unnecessary while NVARC batch size is one and no lookahead bucketing is used.
-The offline `train_single_gpu.py` entrypoint and strict JSON run configuration
-compose these pieces without changing their ownership. The single-GPU path
+unnecessary while fixed consecutive batches are used without lookahead
+bucketing. The offline `train_single_gpu.py` entrypoint and strict JSON run
+configuration compose these pieces without changing their ownership. The single-GPU path
 keeps persistent FLUX parameters, gradients, and AdamW state in FP32 while
 executing the FLUX forward under BF16 autocast. Scalar loss and global gradient
 non-finites fail before an optimizer update.
 
-The offline entrypoint currently uses the strict schema-v1 JSON configuration.
-Durable run telemetry, profiling, checkpoint writing, resume support, the
-two-buffer scheduler, and distributed execution remain later work.
+The offline entrypoint supports strict schema-v1 configurations as the original
+single-source compatibility mode. Schema v2 adds explicit
+`nvarc_source_batch_size` and `vae_microbatch_size` settings. This fixed batching
+was intentionally pulled forward without changing the remaining milestone
+order; its real-checkpoint performance and numerical acceptance still require
+the planned measurement gate. Durable run telemetry, checkpoint writing,
+resume support, the two-buffer scheduler, and distributed execution remain
+later work.

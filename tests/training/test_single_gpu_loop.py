@@ -37,7 +37,13 @@ class RecordingNvarcRunner(nn.Module):
             input_ids.numel() * 4,
             dtype=torch.float32,
         ).reshape(input_ids.numel(), 4)
-        return NvarcBatchOutput(sequence_hidden_states=(hidden_states,))
+        offsets = sequence_offsets.tolist()
+        return NvarcBatchOutput(
+            sequence_hidden_states=tuple(
+                hidden_states[start:end].clone()
+                for start, end in zip(offsets, offsets[1:])
+            )
+        )
 
 
 class NumberedVaeEncoder(nn.Module):
@@ -190,6 +196,40 @@ class SingleGpuTrainingTests(unittest.TestCase):
         torch.testing.assert_close(updates[0][0], torch.tensor(1.5))
         self.assertEqual(updates[0][1:], (2, 2))
 
+    def test_batches_eight_sources_and_uses_bounded_vae_batches(self) -> None:
+        nvarc = RecordingNvarcRunner()
+        vae = NumberedVaeEncoder()
+        transformer = ScalarTransformer()
+        optimizer = torch.optim.SGD(transformer.parameters(), lr=0.0)
+        recording_loss = RecordingLoss()
+
+        with patch(
+            "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
+            side_effect=recording_loss,
+        ):
+            run_single_gpu_training(
+                tuple(_sample(1) for _ in range(10)),
+                nvarc_runner=nvarc,  # type: ignore[arg-type]
+                vae_encoder=vae,  # type: ignore[arg-type]
+                transformer=transformer,
+                optimizer=optimizer,
+                flux_compute_dtype=torch.bfloat16,
+                max_optimizer_steps=3,
+                optimizer_batch_size=4,
+                flux_microbatch_size=2,
+                nvarc_source_batch_size=8,
+                vae_microbatch_size=8,
+            )
+
+        self.assertEqual(len(nvarc.calls), 2)
+        self.assertEqual(nvarc.calls[0][1].tolist(), list(range(0, 17, 2)))
+        self.assertEqual(nvarc.calls[1][1].tolist(), [0, 2, 4])
+        self.assertEqual([call.shape[0] for call in vae.calls], [8, 2])
+        self.assertEqual(
+            recording_loss.target_values,
+            [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0), (9.0, 10.0)],
+        )
+
     def test_reports_and_clips_accumulated_gradient_before_update(self) -> None:
         nvarc = RecordingNvarcRunner()
         vae = NumberedVaeEncoder()
@@ -292,6 +332,8 @@ class SingleGpuTrainingTests(unittest.TestCase):
             "optimizer_batch_size": 1,
             "flux_microbatch_size": 1,
             "min_context_pairs_before_target": 1,
+            "nvarc_source_batch_size": 1,
+            "vae_microbatch_size": 1,
         }
 
         for name in base_arguments:

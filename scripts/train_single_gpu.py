@@ -124,6 +124,8 @@ def train_from_config(config_path: str | Path) -> None:
             min_context_pairs_before_target=(
                 config.loop.min_context_pairs_before_target
             ),
+            nvarc_source_batch_size=config.loop.nvarc_source_batch_size,
+            vae_microbatch_size=config.loop.vae_microbatch_size,
             generator=flow_generator,
             on_optimizer_step=lambda *_: profiler.step(),
         )

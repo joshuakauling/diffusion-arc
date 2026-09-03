@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -23,6 +24,7 @@ from diffusion_arc.training.flux_input import (
     FluxInput,
     NvarcSequenceState,
     prepare_flux_inputs,
+    prepare_flux_inputs_batch,
 )
 
 
@@ -41,8 +43,12 @@ class RecordingNvarcRunner(nn.Module):
             input_ids.numel() * 8,
             dtype=torch.float32,
         ).reshape(input_ids.numel(), 8)
+        offsets = sequence_offsets.tolist()
         return NvarcBatchOutput(
-            sequence_hidden_states=(hidden_states,),
+            sequence_hidden_states=tuple(
+                hidden_states[start:end].clone()
+                for start, end in zip(offsets, offsets[1:])
+            ),
         )
 
 
@@ -50,6 +56,7 @@ class RecordingVaeEncoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[torch.Tensor] = []
+        self.next_target_value = 1
 
     def forward(self, target_images: torch.Tensor) -> torch.Tensor:
         self.calls.append(target_images.clone())
@@ -58,11 +65,12 @@ class RecordingVaeEncoder(nn.Module):
             tuple(
                 torch.full(
                     (TARGET_LATENT_TOKEN_COUNT, TARGET_LATENT_CHANNELS),
-                    float(target_index + 1),
+                    float(self.next_target_value + target_index),
                 )
                 for target_index in range(target_count)
             )
         )
+        self.next_target_value += target_count
         return clean_latents
 
 
@@ -167,6 +175,90 @@ class FluxInputPreparationTests(unittest.TestCase):
         )
 
         self.assertEqual(inputs, ())
+        self.assertEqual(nvarc.calls, [])
+        self.assertEqual(vae.calls, [])
+
+    def test_batches_eligible_sources_and_chunks_vae_targets_in_source_order(
+        self,
+    ) -> None:
+        first = _sequence()
+        second = replace(
+            _sequence(),
+            input_ids=(1, 2, 3, 4, 5, 6, 7),
+            prefix_token_ends=(3, 6),
+            target_grids=(((4,),), ((5,),)),
+        )
+        ineligible = replace(
+            _sequence(),
+            input_ids=(8, 9, 10),
+            prefix_token_ends=(2,),
+            target_grids=(((6,),),),
+        )
+        nvarc = RecordingNvarcRunner()
+        vae = RecordingVaeEncoder()
+
+        inputs = prepare_flux_inputs_batch(
+            (first, ineligible, second),
+            nvarc_runner=nvarc,  # type: ignore[arg-type]
+            vae_encoder=vae,  # type: ignore[arg-type]
+            min_context_pairs_before_target=2,
+            vae_microbatch_size=2,
+        )
+
+        self.assertEqual(len(nvarc.calls), 1)
+        packed_ids, offsets = nvarc.calls[0]
+        self.assertEqual(
+            packed_ids.tolist(),
+            [*first.input_ids[:8], *second.input_ids[:6]],
+        )
+        self.assertEqual(offsets.tolist(), [0, 8, 14])
+        self.assertEqual([call.shape[0] for call in vae.calls], [2, 1])
+        torch.testing.assert_close(
+            vae.calls[0][0],
+            render_grid_canvas(first.target_grids[1]),
+        )
+        torch.testing.assert_close(
+            vae.calls[1][0],
+            render_grid_canvas(second.target_grids[1]),
+        )
+
+        self.assertEqual([item.prefix_end for item in inputs], [5, 8, 6])
+        self.assertEqual(
+            [float(item.clean_latent[0, 0]) for item in inputs],
+            [1.0, 2.0, 3.0],
+        )
+        self.assertIs(inputs[0].nvarc_sequence_state, inputs[1].nvarc_sequence_state)
+        self.assertIsNot(
+            inputs[0].nvarc_sequence_state,
+            inputs[2].nvarc_sequence_state,
+        )
+        self.assertEqual(inputs[0].nvarc_sequence_state.sequence_length, 8)
+        self.assertEqual(inputs[2].nvarc_sequence_state.sequence_length, 6)
+
+    def test_batched_preparation_rejects_empty_sources_and_invalid_vae_size(
+        self,
+    ) -> None:
+        nvarc = RecordingNvarcRunner()
+        vae = RecordingVaeEncoder()
+
+        with self.assertRaisesRegex(ValueError, "sequences"):
+            prepare_flux_inputs_batch(
+                (),
+                nvarc_runner=nvarc,  # type: ignore[arg-type]
+                vae_encoder=vae,  # type: ignore[arg-type]
+            )
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "vae_microbatch_size",
+            ):
+                prepare_flux_inputs_batch(
+                    (_sequence(),),
+                    nvarc_runner=nvarc,  # type: ignore[arg-type]
+                    vae_encoder=vae,  # type: ignore[arg-type]
+                    vae_microbatch_size=value,  # type: ignore[arg-type]
+                )
+
         self.assertEqual(nvarc.calls, [])
         self.assertEqual(vae.calls, [])
 

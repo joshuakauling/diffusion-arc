@@ -303,13 +303,14 @@ loader = DataLoader(
 ```
 
 Each loader item therefore remains one `ArcTokenizedTrainingSample`. The
-single-GPU loop sends that sample to `prepare_flux_inputs`, which performs the
-frozen NVARC and VAE preparation and appends the resulting targets to its
-internal `FluxInput` queue. The complete runtime path is documented in the
-[training system overview](../training/README.md).
+single-GPU loop groups consecutive items into a configured source batch and
+sends that group to `prepare_flux_inputs_batch`. That function performs batched
+frozen NVARC preparation, bounded VAE preparation, and appends the resulting
+targets in source-major order to the internal `FluxInput` queue. The complete
+runtime path is documented in the [training system overview](../training/README.md).
 
 `TrainingCollator` and `PackedTrainingBatch` provide a separate implemented
-host-side contract for diagnostics, tests, and future source batching. They are
+host-side contract for diagnostics, tests, and alternate source batching. They are
 not invoked by the current single-GPU entrypoint. Their suffix-target
 selection, packed tensor fields, metadata sidecar, CPU boundary, and
 responsibility split are documented in

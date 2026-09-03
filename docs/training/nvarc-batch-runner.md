@@ -142,12 +142,12 @@ Keeping this operation separate ensures that NVARC always processes each
 collated complete source once and cannot acquire dependencies on target images
 or FLUX execution policy.
 
-The initial single-source preparation path wraps the returned source tensor in
-`NvarcSequenceState`. Each `FluxInput` stores only a reference to that owner and
-its relative `prefix_end`. `build_flux_microbatch` obtains exact prefix views,
-and the pure `pad_flux_text_prefixes` operation copies them into the independent
-padded FLUX text tensor. Their contracts and remaining real-model checks are
-documented in
+The fixed source-batch preparation path wraps every returned source tensor in
+its own `NvarcSequenceState`. Each `FluxInput` stores only a reference to its
+source owner and its relative `prefix_end`. `build_flux_microbatch` obtains
+exact prefix views, and the pure `pad_flux_text_prefixes` operation copies them
+into the independent padded FLUX text tensor. Their contracts and remaining
+real-model checks are documented in
 [`flux-text-conditioning.md`](flux-text-conditioning.md).
 
 ## Measured real-checkpoint preflight and interpretation

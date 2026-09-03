@@ -12,7 +12,7 @@ from diffusion_arc.training.single_gpu_config import load_single_gpu_training_co
 
 def _payload() -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "seed": 17,
         "device": "cuda:1",
         "models": {
@@ -34,6 +34,8 @@ def _payload() -> dict:
             "optimizer_batch_size": 4,
             "flux_microbatch_size": 2,
             "min_context_pairs_before_target": 1,
+            "nvarc_source_batch_size": 8,
+            "vae_microbatch_size": 8,
         },
         "optimizer": {
             "learning_rate": 1e-5,
@@ -69,6 +71,13 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
             repository_root / "data/splits/overfitting_run_1",
         )
 
+        profiling = load_single_gpu_training_config(
+            repository_root
+            / "configs/training/profiling/single_gpu_torch_profile.json"
+        )
+        self.assertEqual(profiling.loop.nvarc_source_batch_size, 8)
+        self.assertEqual(profiling.loop.vae_microbatch_size, 8)
+
     def test_loads_valid_config_and_resolves_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
@@ -88,7 +97,23 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
             (directory / "data/split").resolve(),
         )
         self.assertEqual(config.loop.optimizer_batch_size, 4)
+        self.assertEqual(config.loop.nvarc_source_batch_size, 8)
+        self.assertEqual(config.loop.vae_microbatch_size, 8)
         self.assertEqual(config.optimizer.beta2, 0.99)
+
+    def test_loads_schema_v1_with_original_single_source_preparation(self) -> None:
+        payload = _payload()
+        payload["schema_version"] = 1
+        del payload["loop"]["nvarc_source_batch_size"]
+        del payload["loop"]["vae_microbatch_size"]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = load_single_gpu_training_config(
+                _write_config(Path(temporary_directory), payload)
+            )
+
+        self.assertEqual(config.loop.nvarc_source_batch_size, 1)
+        self.assertIsNone(config.loop.vae_microbatch_size)
 
     def test_rejects_missing_and_extra_fields(self) -> None:
         cases = []
@@ -111,7 +136,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
     def test_rejects_unsupported_schema_device_and_dtype(self) -> None:
         cases = (
-            ("schema_version", 2, "unsupported schema_version"),
+            ("schema_version", 3, "unsupported schema_version"),
             ("device", "cpu", "device must be"),
         )
         for field, value, message in cases:
@@ -152,6 +177,8 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
             ("num_workers", 1, ValueError),
             ("max_optimizer_steps", 0, ValueError),
             ("optimizer_batch_size", True, TypeError),
+            ("nvarc_source_batch_size", 0, ValueError),
+            ("vae_microbatch_size", True, TypeError),
         )
         for field, value, error_type in cases:
             payload = _payload()
