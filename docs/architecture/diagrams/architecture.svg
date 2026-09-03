@@ -36,7 +36,7 @@
   <text x="380" y="118" text-anchor="middle" class="section-title">Frozen NVARC conditioning</text>
 
   <text x="380" y="158" text-anchor="middle" class="label">Serialized ARC demonstrations and test input</text>
-  <text x="380" y="180" text-anchor="middle" class="small">N_context up to 8,192 tokens</text>
+  <text x="380" y="180" text-anchor="middle" class="small">N_context up to 8,400 tokens</text>
   <path d="M 380 193 L 380 218" class="arrow"/>
 
   <text x="380" y="246" text-anchor="middle" class="label">NVARC / Qwen3-4B</text>

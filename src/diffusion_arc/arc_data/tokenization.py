@@ -38,16 +38,12 @@ def tokenize_nvarc_training_sample(
     *,
     max_tokens: int = NVARC_MAX_TOKENS,
 ) -> ArcTokenizedTrainingSample:
-    """Tokenize one full prompt and verify every end-exclusive prefix cut."""
+    """Keep the full prompt and limit the final consumed NVARC prefix."""
 
     if max_tokens <= 0:
         raise ValueError("max_tokens must be positive")
 
     input_ids = _encode(tokenizer, sample.prompt)
-    if len(input_ids) > max_tokens:
-        raise ValueError(
-            f"NVARC prompt contains {len(input_ids)} tokens, exceeding {max_tokens}"
-        )
 
     prefix_token_ends: list[int] = []
     target_grids: list[Grid] = []
@@ -63,6 +59,13 @@ def tokenize_nvarc_training_sample(
 
         prefix_token_ends.append(token_end)
         target_grids.append(target.target_grid)
+
+    source_length = prefix_token_ends[-1]
+    if source_length > max_tokens:
+        raise ValueError(
+            f"NVARC source prefix contains {source_length} tokens, "
+            f"exceeding {max_tokens}"
+        )
 
     return ArcTokenizedTrainingSample(
         key=sample.key,

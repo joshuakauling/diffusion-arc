@@ -15,6 +15,7 @@ from diffusion_arc.arc_data import (
     ArcGeometry,
     ArcPair,
     ArcQuery,
+    NVARC_MAX_TOKENS,
     render_evaluation_prompts,
     render_training_prompt,
     tokenize_nvarc_evaluation_sample,
@@ -62,15 +63,50 @@ class ArcNvarcTokenizationTest(unittest.TestCase):
         rendered = render_training_prompt(augmented)
         tokenizer = make_nvarc_tokenizer()
 
-        tokenized = tokenize_nvarc_training_sample(rendered, tokenizer)
+        tokenized = tokenize_nvarc_training_sample(rendered, tokenizer, max_tokens=28)
 
         self.assertEqual(len(tokenizer), 16)
         self.assertEqual(tokenized.prefix_token_ends, (18, 28))
         self.assertEqual(tokenized.target_grids, (((4,),), ((6,),)))
         self.assertEqual(len(tokenized.input_ids), 30)
 
-        with self.assertRaises(ValueError):
-            tokenize_nvarc_training_sample(rendered, tokenizer, max_tokens=29)
+        with self.assertRaisesRegex(
+            ValueError, "source prefix contains 28 tokens, exceeding 27"
+        ):
+            tokenize_nvarc_training_sample(rendered, tokenizer, max_tokens=27)
+
+    def test_five_maximum_pairs_keep_full_prompt_and_fit_8400_tokens(self) -> None:
+        grid = tuple(
+            tuple((row + column) % 10 for column in range(30))
+            for row in range(30)
+        )
+        augmentation = ArcAugmentationSpec(
+            geometry=ArcGeometry.IDENTITY,
+            color_mapping=tuple(range(10)),
+            pair_indices=tuple(range(5)),
+        )
+        augmented = ArcAugmentedTrainingSample(
+            key=ArcAugmentationKey("maximum-size-task", augmentation),
+            pairs=tuple(ArcPair(input_grid=grid, output_grid=grid) for _ in range(5)),
+        )
+        rendered = render_training_prompt(augmented)
+        tokenizer = make_nvarc_tokenizer()
+
+        tokenized = tokenize_nvarc_training_sample(rendered, tokenizer)
+
+        self.assertEqual(NVARC_MAX_TOKENS, 8400)
+        self.assertEqual(len(tokenized.input_ids), 9330)
+        self.assertEqual(tokenized.prefix_token_ends, (2802, 4668, 6534, 8400))
+        self.assertEqual(tokenized.target_grids, (grid,) * 4)
+        self.assertEqual(
+            tokenized.input_ids,
+            tuple(tokenizer.encode(rendered.prompt, add_special_tokens=False)),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "source prefix contains 8400 tokens, exceeding 8399"
+        ):
+            tokenize_nvarc_training_sample(rendered, tokenizer, max_tokens=8399)
 
     def test_tokenization_preserves_evaluation_identity_and_context_limit(self) -> None:
         task = ArcEvaluationTask(

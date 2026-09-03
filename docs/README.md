@@ -26,6 +26,10 @@ details.
 - [FLUX target-image encoding](training/flux-image-encoding.md)
 - [Flow-matching training state](training/flow-matching.md)
 
+## Performance
+
+- [Performance evaluation and benchmark protocol](performance/README.md)
+
 ## Experiments
 
 - [Experiment documentation index](experiments/README.md)

@@ -1,7 +1,7 @@
 """Lightweight constants shared across data and model layers."""
 
 NVARC_VOCAB_SIZE = 16
-NVARC_MAX_TOKENS = 8192
+NVARC_MAX_TOKENS = 8400
 NVARC_PAD_TOKEN_ID = 13
 NVARC_HIDDEN_SIZE = 2560
 NVARC_HIDDEN_STATE_INDICES = (9, 18, 27)

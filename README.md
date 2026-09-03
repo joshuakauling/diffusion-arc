@@ -86,10 +86,10 @@ palette experiment. The frozen FLUX VAE and its 2×2 latent packing convert each
 canvas into 900 image tokens, providing one spatial token for every ARC cell.
 
 The main change to the original FLUX input path is the context length. FLUX's
-reference text preparation is capped at 512 tokens, while serialized ARC tasks
-may require up to 8,192 tokens. The initial ARC setup uses no visual reference
-images, so the longer text context is combined only with the 900 target image
-tokens rather than additional reference-image tokens. The resulting sequence
+reference text preparation is capped at 512 tokens, while five-pair ARC training
+sources may require up to 8,400 tokens. The initial ARC setup uses no visual
+reference images, so the longer text context is combined only with the 900
+target image tokens rather than additional reference-image tokens. The resulting sequence
 length and its memory and runtime costs must be verified during implementation
 and distributed profiling.
 

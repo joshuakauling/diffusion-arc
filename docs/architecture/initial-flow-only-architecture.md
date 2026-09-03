@@ -54,7 +54,7 @@ redundant for the initial full-parameter fine-tuning experiment.
 
 The implementation must verify the actual NVARC checkpoint, hidden-layer
 indices, tensor width, tokenization, dtype, and sequence length. ARC examples
-have variable context lengths and may require up to 8,192 tokens, replacing the
+have variable context lengths and may require up to 8,400 tokens, replacing the
 512-token truncation in the reference FLUX text-preparation path. This changes
 the supported input length, not the transformer block design.
 
@@ -268,7 +268,7 @@ architecture.
 
 - NVARC hidden states may have a different distribution from the native Qwen3
   states expected by pretrained FLUX, despite matching tensor width.
-- Contexts up to 8,192 tokens are far longer than the native 512-token
+- Contexts up to 8,400 tokens are far longer than the native 512-token
   reference path and may require substantial fine-tuning to use effectively.
 - Continuous latent MSE does not directly optimize discrete exact-grid
   accuracy.

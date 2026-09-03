@@ -75,10 +75,15 @@ The initial architecture fixes the following values:
 | --- | ---: |
 | Vocabulary size | 16 |
 | Padding token ID | 13 |
-| Maximum source length | 8192 |
+| Maximum source length | 8400 |
 | Hidden width per selected state | 2560 |
 | Selected hidden-state indices | `(9, 18, 27)` |
 | Concatenated context width | 7680 |
+
+The 8,400-token limit replaces the legacy 8,192-token project limit: five
+30x30 input/output pairs require nine consumed grids (the final output is
+excluded), giving `9 * (900 + 29) + 39 = 8400` tokens including turn markers.
+GPU capacity and safe source batch sizes at 8,400 tokens remain unvalidated.
 
 These values are not runtime tuning parameters. Changing them would alter the
 NVARC-to-FLUX interface and requires a separate checkpoint-contract decision

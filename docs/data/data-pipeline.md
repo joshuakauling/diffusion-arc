@@ -181,10 +181,13 @@ one complete prompt.
 character prefix cut into a token prefix cut and verifies that the boundary is
 stable in the full token sequence.
 
-If the result exceeds `max_tokens`, tokenization fails instead of silently
-truncating. The split generator records `max_tokens`, but key generation itself
-currently uses only `max_pairs` and `max_cells`; the caller must pass the
-configured token limit when tokenizing a generated view.
+If `prefix_token_ends[-1]` exceeds `max_tokens` (default 8,400), tokenization
+fails. The full `input_ids` remain intact, including the final target's output;
+the training path already slices them at that prefix before calling NVARC.
+The split generator records `max_tokens`, but key generation itself currently
+uses only `max_pairs` and `max_cells`; the caller must pass the configured token
+limit when tokenizing a generated view. `ArcTrainingDataset` performs this
+tokenization lazily in `__getitem__`, not in a separate startup preflight.
 
 ### 5. Render target canvases
 
