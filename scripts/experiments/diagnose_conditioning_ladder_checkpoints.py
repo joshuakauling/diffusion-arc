@@ -62,7 +62,7 @@ from diffusion_arc.training.single_gpu_setup import (
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_NAME = "single_gpu_0d3d703e_conditioning_ladder.json"
+CONFIG_NAME = "overfitting/single_gpu_0d3d703e_conditioning_ladder.json"
 PARENT_RESULT_FAMILY = "single-task-conditioning-overfitting-ladder"
 RESULT_FAMILY = "conditioning-ladder-checkpoint-diagnosis"
 TASK_ID = "0d3d703e"

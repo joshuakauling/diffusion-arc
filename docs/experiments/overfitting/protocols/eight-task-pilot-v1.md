@@ -42,7 +42,7 @@ conditioning. They enter only the scoring and fixed-flow-probe paths.
 ## Fixed training recipe
 
 The source configuration is
-[`configs/training/single_gpu_overfitting_pilot.json`](../../../../configs/training/single_gpu_overfitting_pilot.json).
+[`configs/training/overfitting/single_gpu_overfitting_pilot.json`](../../../../configs/training/overfitting/single_gpu_overfitting_pilot.json).
 The Modal notebook resolves only the checkpoint paths to the mounted Volume.
 The complete raw dataset is installed separately by
 [`experiments/setup/download_arc_agi_2_to_modal.ipynb`](../../../../experiments/setup/download_arc_agi_2_to_modal.ipynb)

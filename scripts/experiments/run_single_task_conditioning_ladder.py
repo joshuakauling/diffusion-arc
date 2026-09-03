@@ -66,7 +66,7 @@ from diffusion_arc.training.single_gpu_setup import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 LADDER_PROTOCOL = "conditioning-ladder"
 ENDPOINT_PROTOCOL = "endpoint-overfit"
-CONFIG_NAME = "single_gpu_0d3d703e_conditioning_ladder.json"
+CONFIG_NAME = "overfitting/single_gpu_0d3d703e_conditioning_ladder.json"
 TASK_ID = "0d3d703e"
 MAX_TOKENS = 192
 SPATIAL_SHAPE = FluxSpatialShape(height=30, width=30)
@@ -237,7 +237,7 @@ ENDPOINT_STAGES = (
 EXPERIMENT_SPECS = {
     LADDER_PROTOCOL: ExperimentSpec(
         name=LADDER_PROTOCOL,
-        config_name="single_gpu_0d3d703e_conditioning_ladder.json",
+        config_name="overfitting/single_gpu_0d3d703e_conditioning_ladder.json",
         result_family="single-task-conditioning-overfitting-ladder",
         question=(
             "Can a fresh full FLUX transformer first memorize one fixed ARC "
@@ -251,7 +251,7 @@ EXPERIMENT_SPECS = {
     ),
     ENDPOINT_PROTOCOL: ExperimentSpec(
         name=ENDPOINT_PROTOCOL,
-        config_name="single_gpu_0d3d703e_conditioning_endpoint_overfit.json",
+        config_name="overfitting/single_gpu_0d3d703e_conditioning_endpoint_overfit.json",
         result_family="single-task-conditioning-endpoint-overfitting",
         question=(
             "Can four times more training plus one shared-noise t=1 update in "

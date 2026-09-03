@@ -28,30 +28,35 @@ CONFIG = (
     REPOSITORY_ROOT
     / "configs"
     / "training"
+    / "overfitting"
     / "single_gpu_0d3d703e_augmentation_generalization.json"
 )
 CONTINUATION_CONFIG = (
     REPOSITORY_ROOT
     / "configs"
     / "training"
+    / "overfitting"
     / "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
 )
 REGION_WEIGHTED_CONTINUATION_CONFIG = (
     REPOSITORY_ROOT
     / "configs"
     / "training"
+    / "overfitting"
     / "single_gpu_0d3d703e_region_weighted_continuation.json"
 )
 REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG = (
     REPOSITORY_ROOT
     / "configs"
     / "training"
+    / "overfitting"
     / "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
 )
 REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG = (
     REPOSITORY_ROOT
     / "configs"
     / "training"
+    / "overfitting"
     / "single_gpu_0d3d703e_region_weighted_endpoint_balanced_long_continuation.json"
 )
 NOTEBOOK = (

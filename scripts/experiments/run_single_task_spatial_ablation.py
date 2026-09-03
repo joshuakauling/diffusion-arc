@@ -59,7 +59,7 @@ from diffusion_arc.training.single_gpu_setup import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SPLIT_NAME = "overfitting_0d3d703e_final_target"
-CONFIG_NAME = "single_gpu_0d3d703e_final_target.json"
+CONFIG_NAME = "overfitting/single_gpu_0d3d703e_final_target.json"
 TASK_ID = "0d3d703e"
 TRAIN_SEQUENCE_COUNT = 512
 SEEN_PANEL_COUNT = 8

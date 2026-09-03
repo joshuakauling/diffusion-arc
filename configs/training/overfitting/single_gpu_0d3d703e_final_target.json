@@ -3,21 +3,21 @@
   "seed": 167,
   "device": "cuda:0",
   "models": {
-    "nvarc_checkpoint": "../../checkpoints/nvarc-qwen3-4b-grids15-sft139",
-    "flux_checkpoint": "../../checkpoints/flux2-klein-base-4b",
+    "nvarc_checkpoint": "../../../checkpoints/nvarc-qwen3-4b-grids15-sft139",
+    "flux_checkpoint": "../../../checkpoints/flux2-klein-base-4b",
     "nvarc_dtype": "bfloat16",
     "vae_dtype": "float32",
     "flux_parameter_dtype": "float32",
     "flux_compute_dtype": "bfloat16"
   },
   "data": {
-    "split_directory": "../../data/splits/overfitting_0d3d703e_final_target",
+    "split_directory": "../../../data/splits/overfitting_0d3d703e_final_target",
     "view_name": "train",
-    "shuffle": false,
+    "shuffle": true,
     "num_workers": 0
   },
   "loop": {
-    "max_optimizer_steps": 1024,
+    "max_optimizer_steps": 64,
     "optimizer_batch_size": 8,
     "flux_microbatch_size": 8,
     "min_context_pairs_before_target": 4

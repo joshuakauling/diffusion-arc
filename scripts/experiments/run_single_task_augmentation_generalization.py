@@ -84,18 +84,18 @@ REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_PROTOCOL = (
 )
 RESULT_FAMILY = "single-task-augmentation-generalization-overfitting"
 STAGE_NAME = "augmentation-generalization-overfit"
-CONFIG_NAME = "single_gpu_0d3d703e_augmentation_generalization.json"
+CONFIG_NAME = "overfitting/single_gpu_0d3d703e_augmentation_generalization.json"
 CONTINUATION_CONFIG_NAME = (
-    "single_gpu_0d3d703e_augmentation_generalization_continuation.json"
+    "overfitting/single_gpu_0d3d703e_augmentation_generalization_continuation.json"
 )
 REGION_WEIGHTED_CONTINUATION_CONFIG_NAME = (
-    "single_gpu_0d3d703e_region_weighted_continuation.json"
+    "overfitting/single_gpu_0d3d703e_region_weighted_continuation.json"
 )
 REGION_WEIGHTED_ENDPOINT_BALANCED_CONTINUATION_CONFIG_NAME = (
-    "single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
+    "overfitting/single_gpu_0d3d703e_region_weighted_endpoint_balanced_continuation.json"
 )
 REGION_WEIGHTED_ENDPOINT_BALANCED_LONG_CONTINUATION_CONFIG_NAME = (
-    "single_gpu_0d3d703e_region_weighted_endpoint_balanced_long_continuation.json"
+    "overfitting/single_gpu_0d3d703e_region_weighted_endpoint_balanced_long_continuation.json"
 )
 TASK_ID = "0d3d703e"
 TARGET_ORIGINAL_PAIR_INDEX = 4
