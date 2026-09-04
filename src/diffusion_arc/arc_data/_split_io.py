@@ -27,8 +27,6 @@ def load_task_splits(
             allow_empty=split_name == "validation",
         )
         for task_id in task_ids:
-            if "_" in task_id:
-                raise ValueError(f"task ID must not contain '_': {task_id!r}")
             require_path_component(task_id, name=f"task ID in {path}")
         task_ids_by_split[split_name] = task_ids
     return task_ids_by_split

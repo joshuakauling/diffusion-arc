@@ -15,6 +15,7 @@ from torch import nn
 from diffusion_arc.model import NVARC_HIDDEN_SIZE, NVARC_VOCAB_SIZE
 from diffusion_arc.training.single_gpu_config import (
     AdamWConfig,
+    CosineSchedulerConfig,
     SingleGpuDataConfig,
     SingleGpuLoopConfig,
     SingleGpuModelConfig,
@@ -23,6 +24,7 @@ from diffusion_arc.training.single_gpu_config import (
 from diffusion_arc.training.single_gpu_setup import (
     build_flow_generator,
     build_flux_optimizer,
+    build_flux_scheduler,
     build_single_sample_loader,
     load_single_gpu_models,
     prepare_single_gpu_device,
@@ -145,6 +147,21 @@ def _config(root: Path, *, shuffle: bool = False) -> SingleGpuTrainingConfig:
 
 
 class SingleGpuSetupTests(unittest.TestCase):
+    def test_cosine_schedule_and_legacy_constant_lr(self) -> None:
+        config = _config(Path("/unused"))
+        optimizer = build_flux_optimizer(config, transformer=nn.Linear(1, 1))
+        self.assertIsNone(build_flux_scheduler(config, optimizer=optimizer))
+        self.assertEqual(optimizer.param_groups[0]["lr"], 1e-5)
+        config = replace(config, scheduler=CosineSchedulerConfig(warmup_steps=213, total_steps=7245))
+        scheduler = build_flux_scheduler(config, optimizer=optimizer)
+        self.assertEqual(optimizer.param_groups[0]["lr"], 0.0)
+        checkpoints = {1: 1e-5 / 213, 213: 1e-5, 3729: 0.5e-5, 7245: 0.0}
+        for step in range(1, 7246):
+            optimizer.step()
+            scheduler.step()
+            if step in checkpoints:
+                self.assertAlmostEqual(optimizer.param_groups[0]["lr"], checkpoints[step])
+
     def test_missing_checkpoint_directory_fails_before_model_loading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             config = _config(Path(temporary_directory))

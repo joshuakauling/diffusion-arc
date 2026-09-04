@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from diffusion_arc.arc_data import generate_augmented_key_files, load_arc_split_config
+from diffusion_arc.arc_data import (
+    generate_augmented_key_files, load_arc_split_config, parse_augmentation_key,
+)
 
 
 def write_json(path: Path, payload: object) -> None:
@@ -60,6 +62,23 @@ def split_config() -> dict[str, object]:
 
 
 class ArcSplitGenerationTest(unittest.TestCase):
+    def test_underscore_task_ids_are_supported_without_allowing_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            split = root / "data/splits/nvarc"
+            task_id = "00d62c1b_0962bcdd"
+            write_json(root / f"data/raw/arc-agi-2/training/{task_id}.json", task_payload())
+            write_json(split / "config.json", split_config())
+            write_json(split / "train.json", [task_id])
+            write_json(split / "validation.json", [])
+            generated = generate_augmented_key_files(split)
+            self.assertTrue(all(
+                parse_augmentation_key(key).task_id == task_id for key in generated["train"]
+            ))
+            write_json(split / "train.json", ["../other_task"])
+            with self.assertRaisesRegex(ValueError, "one path component"):
+                generate_augmented_key_files(split)
+
     def test_generates_reproducible_disjoint_training_views(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

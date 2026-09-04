@@ -82,6 +82,7 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
             )
             samples = object()
             optimizer = object()
+            scheduler = Mock()
             flow_generator = object()
             profiler_context = MagicMock()
             profiler = Mock()
@@ -113,6 +114,10 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
                     "scripts.train_single_gpu.build_flux_optimizer",
                     return_value=optimizer,
                 ) as build_optimizer,
+                patch(
+                    "scripts.train_single_gpu.build_flux_scheduler",
+                    return_value=scheduler,
+                ) as build_scheduler,
                 patch(
                     "scripts.train_single_gpu.build_flow_generator",
                     return_value=flow_generator,
@@ -149,6 +154,8 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
             transformer=models.transformer,
         )
         build_generator.assert_called_once_with(config, device=device)
+        build_scheduler.assert_called_once_with(config, optimizer=optimizer)
+        scheduler.step.assert_called_once_with()
         build_schedule.assert_called_once_with(
             wait=2,
             warmup=2,

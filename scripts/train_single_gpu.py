@@ -25,6 +25,7 @@ from diffusion_arc.training.single_gpu_loop import (  # noqa: E402
 from diffusion_arc.training.single_gpu_setup import (  # noqa: E402
     build_flow_generator,
     build_flux_optimizer,
+    build_flux_scheduler,
     build_single_sample_loader,
     load_single_gpu_models,
     prepare_single_gpu_device,
@@ -71,6 +72,7 @@ def train_from_config(config_path: str | Path) -> None:
         config,
         transformer=models.transformer,
     )
+    scheduler = build_flux_scheduler(config, optimizer=optimizer)
     flow_generator = build_flow_generator(config, device=device)
     profiled_nvarc_runner = _ProfiledModule(
         models.nvarc_runner,
@@ -111,6 +113,11 @@ def train_from_config(config_path: str | Path) -> None:
         profile_memory=False,
         with_stack=False,
     ) as profiler:
+        def on_optimizer_step(*_args: object) -> None:
+            if scheduler is not None:
+                scheduler.step()
+            profiler.step()
+
         run_single_gpu_training(
             training_samples,
             nvarc_runner=profiled_nvarc_runner,
@@ -127,7 +134,7 @@ def train_from_config(config_path: str | Path) -> None:
             nvarc_source_batch_size=config.loop.nvarc_source_batch_size,
             vae_microbatch_size=config.loop.vae_microbatch_size,
             generator=flow_generator,
-            on_optimizer_step=lambda *_: profiler.step(),
+            on_optimizer_step=on_optimizer_step,
         )
 
     print(f"Profiler trace: {trace_path}")

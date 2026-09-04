@@ -136,7 +136,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
     def test_rejects_unsupported_schema_device_and_dtype(self) -> None:
         cases = (
-            ("schema_version", 3, "unsupported schema_version"),
+            ("schema_version", 4, "unsupported schema_version"),
             ("device", "cpu", "device must be"),
         )
         for field, value, message in cases:
@@ -219,6 +219,47 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
                     load_single_gpu_training_config(
                         _write_config(Path(temp), payload)
                     )
+
+    def test_b0_config_and_legacy_scheduler_defaults(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        config = load_single_gpu_training_config(root / "configs/training/benchmarks/single_gpu_b0.json")
+        self.assertEqual(config.loop.optimizer_batch_size, 48)
+        self.assertEqual(config.loop.max_optimizer_steps, 60)
+        self.assertEqual(config.loop.nvarc_source_batch_size, 1)
+        self.assertEqual(config.loop.vae_microbatch_size, 1)
+        self.assertEqual(config.loop.flux_microbatch_size, 1)
+        self.assertEqual(config.scheduler.warmup_steps, 213)
+        self.assertEqual(config.scheduler.total_steps, 7245)
+        self.assertEqual(config.optimizer.learning_rate, 1e-5)
+        self.assertEqual(config.benchmark.warmup_steps, 10)
+        self.assertEqual(config.benchmark.measured_steps, 50)
+        self.assertEqual(config.benchmark.repetitions, 3)
+        legacy = load_single_gpu_training_config(root / "configs/training/single_gpu.json")
+        self.assertIsNone(legacy.scheduler)
+        self.assertIsNone(legacy.benchmark)
+
+    def test_rejects_invalid_scheduler_and_benchmark(self) -> None:
+        cases = (
+            ("scheduler", "type", "linear"),
+            ("scheduler", "warmup_steps", -1),
+            ("scheduler", "warmup_steps", True),
+            ("scheduler", "warmup_steps", 10),
+            ("scheduler", "total_steps", 2),
+            ("benchmark", "warmup_steps", -1),
+            ("benchmark", "measured_steps", 1),
+            ("benchmark", "repetitions", 0),
+        )
+        for section, field, value in cases:
+            payload = _payload()
+            payload.update(
+                schema_version=3,
+                scheduler={"type": "cosine", "warmup_steps": 2, "total_steps": 10},
+                benchmark={"warmup_steps": 1, "measured_steps": 2, "repetitions": 3},
+            )
+            payload[section][field] = value
+            with self.subTest(section=section, field=field, value=value), tempfile.TemporaryDirectory() as temp:
+                with self.assertRaises((ValueError, TypeError)):
+                    load_single_gpu_training_config(_write_config(Path(temp), payload))
 
 
 if __name__ == "__main__":

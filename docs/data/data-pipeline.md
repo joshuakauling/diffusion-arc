@@ -156,6 +156,9 @@ This means:
 Pair indices use comma-separated decimal integers, so tasks with ten or more
 pairs remain unambiguous. Keys round-trip through `format_augmentation_key`
 and `parse_augmentation_key`.
+Task IDs may contain underscores, including NVARC's `<parent1>_<parent2>` IDs;
+the parser separates the three augmentation fields from the right. Existing
+keys keep their format and meaning.
 
 ### 3. Render the NVARC training prompt
 

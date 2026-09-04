@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-SINGLE_GPU_TRAINING_SCHEMA_VERSION = 2
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
+SINGLE_GPU_TRAINING_SCHEMA_VERSION = 3
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -61,6 +61,23 @@ class AdamWConfig:
 
 
 @dataclass(frozen=True)
+class CosineSchedulerConfig:
+    """Linear LR warm-up followed by cosine decay to zero."""
+
+    warmup_steps: int
+    total_steps: int
+
+
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    """Timing windows, independent of the learning-rate schedule."""
+
+    warmup_steps: int
+    measured_steps: int
+    repetitions: int
+
+
+@dataclass(frozen=True)
 class SingleGpuTrainingConfig:
     """Complete validated configuration for one initial training process."""
 
@@ -70,6 +87,8 @@ class SingleGpuTrainingConfig:
     data: SingleGpuDataConfig
     loop: SingleGpuLoopConfig
     optimizer: AdamWConfig
+    scheduler: CosineSchedulerConfig | None = None
+    benchmark: BenchmarkConfig | None = None
 
 
 def load_single_gpu_training_config(
@@ -81,14 +100,13 @@ def load_single_gpu_training_config(
     with config_path.open("r", encoding="utf-8") as handle:
         payload = _object(json.load(handle), name="config")
 
-    _fields(
-        payload,
-        {"schema_version", "seed", "device", "models", "data", "loop", "optimizer"},
-        name="config",
-    )
-    schema_version = _integer(payload["schema_version"], name="schema_version")
+    schema_version = _integer(payload.get("schema_version"), name="schema_version")
     if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported schema_version: {schema_version!r}")
+    config_fields = {"schema_version", "seed", "device", "models", "data", "loop", "optimizer"}
+    if schema_version >= 3:
+        config_fields.update({"scheduler", "benchmark"})
+    _fields(payload, config_fields, name="config")
 
     seed = _integer(payload["seed"], name="seed")
     if not 0 <= seed < 2**64:
@@ -177,7 +195,7 @@ def load_single_gpu_training_config(
         "flux_microbatch_size",
         "min_context_pairs_before_target",
     }
-    if schema_version == 2:
+    if schema_version >= 2:
         loop_fields.update(
             {
                 "nvarc_source_batch_size",
@@ -226,6 +244,35 @@ def load_single_gpu_training_config(
     if weight_decay < 0:
         raise ValueError("optimizer.weight_decay must not be negative")
 
+    scheduler = None
+    if payload.get("scheduler") is not None:
+        section = _object(payload["scheduler"], name="scheduler")
+        _fields(section, {"type", "warmup_steps", "total_steps"}, name="scheduler")
+        if section["type"] != "cosine":
+            raise ValueError("scheduler.type must be 'cosine'")
+        scheduler = CosineSchedulerConfig(
+            warmup_steps=_integer(section["warmup_steps"], name="scheduler.warmup_steps"),
+            total_steps=_positive_integer(section["total_steps"], name="scheduler.total_steps"),
+        )
+        if not 0 <= scheduler.warmup_steps < scheduler.total_steps:
+            raise ValueError("scheduler requires 0 <= warmup_steps < total_steps")
+        if loop.max_optimizer_steps > scheduler.total_steps:
+            raise ValueError("scheduler.total_steps must cover loop.max_optimizer_steps")
+
+    benchmark = None
+    if payload.get("benchmark") is not None:
+        section = _object(payload["benchmark"], name="benchmark")
+        _fields(section, {"warmup_steps", "measured_steps", "repetitions"}, name="benchmark")
+        benchmark = BenchmarkConfig(
+            warmup_steps=_integer(section["warmup_steps"], name="benchmark.warmup_steps"),
+            measured_steps=_positive_integer(section["measured_steps"], name="benchmark.measured_steps"),
+            repetitions=_positive_integer(section["repetitions"], name="benchmark.repetitions"),
+        )
+        if benchmark.warmup_steps < 0:
+            raise ValueError("benchmark.warmup_steps must not be negative")
+        if benchmark.warmup_steps + benchmark.measured_steps != loop.max_optimizer_steps:
+            raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
+
     return SingleGpuTrainingConfig(
         seed=seed,
         device=device,
@@ -239,6 +286,8 @@ def load_single_gpu_training_config(
             epsilon=epsilon,
             weight_decay=weight_decay,
         ),
+        scheduler=scheduler,
+        benchmark=benchmark,
     )
 
 
@@ -301,6 +350,8 @@ def _path(value: Any, *, base_directory: Path, name: str) -> Path:
 __all__ = [
     "SINGLE_GPU_TRAINING_SCHEMA_VERSION",
     "AdamWConfig",
+    "BenchmarkConfig",
+    "CosineSchedulerConfig",
     "SingleGpuDataConfig",
     "SingleGpuLoopConfig",
     "SingleGpuModelConfig",

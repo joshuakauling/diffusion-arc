@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedTokenizerBase,
+    get_cosine_schedule_with_warmup,
 )
 
 from diffusion_arc.model.contracts import (
@@ -255,6 +256,22 @@ def build_flow_generator(
     return torch.Generator(device=device).manual_seed(config.seed)
 
 
+def build_flux_scheduler(
+    config: SingleGpuTrainingConfig,
+    *,
+    optimizer: AdamW,
+) -> torch.optim.lr_scheduler.LambdaLR | None:
+    """Build an optional schedule advanced once after each optimizer update."""
+
+    if config.scheduler is None:
+        return None
+    return get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=config.scheduler.warmup_steps,
+        num_training_steps=config.scheduler.total_steps,
+    )
+
+
 def _validate_nvarc_checkpoint(
     model: nn.Module,
     tokenizer: PreTrainedTokenizerBase,
@@ -417,6 +434,7 @@ __all__ = [
     "SingleGpuModels",
     "build_flow_generator",
     "build_flux_optimizer",
+    "build_flux_scheduler",
     "build_single_sample_loader",
     "load_single_gpu_models",
     "prepare_single_gpu_device",

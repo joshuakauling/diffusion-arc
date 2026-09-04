@@ -119,7 +119,7 @@ def parse_augmentation_key(value: str) -> ArcAugmentationKey:
     if not isinstance(value, str):
         raise TypeError("value must be a string")
 
-    parts = value.split("_")
+    parts = value.rsplit("_", 3)
     if len(parts) != 4:
         raise ValueError("augmentation key must contain exactly four fields")
 
@@ -353,8 +353,6 @@ def _validate_task_id(task_id: str) -> None:
         raise TypeError("task_id must be a string")
     if not task_id:
         raise ValueError("task_id must not be empty")
-    if "_" in task_id:
-        raise ValueError("task_id must not contain the key separator '_'")
 
 
 __all__ = [

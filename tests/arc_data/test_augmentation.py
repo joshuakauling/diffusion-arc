@@ -55,9 +55,23 @@ class ArcAugmentationKeyTest(unittest.TestCase):
             ArcAugmentationKey("nvarc-task-42", make_spec()),
         )
 
-        for invalid_task_id in ("", "task_with_separator"):
-            with self.assertRaises(ValueError):
-                make_augmentation_key(invalid_task_id, make_spec())
+        with self.assertRaises(ValueError):
+            make_augmentation_key("", make_spec())
+
+    def test_key_round_trip_preserves_task_ids_with_underscores(self) -> None:
+        for task_id in ("00d62c1b_0962bcdd", "task_with_multiple_separators"):
+            with self.subTest(task_id=task_id):
+                key = ArcAugmentationKey(task_id, make_spec())
+                self.assertEqual(parse_augmentation_key(str(key)), key)
+
+    def test_parser_still_rejects_missing_or_invalid_suffix_fields(self) -> None:
+        for value in (
+            "task_ID_0123456789", "_ID_0123456789_0,1",
+            "task_with_underscores_BAD_0123456789_0,1",
+            "task_ID_0123456789_0,0",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_augmentation_key(value)
 
     def test_spec_rejects_invalid_mapping_or_pair_selection(self) -> None:
         with self.assertRaises(ValueError):
