@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
+from scripts import train_single_gpu
 
 
 def _payload() -> dict:
@@ -237,6 +239,26 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
         legacy = load_single_gpu_training_config(root / "configs/training/single_gpu.json")
         self.assertIsNone(legacy.scheduler)
         self.assertIsNone(legacy.benchmark)
+
+    def test_b0_profile_changes_only_duration_and_disables_benchmark(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        benchmark = load_single_gpu_training_config(
+            root / "configs/training/benchmarks/single_gpu_b0.json"
+        )
+        profiling = load_single_gpu_training_config(
+            root / "configs/training/profiling/single_gpu_b0_torch_profile.json"
+        )
+        profile_steps = (
+            train_single_gpu.PROFILER_WAIT_STEPS
+            + train_single_gpu.PROFILER_WARMUP_STEPS
+            + train_single_gpu.PROFILER_ACTIVE_STEPS
+        )
+        self.assertEqual(profile_steps, 7)
+        self.assertEqual(profiling, replace(
+            benchmark,
+            loop=replace(benchmark.loop, max_optimizer_steps=profile_steps),
+            benchmark=None,
+        ))
 
     def test_rejects_invalid_scheduler_and_benchmark(self) -> None:
         cases = (

@@ -1,6 +1,19 @@
 # Performance Benchmarks
 
-## Dataset
+## Benchmark variants
+
+| Variant | Status | NVARC source batch | VAE microbatch | FLUX microbatch | Optimizer batch | Length policy | Target order |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| B0 | Completed | 1 | 1 | 1 | 48 | Exact prefix length | FIFO |
+| B1 | Planned | Largest validated safe batch | Largest validated safe batch | 1 | 48 | Exact prefix length | FIFO |
+
+B0 is the single-GPU baseline. B1 changes only frozen NVARC and VAE
+preprocessing throughput. Length-aware reordering, dynamic batching, and
+different optimizer-batch membership are not part of either variant.
+
+## Shared benchmark setup
+
+### Dataset
 
 - Source: `nvarc_train_arc_agi_1_training_only`
 - 14,490 synthetic tasks whose parents come only from the official ARC-AGI-1
@@ -16,53 +29,24 @@ The final output stays in stored `input_ids` but is excluded from NVARC input;
 no length-based resampling is needed for five pairs of at most 30x30 grids.
 
 The same 960 variants are reused in every repetition: 160 for warm-up and 800
-for measurement. Selection is random, not balanced or filtered by token length;
-no distribution comparison is required for this first version. Multiple
-variants per task and pair-coverage policies for full training remain open.
+for measurement. Selection is random, not balanced or filtered by token length.
+Multiple variants per task and pair-coverage policies for full training remain
+open.
 
-The preparation manifest records input/task checksums, selected task order,
-seeds, counts, and the key-file checksum. The benchmark records token lengths
-during execution; preparation does not tokenize the full dataset.
-
-## Configurations
-
-| Setting | B0 | B1 |
-| --- | ---: | ---: |
-| NVARC source batch | 1 | Largest validated batch safe at 8,400 tokens |
-| VAE microbatch | 1 | Largest separately validated safe batch |
-| FLUX microbatch | 1 | 1 |
-| Optimizer batch | 48 targets | 48 targets |
-| Target selection | FIFO | FIFO |
-
-B1 changes only frozen NVARC and VAE preprocessing throughput. Length-aware
-reordering, dynamic batching, and different optimizer-batch membership are
-separate later experiments.
-
-With three targets per source, a full optimizer batch contains 16 source
-variants.
-
-Prepared B0 config:
-[`single_gpu_b0.json`](../../configs/training/benchmarks/single_gpu_b0.json).
-It references `data/benchmarks/single_gpu_b0/splits/train`. Prepare this bundle
-once from the existing local archive and training-only index:
+Prepare the benchmark bundle once from the existing local archive and
+training-only index:
 
 ```bash
 .venv/bin/python -B scripts/data/prepare_nvarc_benchmark.py
 ```
 
-- Writes only the 960 selected raw tasks plus split/key files and
-  `splits/train/manifest.json`; refuses to overwrite an existing bundle.
-- Verifies both parents against the official ARC-AGI-1 training keys and checks
-  selected task bytes against the source index.
-- Converts labelled pair-bank lists to `train` lists with an empty `test` list,
-  preserving pair indices. This is a training-only performance workload.
-- Uses the existing key generator with one sampled variant, `max_pairs=5`, and
-  `max_cells=9000` so five valid 30x30 input/output pairs are never size-filtered.
-- Local preparation only: no downloads, model loading, or GPU execution.
+The command writes only the 960 selected raw tasks plus split, key, and manifest
+files. It verifies both parents against the official ARC-AGI-1 training keys,
+checks selected task bytes against the source index, and refuses to overwrite
+an existing bundle. The resulting `data/benchmarks/single_gpu_b0/` bundle is
+Git-ignored.
 
-The bundle uses the existing `splits/` and `raw/` layout and is Git-ignored.
-
-## Benchmark protocol
+### Protocol
 
 | Item | Value |
 | --- | ---: |
@@ -79,90 +63,31 @@ seed, data order, precision policy, software environment, and hardware
 allocation. Model and data initialization are excluded from step statistics.
 
 One measured step spans the complete pipeline between consecutive optimizer
-updates: data loading, NVARC, VAE, buffering, FLUX forward/backward,
-gradient handling, and the optimizer update. CUDA is synchronized at both
-timing boundaries.
+updates: data loading, NVARC, VAE, buffering, FLUX forward/backward, gradient
+handling, and the optimizer update. CUDA is synchronized at both timing
+boundaries. With three targets per source, one optimizer batch contains 16
+source variants and 48 FLUX microbatches.
 
-Learning rate: peak `1e-5`, linear warm-up over **213 optimizer updates**, then
-cosine decay to zero at update **7,245** (a fixed benchmark reference horizon,
-not an epoch of this subset or a commitment to the full-training recipe).
-This is separate from the ten timing warm-up steps. Each repetition restarts
-the schedule, so all 60 updates remain in LR warm-up; the standard scheduler
-starts the first update at LR zero. This is a throughput experiment, not a
-learning-curve comparison.
-
-## Running and outputs
-
-To launch a GPU benchmark after preparing the data (separate run approval):
-
-```bash
-modal run --detach --env diffusion-arc \
-  scripts/cloud/benchmark_single_gpu_modal.py \
-  --config configs/training/benchmarks/single_gpu_b0.json
-```
-
-- One H200, eight physical CPU cores, 64 GiB RAM, two-hour timeout for all
-  repetitions combined; three sequential fresh Python processes.
-- Existing `diffusion-arc-models` Volume; results in `results/benchmarks/<run-id>/`.
-- Missing split/key files fail before the GPU Function is invoked.
-- Each repetition writes `manifest.json`, `steps.jsonl`, and `summary.json`;
-  the run directory contains the manifest and pooled summary.
-- No profiler, W&B, checkpoint saving, resume, or activation checkpointing.
-  B0 completed all three repetitions with prefixes up to 8,400 tokens on H200.
-- Timing includes the LR scheduler, but excludes metric bookkeeping and result
-  writes. CUDA synchronization happens only at optimizer-step boundaries for
-  timing; existing training checks remain unchanged.
-- A short stream, incomplete optimizer batch, or exception marks the run failed.
-  Completed step records survive ordinary Python/CUDA errors; a forced container
-  termination may lose the current repetition's in-memory records.
-
-The profiler entrypoint and its existing config remain available separately.
-Local CUDA execution uses `python scripts/benchmark_single_gpu.py --config ...`.
-Output defaults to `artifacts/benchmarks/<run-id>/`; override with `--output-dir`.
-
-## Reported measurements
+### Reported measurements
 
 - Median and p95 end-to-end optimizer-step latency
-- Target and source-variant throughput
-- NVARC, VAE, FLUX, backward, and optimizer phase latency when available
+- Target and completed-source throughput
 - Peak allocated and reserved GPU memory
-- Targets and FLUX microbatches per optimizer step
-- NVARC source count and padded/unpadded token counts
-- Target-prefix token distribution
-- Buffer occupancy and retained bytes when available
-- Total process duration and infrastructure cost
+- Targets, FLUX microbatches, and source variants per optimizer step
+- NVARC padded/unpadded tokens and target-prefix token distribution
+- Per-phase latency, buffer occupancy, retained bytes, and infrastructure cost
+  when available
 
-Raw step values are retained. Statistics are reported per repetition and across
-all three repetitions.
+Raw step values are retained. The current implementation emits step latency,
+loss, learning rate, throughput counts, prepared source keys and lengths,
+token counts, and memory peaks. Per-phase times, buffer bytes, and provider cost
+remain unavailable. Source completion means consuming its final target,
+including across optimizer updates.
 
-Currently emitted: step latency, loss, LR used, target/microbatch counts,
-completed-source throughput, prepared source keys and lengths, padded/unpadded
-NVARC token counts, target-prefix lengths, and allocated/reserved memory peaks.
-Source completion means consuming its final target, including across updates.
-Per-phase times, buffer bytes, and provider billing/cost remain separate follow-ups.
-Reserved memory can include the CUDA allocator cache populated during warm-up.
+### Comparison rules
 
-## Results
-
-| Run | Median step (s) | p95 step (s) | Targets/s | Peak allocated (GiB) | Peak reserved (GiB) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| B0 | 15.45 | 17.59 | 3.094 | 113.91 | 138.12 |
-
-- Run ID: `20260903T230458451916Z`; all three repetitions completed successfully.
-- 3 × 60 optimizer steps, including 150 measured steps. Timing and throughput
-  are pooled across measured steps; memory values are their maxima.
-- Total wall time: **48 min 42 s**, including per-repetition initialization.
-- Local results (Git-ignored):
-  [summary](../../artifacts/benchmarks/20260903T230458451916Z/summary.json),
-  [manifest and repetition files](../../artifacts/benchmarks/20260903T230458451916Z/).
-  Remote: `results/benchmarks/20260903T230458451916Z/` on
-  `diffusion-arc-models` in the `diffusion-arc` environment.
-- Code provenance: `e6f5fd9` plus uncommitted changes recorded in the manifest;
-  the commit alone does not identify the executed code.
-
-## Comparison rules
-
-Compared runs keep the following fixed:
+Compared variants keep the following fixed unless a new benchmark series is
+declared:
 
 - Dataset subset, order, and seeds
 - Model, package, and container revisions
@@ -172,23 +97,130 @@ Compared runs keep the following fixed:
 - Warm-up, measurement, metrics, and telemetry configuration
 
 Record the exact command and resolved configuration. Keep failed and OOM runs
-as negative results. A changed workload or protocol starts a new benchmark
-series.
+as negative results. Manifests include the configuration, split/key hashes,
+source revision, package versions, GPU identity, Modal allocation, and
+checkpoint configs. Checkpoint weights are not hashed; record their immutable
+revisions before reporting formal results.
 
-Manifests include resolved settings, split/key file hashes, source revision,
-package versions, GPU identity, Modal image/allocation, and checkpoint configs.
-Raw-data identity is recorded in `splits/train/manifest.json` in the data bundle.
-Checkpoint weights are not hashed; record their immutable revisions before
-reporting formal results.
+## Running and outputs
 
-## Profiling
+Launch the benchmark after preparing the data:
 
-Profiler runs are separate diagnostic experiments, usually around ten steps on
-the same data distribution. They locate bottlenecks and provide only rough
-runtime estimates; profiler timings are not benchmark results.
+```bash
+modal run --detach --env diffusion-arc \
+  scripts/cloud/benchmark_single_gpu_modal.py \
+  --config configs/training/benchmarks/single_gpu_b0.json
+```
 
-Do not commit traces or other generated artifacts. Estimate run cost using:
+- One H200, eight physical CPU cores, 64 GiB RAM, and a two-hour timeout
+- Three sequential repetitions in fresh Python processes
+- Existing `diffusion-arc-models` Volume
+- Results in `results/benchmarks/<run-id>/`
+- Missing split/key files fail before the GPU Function is invoked
+- No profiler, W&B, checkpoints, resume, or activation checkpointing
+
+Each repetition writes `manifest.json`, `steps.jsonl`, and `summary.json`; the
+run directory contains the pooled summary and manifest. Completed step records
+survive ordinary Python/CUDA errors, while forced container termination may
+lose the current repetition's in-memory records.
+
+Local CUDA execution uses
+`python scripts/benchmark_single_gpu.py --config <config>`. Output defaults to
+`artifacts/benchmarks/<run-id>/`; override it with `--output-dir`.
+
+Estimate provider cost from the billed duration and the resource price recorded
+at run time:
 
 ```text
-cost = billed runtime in hours * hourly resource rate recorded at run time
+cost = billed runtime in hours * hourly resource rate
 ```
+
+## B0 — Exact-length FIFO baseline
+
+### Configuration
+
+[`single_gpu_b0.json`](../../configs/training/benchmarks/single_gpu_b0.json)
+references `data/benchmarks/single_gpu_b0/splits/train`. NVARC, VAE, and FLUX
+all use a microbatch of one; each optimizer update accumulates 48 targets in
+FIFO order.
+
+Learning rate: peak `1e-5`, linear warm-up over 213 optimizer updates, then
+cosine decay to zero at update 7,245. This is a fixed benchmark horizon, not an
+epoch of the subset or a commitment to the full-training recipe. It is separate
+from the ten timing warm-up steps. Each repetition restarts the schedule, so all
+60 updates remain in LR warm-up.
+
+### Benchmark result
+
+| Median step | p95 step | Targets/s | Peak allocated | Peak reserved |
+| ---: | ---: | ---: | ---: | ---: |
+| 15.45 s | 17.59 s | 3.094 | 113.91 GiB | 138.12 GiB |
+
+- Run ID: `20260903T230458451916Z`
+- All 3 x 60 optimizer steps completed, including 150 measured steps
+- Total wall time: 48 min 42 s, including per-repetition initialization
+- Maximum consumed prefix: 8,400 tokens
+- Local results (Git-ignored):
+  [summary](../../artifacts/benchmarks/20260903T230458451916Z/summary.json) and
+  [repetition files](../../artifacts/benchmarks/20260903T230458451916Z/)
+- Remote results: `results/benchmarks/20260903T230458451916Z/` on
+  `diffusion-arc-models` in the `diffusion-arc` environment
+- Code provenance: `e6f5fd9` plus uncommitted changes recorded in the manifest;
+  the commit alone does not identify the executed code
+
+### Profiler observation: cuDNN attention-plan setup
+
+The separate B0 profiler run kept the same data order, batch configuration, and
+LR scheduler. Its seven steps used a 2 wait + 2 profiler warm-up + 3 active
+window, so the trace covers optimizer steps 5–7. Profiler timings are not
+benchmark results.
+
+Profiler config:
+[`single_gpu_b0_torch_profile.json`](../../configs/training/profiling/single_gpu_b0_torch_profile.json).
+
+```bash
+modal run --detach --env diffusion-arc \
+  scripts/cloud/profile_single_gpu_modal.py \
+  --config configs/training/profiling/single_gpu_b0_torch_profile.json
+```
+
+Trace on `diffusion-arc-models`:
+`results/torch-profiler/<run-id>/single_gpu_b0_torch_profile/trace.json`.
+
+The first active profiler step contains three consecutive FLUX microbatches
+with text prefixes of 454, 612, and 770 tokens. Each also contains the fixed
+900 image tokens.
+
+![B0 cuDNN attention plan-cache trace](assets/b0-cudnn-attention-plan-cache.png)
+
+| Text prefix | FLUX GPU range | Recorded GPU activity | Range without GPU activity |
+| ---: | ---: | ---: | ---: |
+| 454 | 119.9 ms | 31.2 ms | 88.7 ms |
+| 612 | 48.4 ms | 34.5 ms | 13.9 ms |
+| 770 | 127.3 ms | 37.0 ms | 90.3 ms |
+
+Recorded GPU activity is the union of kernels, memory copies, and memory sets
+inside the profiler range; it is not an SM-utilization measurement. Useful GPU
+work increases with sequence length, while the large latency difference is
+primarily host-side waiting with no recorded GPU activity.
+
+The 612-token prefix had already occurred in optimizer step 1, microbatch 34.
+The 454- and 770-token prefixes were new in this process. Across all 144 active
+FLUX forwards, every one of the 128 previously unseen prefix lengths had two
+long `aten::_cudnn_attention_forward` calls; none of the 16 previously seen
+lengths had a long call. All forwards still launched 25 attention kernels, so
+attention was not skipped for the faster case.
+
+The two long calls are the first attention call in each FLUX block family. The
+model has five dual-stream followed by twenty single-stream blocks. Their QKV
+layouts differ, and tensor dimensions and strides are part of PyTorch's cuDNN
+MHA cache key. On a cache miss, PyTorch builds a new cuDNN graph and execution
+plan. The red and orange callouts mark these inferred dual-stream and
+single-stream setup sites. See the
+[PyTorch 2.13 cuDNN MHA implementation](https://github.com/pytorch/pytorch/blob/v2.13.0/aten/src/ATen/native/cudnn/MHA.cpp#L1341-L1382).
+
+Exact FLUX sequence lengths therefore produced frequent cuDNN attention-plan
+cache misses in B0. Repeated sequence lengths reused the cached plans and did
+not show the two long host-side attention calls.
+
+Do not commit profiler traces or other large generated artifacts.

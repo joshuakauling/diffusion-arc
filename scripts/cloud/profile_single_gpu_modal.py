@@ -18,6 +18,14 @@ LOCAL_REPOSITORY_ROOT = (
 VOLUME_NAME = "diffusion-arc-models"
 VOLUME_ROOT = Path("/mnt/diffusion-arc-models")
 
+
+def _ignore_data(path: Path) -> bool:
+    """Include legacy profiling inputs and the B0 bundle, but not data archives."""
+
+    included = (Path("splits"), Path("raw/arc-agi-2/training"), Path("benchmarks/single_gpu_b0"))
+    return not any(path.is_relative_to(root) or root.is_relative_to(path) for root in included)
+
+
 app = modal.App("diffusion-arc-torch-profile")
 model_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=False)
 
@@ -40,14 +48,9 @@ image = (
         remote_path=str(REMOTE_REPOSITORY_ROOT / "configs"),
     )
     .add_local_dir(
-        LOCAL_REPOSITORY_ROOT / "data" / "splits",
-        remote_path=str(REMOTE_REPOSITORY_ROOT / "data" / "splits"),
-    )
-    .add_local_dir(
-        LOCAL_REPOSITORY_ROOT / "data" / "raw" / "arc-agi-2" / "training",
-        remote_path=str(
-            REMOTE_REPOSITORY_ROOT / "data" / "raw" / "arc-agi-2" / "training"
-        ),
+        LOCAL_REPOSITORY_ROOT / "data",
+        remote_path=str(REMOTE_REPOSITORY_ROOT / "data"),
+        ignore=_ignore_data,
     )
 )
 
