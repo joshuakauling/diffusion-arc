@@ -42,7 +42,15 @@ under [`results/`](results/) and retain their existing run-oriented layout.
 - [`diagnose-conditioning-ladder-checkpoints-modal.ipynb`](inference/diagnose-conditioning-ladder-checkpoints-modal.ipynb)
 - [`evaluate-single-task-checkpoint-cross-task-modal.ipynb`](inference/evaluate-single-task-checkpoint-cross-task-modal.ipynb)
 - [`nvarc_arc_agi_1_pass32_colab.ipynb`](inference/nvarc_arc_agi_1_pass32_colab.ipynb)
-- [`Kaggle direct-sampling kernel`](inference/kaggle/nvarc_direct_sampling/)
+- [`NVARC direct-sampling Kaggle notebook`](inference/kaggle/nvarc_direct_sampling/nvarc_direct_sampling_kaggle.ipynb)
+  is a standalone manual-import copy of the frozen-inference notebook. Only cell
+  source contents differ; all other fields and metadata are preserved exactly,
+  without adding cell IDs or normalizing the notebook. The original remains
+  unchanged. Import the `.ipynb`, reuse the same Kaggle
+  inputs and runtime setup described in its opening cells, and start with the
+  default four-task `S2_A` pass@2 smoke test. No API upload or separate metadata
+  file is needed for manual import; the companion API metadata remains optional.
+  Decoding uses two canonical direct samples without TTT, augmentation, or voting.
 
 ## VAE experiments
 
