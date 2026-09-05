@@ -5,11 +5,12 @@
 | Variant | Status | NVARC source batch | VAE microbatch | FLUX microbatch | Optimizer batch | Length policy | Target order |
 | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
 | B0 | Completed | 1 | 1 | 1 | 48 | Exact prefix length | FIFO |
-| B1 | Planned | Largest validated safe batch | Largest validated safe batch | 1 | 48 | Exact prefix length | FIFO |
+| B1 | Planned | Fixed worst-case-safe size | Fixed worst-case-safe size | 1 | 48 | Fixed bucket padding | FIFO |
+| B2 | Concept | Length-dependent | Fixed size | Length-dependent | 48 | Fixed bucket padding | Length-aware |
 
-B0 is the single-GPU baseline. B1 changes only frozen NVARC and VAE
-preprocessing throughput. Length-aware reordering, dynamic batching, and
-different optimizer-batch membership are not part of either variant.
+B0 is the single-GPU baseline. B1 adds fixed batching and stable padded shapes
+without changing FIFO order or optimizer-batch membership. Length-aware
+reordering and dynamic batch sizes start with B2.
 
 ## Shared benchmark setup
 
@@ -224,3 +225,132 @@ cache misses in B0. Repeated sequence lengths reused the cached plans and did
 not show the two long host-side attention calls.
 
 Do not commit profiler traces or other large generated artifacts.
+
+## B1 — Bucketed fixed-batch single-GPU pipeline
+
+B1 keeps the NVARC-to-VAE preparation flow and FIFO target order unchanged.
+The selected NVARC source batch size is 16; FLUX keeps a microbatch size of one
+and the optimizer batch remains 48 targets. The fixed VAE microbatch size is
+still open. NVARC sources and FLUX text prefixes use fixed bucket padding.
+
+The [B1 bucket policy](b1-bucket-policy.md) records the selected seven NVARC and
+19 FLUX boundaries, their occupancy on the B0 inputs, the length histogram,
+and the padding/setup-cost trade-off. The boundaries are selected;
+implementation and end-to-end performance measurements are pending.
+
+### Preliminary NVARC capacity probe
+
+Before implementing buckets, use
+[`probe_nvarc_batch_capacity.py`](../../scripts/diagnostics/probe_nvarc_batch_capacity.py)
+to bound the number of 8,400-token sources that the existing NVARC runner can
+encode with training memory resident. The completed Modal run
+`20260905T023541561165Z` used one repetition per candidate: 29 sources succeeded
+and 30 ran out of memory. At the selected B1 source batch size of 16, peak
+allocated memory was 98.54 GiB and peak reserved memory was 110.23 GiB on an
+H200 with 139.80 GiB total memory. Raw results are stored at
+`results/nvarc-capacity/20260905T023541561165Z/` on `diffusion-arc-models` in the
+`diffusion-arc` environment. New GPU execution requires separate approval.
+
+On the approved CUDA host with the existing checkpoints available locally:
+
+```bash
+.venv/bin/python -B scripts/diagnostics/probe_nvarc_batch_capacity.py \
+  --config configs/training/benchmarks/single_gpu_b0.json \
+  --sequence-length 8400 --max-batch-size 64 --repetitions 3
+```
+
+Alternatively, after GPU-run approval, launch the complete search on Modal:
+
+```bash
+modal run --detach --env diffusion-arc \
+  scripts/cloud/probe_nvarc_batch_capacity_modal.py \
+  --config configs/training/benchmarks/single_gpu_b0.json \
+  --max-batch-size 64 --repetitions 3
+```
+
+The [Modal launcher](../../scripts/cloud/probe_nvarc_batch_capacity_modal.py)
+uses one H200, eight physical CPU cores, 64 GiB RAM, and a 30-minute Function
+timeout. One Function owns the entire sequential search, so `--detach` covers
+all candidates. There are no automatic Function retries. Only `src`, `scripts`,
+and `configs` are uploaded; datasets, local checkpoint weights, and root-level
+profiler traces are excluded. The existing `diffusion-arc-models` Volume supplies
+the checkpoints and stores results under `results/nvarc-capacity/<run-id>/`.
+
+Local validation checks the options, config layout, and checkpoint paths without
+requiring local weights or a dataset. Missing remote checkpoints fail before
+candidate workers start. Local Git provenance, command, Modal version, image ID,
+and resource allocation are recorded in the manifest. Uploaded source and config
+hashes must match the launch metadata; Git is not required in the container.
+The Volume is committed after each completed candidate (including failure
+records) and again when the search ends. Failed searches raise a Modal error.
+A hard timeout or container termination can still lose the currently running
+candidate's uncommitted updates; earlier committed candidates remain available.
+The completed run above exercised both the launcher and the GPU probe. It used
+the documented Modal command with `--repetitions 1` and `--detach`.
+
+The probe uses B0's checkpoint paths, seed, precision, optimizer, and initial
+scheduled learning rate. It does not read the benchmark dataset. Production
+prompt rendering and the checkpoint tokenizer construct a deterministic
+synthetic five-pair task with 30x30 grids. Its final consumed prefix contains
+exactly 8,400 real tokens; the final output is excluded. Each physical batch
+repeats that source. The length argument currently accepts only 8,400, avoiding
+truncation or artificial valid padding tokens.
+
+Each candidate runs in a fresh, sequential Python process with all three models
+loaded. One real single-target optimizer step on a separate synthetic two-pair
+1x1 task initializes AdamW moments and FLUX gradients. Its target still uses
+the normal 480x480 canvas and 900 image tokens. Initialization is not a benchmark
+step; its allocations are reported separately. Every FLUX parameter must have
+a gradient and both AdamW moment tensors afterward. Gradients stay resident,
+matching preparation before the next optimizer batch in the current loop.
+
+The process also retains an explicit conservative storage reserve:
+
+- 16 independent NVARC source tensors of shape `[8400, 7680]` in NVARC dtype;
+- 48 target latents in VAE dtype, covering a full FIFO optimizer batch even
+  though the queue holds fewer than 48 targets before preparation;
+- another 48 target latents for the previous `optimizer_inputs` tuple, which
+  remains referenced while the loop prepares the next source batch.
+
+These zero-filled reserve tensors are never model inputs. Counts, dtypes, and
+bytes are written to each candidate's result. They model retained tensor
+storage rather than replaying the FIFO allocator history or VAE chunk storage.
+No `empty_cache()` calls alter the allocator between probe repetitions.
+
+The search doubles batch size from one, capped by `--max-batch-size`, then
+bisects the observed success/OOM bracket. Success requires every requested
+runner call to finish, including source-state concatenation and copies.
+Synchronization brackets each call; the first call includes cold shape setup,
+and subsequent calls reuse that process. Outputs are released before the next
+call. Only a typed CUDA OOM during probing supplies an OOM bound. Setup OOM,
+other exceptions, killed workers, and incomplete results abort the search.
+
+Results default to the Git-ignored `artifacts/nvarc-capacity/<run-id>/` directory;
+`--output-dir` selects a different new directory. The script refuses to
+overwrite an existing destination. `manifest.json` records the resolved config,
+source hashes, and revision; each `batch-*/result.json` records software, GPU,
+checkpoint configs, workload hash, initialization and reserve details, timings,
+and allocated/reserved peaks. Completed repetitions are persisted individually,
+including before a subsequent failure. Worker logs, `candidates.json`, and
+`summary.json` retain the search history. Checkpoint weights are not hashed;
+immutable model revisions must still be established for formal comparisons.
+
+`largest_tested_success` and `smallest_tested_oom` describe the observed bracket,
+assuming feasibility is monotone across the searched batch sizes. Reaching the
+search limit without OOM leaves `boundary_known` false. Allocated headroom is
+total device memory minus peak allocated; it is not driver-free memory and
+does not include every allocation outside PyTorch. Reserved memory is reported
+separately. No safety margin or final B1 batch size is selected automatically.
+
+This is a capacity diagnostic, not a throughput benchmark or numerical
+agreement test. Full-length valid sources do not establish memory behavior for
+mixed-length padding masks, coupled NVARC-to-VAE preparation, or complete B1
+optimizer steps. No additional capacity probe is planned for B1. The script
+does not modify training code, checkpoint
+weights, or benchmark configs, download models/data, or launch a remote job.
+
+## B2 — Length-aware dynamic-batch single-GPU pipeline
+
+B2 may select NVARC and FLUX batch sizes by length bucket. Its scheduling,
+buffering, and remainder policy are intentionally left open until B1 is
+measured.
