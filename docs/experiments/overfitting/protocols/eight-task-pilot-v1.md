@@ -1,5 +1,7 @@
 # Single-GPU Overfitting Pilot
 
+This historical protocol is retained with the [findings and archived source](../README.md).
+
 ## Status and question
 
 This document preregisters the first Milestone 2 learning pilot. It does not
@@ -41,8 +43,8 @@ conditioning. They enter only the scoring and fixed-flow-probe paths.
 
 ## Fixed training recipe
 
-The source configuration is
-[`configs/training/overfitting/single_gpu_overfitting_pilot.json`](../../../../configs/training/overfitting/single_gpu_overfitting_pilot.json).
+The historical source configuration is
+[`configs/training/overfitting/single_gpu_overfitting_pilot.json`](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/configs/training/overfitting/single_gpu_overfitting_pilot.json).
 The Modal notebook resolves only the checkpoint paths to the mounted Volume.
 The complete raw dataset is installed separately by
 [`experiments/setup/download_arc_agi_2_to_modal.ipynb`](../../../../experiments/setup/download_arc_agi_2_to_modal.ipynb)
@@ -106,7 +108,8 @@ current FP32 FLUX transformer when the user chooses to retain a checkpoint.
 
 ### Reusable checkpoint evaluation
 
-[`experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb`](../../../../experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb)
+The historical notebook
+[`experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb`](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/experiments/inference/evaluate-flux-checkpoint-training-view-modal.ipynb)
 loads a standalone saved FLUX transformer while reusing the frozen NVARC and
 VAE checkpoints. It defaults to the first `train` augmentation key for each of
 the eight pilot tasks and evaluates the final target from each key. Every

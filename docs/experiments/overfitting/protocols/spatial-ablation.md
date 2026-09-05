@@ -1,5 +1,7 @@
 # Single-Task Spatial Overfitting Ablation
 
+This historical protocol is retained with the [findings and archived source](../README.md).
+
 ## Status and question
 
 This document preregisters a paired diagnostic on ARC task `0d3d703e`. It is
@@ -131,8 +133,8 @@ or provide an NVARC autoregressive baseline.
 
 ## Notebook and outputs
 
-The executable entrypoint is
-[`experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb`](../../../../experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb).
+The historical entrypoint is
+[`experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb`](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/experiments/training/single-task-spatial-overfitting-ablation-modal.ipynb).
 It runs the source-controlled experiment runner, streams progress, writes a
 single comparison report, and uploads one validated Safetensors checkpoint per
 variant through the Modal Volume batch-upload API.

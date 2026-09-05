@@ -1,5 +1,7 @@
 # Single-Task Conditioning Overfitting Ladder
 
+This historical protocol is retained with the [findings and archived source](../README.md).
+
 ## Status and question
 
 This document records the preregistration and one pre-training protocol
@@ -169,10 +171,10 @@ report upload completed. It never implies that a learning criterion passed.
 
 ## Artifacts and non-goals
 
-The executable notebook is
-[`experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb`](../../../../experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb).
-The source-controlled runner is
-[`scripts/experiments/run_single_task_conditioning_ladder.py`](../../../../scripts/experiments/run_single_task_conditioning_ladder.py).
+The historical notebook is
+[`experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb`](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/experiments/training/single-task-conditioning-overfitting-ladder-modal.ipynb).
+The historical runner is
+[`scripts/experiments/run_single_task_conditioning_ladder.py`](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/scripts/experiments/run_single_task_conditioning_ladder.py).
 
 Results are written under:
 

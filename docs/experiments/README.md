@@ -24,6 +24,9 @@ snapshots live under [`experiments/results/`](../../experiments/results/).
 These documents preserve the preregistered questions, controls, stopping
 rules, and interpretation gates behind the summarized overfitting result. They
 are supporting provenance rather than entry points for the current conclusion.
+The completed experiment notebooks, runners, configurations, and dedicated tests
+are retained in [Git history](overfitting/README.md#historical-source); the findings
+and local result snapshots remain in the current tree.
 
 - [Eight-task pilot v1](overfitting/protocols/eight-task-pilot-v1.md)
 - [Eight-task pilot v2](overfitting/protocols/eight-task-pilot-v2.md)

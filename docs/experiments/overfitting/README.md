@@ -241,5 +241,18 @@ results/single-task-checkpoint-cross-task-diagnosis/
 20260827T024030502160Z/report.json
 ```
 
-The notebooks used to create these runs are located under
-`experiments/training/`, `experiments/inference/`, and `experiments/vae/`.
+## Historical source
+
+The completed overfitting notebooks, experiment runners, dedicated configurations,
+and tests have been removed from the current source tree. They remain available
+at the pre-cleanup snapshot `e741b1f471e25f0d1a0061e198fa1d2383182ab0`:
+
+- [Experiment notebook index](https://github.com/joshuakauling/diffusion-arc/blob/e741b1f471e25f0d1a0061e198fa1d2383182ab0/experiments/README.md)
+- [Experiment runners](https://github.com/joshuakauling/diffusion-arc/tree/e741b1f471e25f0d1a0061e198fa1d2383182ab0/scripts/experiments)
+- [Overfitting configurations](https://github.com/joshuakauling/diffusion-arc/tree/e741b1f471e25f0d1a0061e198fa1d2383182ab0/configs/training/overfitting)
+- [Experiment tests](https://github.com/joshuakauling/diffusion-arc/tree/e741b1f471e25f0d1a0061e198fa1d2383182ab0/tests/experiments)
+
+This snapshot preserves the source before cleanup. Each saved run report records
+the actual source revision, runtime, and configuration used for that experiment;
+use those records when tracing a measured result. The findings, protocols, result
+snapshots, and data splits remain in the current tree.
