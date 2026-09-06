@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from diffusion_arc.arc_data import load_arc_split_config
 from diffusion_arc.arc_data._split_io import resolve_inside
 from diffusion_arc.arc_data._split_layout import resolve_split_layout
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 from diffusion_arc.training.single_gpu_loop import run_single_gpu_training
 from diffusion_arc.training.single_gpu_setup import (
@@ -109,6 +110,8 @@ class _StepRecorder:
         self.pending_targets: deque[tuple[int, bool]] = deque()
         self.sources: list[dict] = []
         self.padded_tokens = 0
+        self.nvarc_buckets = SequenceLengthBuckets(config.padding.nvarc_bucket_boundaries)
+        self.flux_buckets = SequenceLengthBuckets(config.padding.flux_bucket_boundaries)
 
     def samples(self, samples):
         iterator = iter(samples)
@@ -125,7 +128,8 @@ class _StepRecorder:
                         (length, index == len(prefixes) - 1)
                         for index, length in enumerate(prefixes)
                     )
-            self.padded_tokens += max(lengths, default=0) * len(lengths)
+            if lengths:
+                self.padded_tokens += self.nvarc_buckets.padded_length(max(lengths)) * len(lengths)
             yield from batch
 
     def start(self):
@@ -140,6 +144,11 @@ class _StepRecorder:
         torch.cuda.synchronize(self.device)
         seconds = time.perf_counter() - self.started
         consumed = [self.pending_targets.popleft() for _ in range(target_count)]
+        padded_prefixes = []
+        for start in range(0, target_count, self.config.loop.flux_microbatch_size):
+            microbatch = consumed[start : start + self.config.loop.flux_microbatch_size]
+            padded_length = self.flux_buckets.padded_length(max(length for length, _ in microbatch))
+            padded_prefixes.extend([padded_length] * len(microbatch))
         self.rows.append({
             "step": len(self.rows) + 1,
             "phase": "warmup" if len(self.rows) < self.config.benchmark.warmup_steps else "measure",
@@ -153,6 +162,7 @@ class _StepRecorder:
             "nvarc_unpadded_tokens": sum(source["tokens"] for source in self.sources),
             "nvarc_padded_tokens": self.padded_tokens,
             "target_prefix_tokens": [length for length, _ in consumed],
+            "flux_padded_prefix_tokens": padded_prefixes,
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
             "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
         })
@@ -224,6 +234,7 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             optimizer=optimizer,
             flux_compute_dtype=models.flux_compute_dtype,
             **asdict(config.loop),
+            flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
             generator=generator,
             on_optimizer_step=recorder.step,
         )

@@ -56,6 +56,50 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 class SingleGpuTrainingConfigTests(unittest.TestCase):
+    def test_b1_changes_only_fixed_preparation_batches_and_padding(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        b0 = load_single_gpu_training_config(root / "configs/training/benchmarks/single_gpu_b0.json")
+        b1 = load_single_gpu_training_config(root / "configs/training/benchmarks/single_gpu_b1.json")
+        self.assertEqual((b1.loop.nvarc_source_batch_size, b1.loop.vae_microbatch_size), (16, 48))
+        self.assertEqual(b1.padding.nvarc_bucket_boundaries,
+                         (4096, 4608, 5120, 5632, 6144, 7168, 8400))
+        self.assertEqual(b1.padding.flux_bucket_boundaries,
+                         (*range(256, 3073, 256), 3584, 4096, 4608, 5120, 6144, 7168, 8400))
+        self.assertIsNone(b0.padding.nvarc_bucket_boundaries)
+        self.assertIsNone(b0.padding.flux_bucket_boundaries)
+        self.assertEqual(replace(b1, padding=b0.padding, loop=replace(
+            b1.loop, nvarc_source_batch_size=1, vae_microbatch_size=1,
+        )), b0)
+
+    def test_schema_v4_validates_independent_bucket_lists(self) -> None:
+        payload = _payload()
+        payload.update(schema_version=4, scheduler=None, benchmark=None, padding={
+            "nvarc_bucket_boundaries": [256, 512, 8400],
+            "flux_bucket_boundaries": None,
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_single_gpu_training_config(_write_config(Path(directory), payload))
+        self.assertEqual(config.padding.nvarc_bucket_boundaries, (256, 512, 8400))
+        self.assertIsNone(config.padding.flux_bucket_boundaries)
+        for field in payload["padding"]:
+            for value, error in (([], ValueError), ([256, 256, 8400], ValueError),
+                                 ([512, 256, 8400], ValueError), ([0, 8400], ValueError),
+                                 ([-1, 8400], ValueError), ([8192], ValueError),
+                                 ([8401], ValueError), ([True, 8400], TypeError),
+                                 ([256.0, 8400], TypeError), (["256", 8400], TypeError),
+                                 ("256,8400", TypeError)):
+                invalid = {**payload, "padding": {**payload["padding"], field: value}}
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(error):
+                        load_single_gpu_training_config(_write_config(Path(directory), invalid))
+        for section in ({"nvarc_bucket_boundaries": None},
+                        {**payload["padding"], "sort_by_length": True}):
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "fields differ"):
+                    load_single_gpu_training_config(_write_config(
+                        Path(directory), {**payload, "padding": section},
+                    ))
+
     def test_loads_checked_in_reference_config(self) -> None:
         repository_root = Path(__file__).resolve().parents[2]
 
@@ -116,6 +160,8 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
         self.assertEqual(config.loop.nvarc_source_batch_size, 1)
         self.assertIsNone(config.loop.vae_microbatch_size)
+        self.assertIsNone(config.padding.nvarc_bucket_boundaries)
+        self.assertIsNone(config.padding.flux_bucket_boundaries)
 
     def test_rejects_missing_and_extra_fields(self) -> None:
         cases = []
@@ -138,7 +184,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
     def test_rejects_unsupported_schema_device_and_dtype(self) -> None:
         cases = (
-            ("schema_version", 4, "unsupported schema_version"),
+            ("schema_version", 5, "unsupported schema_version"),
             ("device", "cpu", "device must be"),
         )
         for field, value, message in cases:
@@ -240,25 +286,27 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
         self.assertIsNone(legacy.scheduler)
         self.assertIsNone(legacy.benchmark)
 
-    def test_b0_profile_changes_only_duration_and_disables_benchmark(self) -> None:
+    def test_profiles_change_only_duration_and_disable_benchmark(self) -> None:
         root = Path(__file__).resolve().parents[2]
-        benchmark = load_single_gpu_training_config(
-            root / "configs/training/benchmarks/single_gpu_b0.json"
-        )
-        profiling = load_single_gpu_training_config(
-            root / "configs/training/profiling/single_gpu_b0_torch_profile.json"
-        )
         profile_steps = (
             train_single_gpu.PROFILER_WAIT_STEPS
             + train_single_gpu.PROFILER_WARMUP_STEPS
             + train_single_gpu.PROFILER_ACTIVE_STEPS
         )
         self.assertEqual(profile_steps, 7)
-        self.assertEqual(profiling, replace(
-            benchmark,
-            loop=replace(benchmark.loop, max_optimizer_steps=profile_steps),
-            benchmark=None,
-        ))
+        for variant in ("b0", "b1"):
+            with self.subTest(variant=variant):
+                benchmark = load_single_gpu_training_config(
+                    root / f"configs/training/benchmarks/single_gpu_{variant}.json"
+                )
+                profiling = load_single_gpu_training_config(
+                    root / f"configs/training/profiling/single_gpu_{variant}_torch_profile.json"
+                )
+                self.assertEqual(profiling, replace(
+                    benchmark,
+                    loop=replace(benchmark.loop, max_optimizer_steps=profile_steps),
+                    benchmark=None,
+                ))
 
     def test_rejects_invalid_scheduler_and_benchmark(self) -> None:
         cases = (

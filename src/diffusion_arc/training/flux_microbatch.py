@@ -15,6 +15,7 @@ from diffusion_arc.model.contracts import (
 )
 from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
 from diffusion_arc.model.flux_velocity import build_flux_image_position_ids
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 from .flux_input import FluxInput, NvarcSequenceState
 
@@ -42,6 +43,7 @@ def build_flux_microbatch(
     flux_inputs: Sequence[FluxInput],
     *,
     spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
+    length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
 ) -> FluxMicrobatch:
     """Copy logical inputs into one physical batch and release consumed states.
 
@@ -69,7 +71,7 @@ def build_flux_microbatch(
         flux_input.nvarc_sequence_state._prefix_for(flux_input.prefix_end)
         for flux_input in inputs
     )
-    text_inputs = pad_flux_text_prefixes(hidden_state_prefixes)
+    text_inputs = pad_flux_text_prefixes(hidden_state_prefixes, length_buckets=length_buckets)
     clean_latents = torch.stack(
         tuple(flux_input.clean_latent for flux_input in inputs)
     )

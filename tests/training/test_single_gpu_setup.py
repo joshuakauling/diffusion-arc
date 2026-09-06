@@ -19,6 +19,7 @@ from diffusion_arc.training.single_gpu_config import (
     SingleGpuDataConfig,
     SingleGpuLoopConfig,
     SingleGpuModelConfig,
+    SingleGpuPaddingConfig,
     SingleGpuTrainingConfig,
 )
 from diffusion_arc.training.single_gpu_setup import (
@@ -177,7 +178,9 @@ class SingleGpuSetupTests(unittest.TestCase):
     def test_loads_only_local_checkpoints_and_sets_parameter_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            config = _config(root)
+            config = replace(_config(root), padding=SingleGpuPaddingConfig(
+                nvarc_bucket_boundaries=(4096, 8400),
+            ))
             config.models.nvarc_checkpoint.mkdir()
             config.models.flux_checkpoint.mkdir()
 
@@ -240,6 +243,7 @@ class SingleGpuSetupTests(unittest.TestCase):
 
         self.assertIs(models.tokenizer, tokenizer)
         self.assertIs(models.nvarc_runner.model, nvarc)
+        self.assertEqual(models.nvarc_runner.length_buckets.boundaries, (4096, 8400))
         self.assertIs(models.vae_encoder.vae, vae)
         self.assertIs(models.vae_decoder.vae, vae)
         self.assertIs(models.transformer, transformer)

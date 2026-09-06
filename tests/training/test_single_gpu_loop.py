@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import torch
@@ -15,11 +16,14 @@ from diffusion_arc.arc_data.augmentation import (
 )
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model import (
+    NvarcBatchRunner,
     NvarcBatchOutput,
     TARGET_LATENT_CHANNELS,
     TARGET_LATENT_TOKEN_COUNT,
 )
 from diffusion_arc.training import run_single_gpu_training
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from tests.model.test_nvarc_encoder import FakeNvarc
 
 
 class RecordingNvarcRunner(nn.Module):
@@ -111,6 +115,95 @@ def _sample(target_count: int) -> ArcTokenizedTrainingSample:
 
 
 class SingleGpuTrainingTests(unittest.TestCase):
+    def test_b1_preserves_two_optimizer_batches_and_per_target_loss_weights(self) -> None:
+        samples = []
+        for index in range(32):
+            sample = _sample(4)
+            ends = tuple(end + index % 3 for end in sample.prefix_token_ends)
+            samples.append(replace(
+                sample,
+                key=replace(sample.key, task_id=f"{index:08x}"),
+                input_ids=(index % 10,) * (ends[-1] + 1),
+                prefix_token_ends=ends,
+                target_grids=tuple(((index // 10, index % 10, target),) for target in range(4)),
+            ))
+
+        def run(source_batch, vae_batch, nvarc_bounds, flux_bounds):
+            events, targets, prefixes, padded_lengths, weights, steps = [], [], [], [], [], []
+
+            class Nvarc(FakeNvarc):
+                def forward(self, **kwargs):
+                    events.append(("nvarc", kwargs["input_ids"].shape[0]))
+                    return super().forward(**kwargs)
+
+            class Vae(nn.Module):
+                def forward(self, images):
+                    events.append(("vae", images.shape[0]))
+                    return images[:, 0, 0, 0, None, None].expand(
+                        -1, TARGET_LATENT_TOKEN_COUNT, TARGET_LATENT_CHANNELS,
+                    ).clone()
+
+            def loss(model, microbatch, **_kwargs):
+                target = int(microbatch.clean_latents[0, 0, 0])
+                targets.append(target)
+                prefixes.append(int(microbatch.text_inputs.text_attention_mask.sum()))
+                padded_lengths.append(microbatch.text_inputs.encoder_hidden_states.shape[1])
+                events.append(("flux", target))
+                value = model.weight * microbatch.clean_latents[:, 0, 0].mean()
+                value.register_hook(lambda grad: weights.append(float(grad)))
+                return value
+
+            def on_step(loss, target_count, microbatch_count):
+                steps.append((tuple(targets[-48:]), float(loss), float(model.weight.grad),
+                              target_count, microbatch_count))
+                events.append(("optimizer", len(steps)))
+
+            def render(grid):
+                # Keep the pipeline test small while identifying every source/target pair.
+                tens, ones, target = grid[0]
+                return torch.tensor([[[float(30 * tens + 3 * ones + target)]]])
+
+            model = ScalarTransformer()
+            with (
+                patch("diffusion_arc.training.flux_input._render_valid_grid_canvas", side_effect=render),
+                patch("diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss", side_effect=loss),
+            ):
+                run_single_gpu_training(
+                    samples,
+                    nvarc_runner=NvarcBatchRunner(Nvarc(), length_buckets=SequenceLengthBuckets(nvarc_bounds)),
+                    vae_encoder=Vae(), transformer=model,
+                    optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+                    flux_compute_dtype=torch.bfloat16, max_optimizer_steps=2,
+                    optimizer_batch_size=48, flux_microbatch_size=1,
+                    min_context_pairs_before_target=2,
+                    nvarc_source_batch_size=source_batch, vae_microbatch_size=vae_batch,
+                    flux_bucket_boundaries=flux_bounds, on_optimizer_step=on_step,
+                )
+            return events, targets, prefixes, padded_lengths, weights, steps, model.weight.detach()
+
+        b0 = run(1, 1, None, None)
+        b1 = run(16, 48, (16,), (8, 16))
+        self.assertEqual(b1[1], list(range(1, 97)))
+        self.assertEqual(b1[1:3], b0[1:3])
+        self.assertEqual(b1[3], [8 if length <= 8 else 16 for length in b1[2]])
+        self.assertEqual(b0[3], b0[2])
+        self.assertEqual(b1[5], b0[5])
+        self.assertEqual([row[0] for row in b1[5]], [tuple(range(1, 49)), tuple(range(49, 97))])
+        for step, expected_gradient in zip(b1[5], (24.5, 72.5)):
+            self.assertAlmostEqual(step[2], expected_gradient, places=4)
+            self.assertEqual(step[3:], (48, 48))
+        self.assertEqual(len(b1[4]), 96)
+        for weight in b1[4]:
+            self.assertAlmostEqual(weight, 1 / 48, places=8)
+        torch.testing.assert_close(b1[6], b0[6])
+        torch.testing.assert_close(b1[6], torch.tensor(0.03), atol=1e-6, rtol=1e-6)
+        expected_events = []
+        for step in range(2):
+            expected_events.extend([("nvarc", 16), ("vae", 48)])
+            expected_events.extend(("flux", target) for target in range(48 * step + 1, 48 * step + 49))
+            expected_events.append(("optimizer", step + 1))
+        self.assertEqual(b1[0], expected_events)
+
     def test_scales_fifo_microbatches_and_flushes_stream_tail(self) -> None:
         nvarc = RecordingNvarcRunner()
         vae = NumberedVaeEncoder()

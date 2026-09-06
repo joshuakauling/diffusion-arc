@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import torch
 
 from diffusion_arc.training.single_gpu_config import (
-    BenchmarkConfig, load_single_gpu_training_config,
+    BenchmarkConfig, SingleGpuPaddingConfig, load_single_gpu_training_config,
 )
 from scripts import benchmark_single_gpu as bench
 from tests.training.test_dataset import build_layout
@@ -35,6 +35,44 @@ def _samples(count):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_b1_records_real_and_bucketed_lengths_separately(self):
+        config = load_single_gpu_training_config(
+            Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b1.json"
+        )
+        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
+        samples = _samples(16)
+        samples[0].prefix_token_ends = (10, 256, 257, 513)
+        with ExitStack() as stack:
+            self._mock_cuda(stack)
+            recorder.start()
+            list(recorder.samples(samples))
+            recorder.step(torch.tensor(0.5), 48, 48)
+        row = recorder.rows[0]
+        self.assertEqual(row["nvarc_unpadded_tokens"], 513 + 15 * 40)
+        self.assertEqual(row["nvarc_padded_tokens"], 16 * 4096)
+        self.assertEqual(row["target_prefix_tokens"], [256, 257, 513] + [20, 30, 40] * 15)
+        self.assertEqual(row["flux_padded_prefix_tokens"], [256, 512, 768] + [256] * 45)
+        self.assertEqual([s["key"] for s in row["prepared_sources"]], [f"source-{i}" for i in range(16)])
+        self.assertEqual(row["completed_sources"], 16)
+
+    def test_bucket_metadata_uses_each_physical_microbatch_maximum(self):
+        config = _config()
+        config = replace(config,
+                         loop=replace(config.loop, optimizer_batch_size=4,
+                                      nvarc_source_batch_size=2, flux_microbatch_size=2),
+                         padding=SingleGpuPaddingConfig((64, 8400), (32, 64, 8400)))
+        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
+        samples = _samples(2)
+        samples[1].prefix_token_ends = (15, 25, 35, 50)
+        with ExitStack() as stack:
+            self._mock_cuda(stack)
+            recorder.start()
+            list(recorder.samples(samples))
+            recorder.step(torch.tensor(0.5), 4, 2)
+        self.assertEqual(recorder.rows[0]["nvarc_padded_tokens"], 128)
+        self.assertEqual(recorder.rows[0]["flux_padded_prefix_tokens"], [32, 32, 64, 64])
+        self.assertEqual(list(recorder.pending_targets), [(35, False), (50, True)])
+
     def test_file_check_uses_existing_layout_without_loading_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             split, _ = build_layout(Path(directory))
@@ -66,6 +104,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual([row["seconds"] for row in recorder.rows], [10, 2, 4])
         self.assertEqual(scheduler.step.call_count, 3)
         self.assertEqual(recorder.rows[0]["target_prefix_tokens"], [20, 30, 40])
+        self.assertEqual(recorder.rows[0]["flux_padded_prefix_tokens"], [20, 30, 40])
         summary = bench.summarize(recorder.rows)
         self.assertEqual(summary["measured_steps"], 2)
         self.assertEqual(summary["median_step_seconds"], 3)
@@ -158,9 +197,13 @@ class BenchmarkTests(unittest.TestCase):
                     transformer=object(), flux_compute_dtype=torch.bfloat16,
                 )
                 optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
+                config = replace(_config(), padding=SingleGpuPaddingConfig(
+                    flux_bucket_boundaries=(256, 512, 8400),
+                ))
                 def run(samples, **kwargs):
                     self.assertEqual(kwargs["max_optimizer_steps"], 3)
                     self.assertEqual(kwargs["vae_microbatch_size"], 1)
+                    self.assertEqual(kwargs["flux_bucket_boundaries"], (256, 512, 8400))
                     self.assertNotIn("on_optimizer_step_metrics", kwargs)
                     for index, _ in enumerate(samples):
                         if index == completed_steps:
@@ -169,7 +212,7 @@ class BenchmarkTests(unittest.TestCase):
                 with ExitStack() as stack:
                     self._mock_cuda(stack)
                     for name, result in {
-                        "check_inputs": (_config(), []), "prepare_single_gpu_device": "cuda:0",
+                        "check_inputs": (config, []), "prepare_single_gpu_device": "cuda:0",
                         "seed_single_gpu_process": None, "load_single_gpu_models": models,
                         "build_single_sample_loader": _samples(3), "build_flux_optimizer": optimizer,
                         "build_flux_scheduler": Mock(), "build_flow_generator": object(),

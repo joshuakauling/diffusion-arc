@@ -1,8 +1,13 @@
 # B1 bucket policy
 
-**Decision: selected initial boundaries for B1.** Implementation and end-to-end
-performance measurements are pending. These boundaries are based on the fixed
-B0 benchmark inputs; they are not a measured throughput optimum.
+**Decision: implemented initial boundaries for B1.** The
+[B1 configuration](../../configs/training/benchmarks/single_gpu_b1.json) selects
+the policy below. The [completed B1 benchmark](README.md#b1-benchmark-result)
+measured 11.9% more target throughput than B0; the
+[profiler comparison](README.md#b1-profiler-findings-activity-gaps-and-total-ranges)
+records the attention-plan and preparation costs. These boundaries are based
+on the fixed B0 benchmark inputs; the combined B1 result does not establish
+that they are a throughput optimum.
 
 ## Selected policy
 
@@ -10,10 +15,9 @@ B0 benchmark inputs; they are not a measured throughput optimum.
   giving the existing 48-target optimizer batch.
 - FLUX keeps a microbatch size of one and adds 900 image tokens to each text
   prefix.
-- NVARC-to-VAE preparation stays coupled. The fixed VAE microbatch size remains
-  undecided.
+- NVARC-to-VAE preparation stays coupled. The fixed VAE microbatch size is 48,
+  encoding the 48 target images from one NVARC batch in one VAE call.
 - FIFO order, optimizer-batch membership, and loss weighting stay unchanged.
-  Length-dependent batch sizes and reordering belong to B2.
 - Select the smallest configured boundary greater than or equal to the required
   length. For NVARC, that length is the maximum of the 16 consumed source
   lengths; for FLUX, it is the individual target's text-prefix length.
@@ -21,7 +25,9 @@ B0 benchmark inputs; they are not a measured throughput optimum.
 
 The final boundary of 8,400 covers the maximum consumed text length. Shorter
 inputs use the smaller boundaries below; 8,400 is not a universal padding
-length. Configuration field names are outside this documentation decision.
+length. Schema version 4 stores these lists in `padding.nvarc_bucket_boundaries`
+and `padding.flux_bucket_boundaries`. Each field may be `null` to retain exact
+padding; existing schema versions 1–3 disable bucket rounding by default.
 
 ## Data and histogram
 
@@ -101,6 +107,14 @@ percentage describes only the additional bucket rounding. It does not include
 the padding already caused by combining different source lengths in each
 fixed FIFO batch.
 
+The completed benchmark exposes that larger cost: during measurement steps
+11–60, B1 processes 4,386,048 padded NVARC positions for 2,050,665 real tokens,
+or **2.14x the real-token count**. This measurement window differs from the
+60-step occupancy analysis above. The
+[profiler comparison](README.md#b1-profiler-findings-activity-gaps-and-total-ranges)
+discusses the increased NVARC GPU activity and the effects of padding and
+mask handling.
+
 ## FLUX boundaries
 
 The 19 selected text-prefix boundaries use 256-token increments through 3,072,
@@ -151,10 +165,12 @@ The 900 image tokens are excluded from this percentage. It is not an estimate
 of attention FLOPs, peak memory, or step-time overhead.
 
 Warm-up inputs map to 18 of the 19 selected FLUX boundaries. Only 8,400 first
-appears during measurement. This is a classification of existing B0 inputs,
-not an observation of cache hits in an executed B1 run. A text boundary is not
-necessarily a single cuDNN plan: block layouts and other cache-key properties
-also matter.
+appears during measurement. These occupancy counts classify the recorded
+input lengths; they are not direct cache-hit measurements. The separate B1
+trace supports plan reuse: long FLUX cuDNN forward calls drop from 256 to two
+over optimizer steps 5–7, with the same reduction in backward. A text boundary
+is not necessarily a single cuDNN plan: block layouts and other cache-key
+properties also matter.
 
 ## When an additional boundary is worthwhile
 
@@ -186,10 +202,11 @@ tokens, and GPU kernel behavior. The terminal boundary of 8,400 is required to
 cover the maximum input; it has no larger configured boundary to merge into.
 
 The [B0 profiler observation](README.md#profiler-observation-cudnn-attention-plan-setup)
-motivates reducing the number of shapes. It does not supply `delta_t` and
-`C_extra` for these B1 buckets. Keep the selected boundaries as the initial B1
-policy; any later adjustment should use measured complete-step performance.
-No additional memory probe or GPU run is part of this documentation change.
+motivates reducing the number of shapes, and the completed B1 trace confirms
+that long setup calls nearly disappear. Neither result supplies isolated
+`delta_t` and `C_extra` values for each possible boundary. The selected
+boundaries define the evaluated B1 configuration; their throughput optimality
+has not been established.
 
 ## Reproduce the bucket counts
 

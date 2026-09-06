@@ -5,6 +5,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+
 from .contracts import (
     NVARC_HIDDEN_STATE_INDICES,
     NVARC_PAD_TOKEN_ID,
@@ -36,12 +38,18 @@ class NvarcBatchRunner(nn.Module):
     padded positions before returning the selected hidden states.
     """
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
+    ) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
 
         self.model = model
+        self.length_buckets = length_buckets
         self.model.requires_grad_(False)
         self.train(False)
 
@@ -66,7 +74,7 @@ class NvarcBatchRunner(nn.Module):
             end - start for start, end in zip(offsets, offsets[1:])
         )
         source_count = len(source_lengths)
-        max_length = max(source_lengths)
+        max_length = self.length_buckets.padded_length(max(source_lengths))
         model_device = _module_input_device(self.model)
 
         flat_input_ids = input_ids.to(device=model_device)

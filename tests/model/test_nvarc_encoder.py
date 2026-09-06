@@ -17,6 +17,7 @@ from diffusion_arc.model import (
     NvarcBatchOutput,
     NvarcBatchRunner,
 )
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 
 class FakeNvarc(nn.Module):
@@ -71,6 +72,51 @@ class MissingInputEmbeddingsNvarc(nn.Module):
 
 
 class NvarcBatchRunnerTests(unittest.TestCase):
+    def test_bucket_padding_keeps_masks_and_compact_source_outputs(self) -> None:
+        model = FakeNvarc()
+        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8, 16)))
+        ids = torch.tensor([1, 2, 3, 4, 5, 6])
+        offsets = torch.tensor([0, 2, 6])
+        result = runner(ids, offsets)
+        self.assertEqual(tuple(model.last_input_ids.shape), (2, 8))
+        torch.testing.assert_close(model.last_attention_mask, torch.tensor([
+            [True, True, False, False, False, False, False, False],
+            [True, True, True, True, False, False, False, False],
+        ]))
+        self.assertTrue(torch.all(model.last_input_ids[~model.last_attention_mask] == NVARC_PAD_TOKEN_ID))
+        reference = NvarcBatchRunner(FakeNvarc())(ids, offsets)
+        for actual, expected in zip(result.sequence_hidden_states, reference.sequence_hidden_states):
+            torch.testing.assert_close(actual, expected)
+            self.assertEqual(actual.untyped_storage().nbytes(), actual.numel() * actual.element_size())
+            self.assertFalse(actual.requires_grad)
+        self.assertNotEqual(result.sequence_hidden_states[0].data_ptr(),
+                            result.sequence_hidden_states[1].data_ptr())
+
+    def test_bucketed_qwen_matches_separate_exact_length_encodings(self) -> None:
+        from transformers import Qwen3Config, Qwen3Model
+
+        torch.manual_seed(11)
+        config = Qwen3Config(vocab_size=16, hidden_size=8, intermediate_size=16,
+                            num_hidden_layers=28, num_attention_heads=2,
+                            num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
+        config._attn_implementation = "sdpa"
+        model = Qwen3Model(config)
+        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8,)))
+        ids = torch.tensor([1, 2, 3, 4, 5, 6])
+        padded = runner(ids, torch.tensor([0, 2, 6]))
+        exact_runner = NvarcBatchRunner(model)
+        for index, tokens in enumerate((ids[:2], ids[2:])):
+            exact = exact_runner(tokens, torch.tensor([0, len(tokens)]))
+            torch.testing.assert_close(padded.sequence_hidden_states[index],
+                                       exact.sequence_hidden_states[0], atol=3e-6, rtol=3e-6)
+
+    def test_bucket_overflow_fails_before_model_execution(self) -> None:
+        model = FakeNvarc()
+        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((4,)))
+        with self.assertRaisesRegex(ValueError, "exceeds the largest bucket"):
+            runner(torch.ones(5, dtype=torch.int64), torch.tensor([0, 5]))
+        self.assertEqual(model.forward_calls, 0)
+
     def test_forward_interface_is_target_blind(self) -> None:
         parameter_names = tuple(inspect.signature(NvarcBatchRunner.forward).parameters)
 

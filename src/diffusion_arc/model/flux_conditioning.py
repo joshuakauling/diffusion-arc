@@ -1,4 +1,4 @@
-"""Dynamic padding and attention masks for exact FLUX text prefixes."""
+"""Exact or bucketed padding and attention masks for FLUX text prefixes."""
 
 from __future__ import annotations
 
@@ -7,11 +7,15 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor
 
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+
 from .contracts import FluxTextInputs
 
 
 def pad_flux_text_prefixes(
     hidden_state_prefixes: Sequence[Tensor],
+    *,
+    length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
 ) -> FluxTextInputs:
     """Right-pad exact NVARC prefixes into one FLUX text batch.
 
@@ -22,7 +26,7 @@ def pad_flux_text_prefixes(
 
     prefix_lengths = tuple(prefix.shape[0] for prefix in hidden_state_prefixes)
     target_count = len(hidden_state_prefixes)
-    max_prefix_length = max(prefix_lengths)
+    max_prefix_length = length_buckets.padded_length(max(prefix_lengths))
 
     reference_prefix = hidden_state_prefixes[0]
     encoder_hidden_states = reference_prefix.new_zeros(

@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from diffusion_arc._constants import NVARC_MAX_TOKENS
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
-SINGLE_GPU_TRAINING_SCHEMA_VERSION = 3
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
+
+SINGLE_GPU_TRAINING_SCHEMA_VERSION = 4
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -78,6 +81,14 @@ class BenchmarkConfig:
 
 
 @dataclass(frozen=True)
+class SingleGpuPaddingConfig:
+    """Independent fixed text-length boundaries; None preserves exact padding."""
+
+    nvarc_bucket_boundaries: tuple[int, ...] | None = None
+    flux_bucket_boundaries: tuple[int, ...] | None = None
+
+
+@dataclass(frozen=True)
 class SingleGpuTrainingConfig:
     """Complete validated configuration for one initial training process."""
 
@@ -89,6 +100,7 @@ class SingleGpuTrainingConfig:
     optimizer: AdamWConfig
     scheduler: CosineSchedulerConfig | None = None
     benchmark: BenchmarkConfig | None = None
+    padding: SingleGpuPaddingConfig = SingleGpuPaddingConfig()
 
 
 def load_single_gpu_training_config(
@@ -106,6 +118,8 @@ def load_single_gpu_training_config(
     config_fields = {"schema_version", "seed", "device", "models", "data", "loop", "optimizer"}
     if schema_version >= 3:
         config_fields.update({"scheduler", "benchmark"})
+    if schema_version >= 4:
+        config_fields.add("padding")
     _fields(payload, config_fields, name="config")
 
     seed = _integer(payload["seed"], name="seed")
@@ -273,6 +287,16 @@ def load_single_gpu_training_config(
         if benchmark.warmup_steps + benchmark.measured_steps != loop.max_optimizer_steps:
             raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
 
+    padding = SingleGpuPaddingConfig()
+    if schema_version >= 4:
+        section = _object(payload["padding"], name="padding")
+        fields = {"nvarc_bucket_boundaries", "flux_bucket_boundaries"}
+        _fields(section, fields, name="padding")
+        padding = SingleGpuPaddingConfig(**{
+            field: _bucket_boundaries(section[field], name=f"padding.{field}")
+            for field in fields
+        })
+
     return SingleGpuTrainingConfig(
         seed=seed,
         device=device,
@@ -288,7 +312,20 @@ def load_single_gpu_training_config(
         ),
         scheduler=scheduler,
         benchmark=benchmark,
+        padding=padding,
     )
+
+
+def _bucket_boundaries(value: Any, *, name: str) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise TypeError(f"{name} must be an array or null")
+    boundaries = tuple(_integer(item, name=name) for item in value)
+    SequenceLengthBuckets(boundaries)
+    if boundaries[-1] != NVARC_MAX_TOKENS:
+        raise ValueError(f"{name} must end at {NVARC_MAX_TOKENS}")
+    return boundaries
 
 
 def _object(value: Any, *, name: str) -> Mapping[str, Any]:
@@ -355,6 +392,7 @@ __all__ = [
     "SingleGpuDataConfig",
     "SingleGpuLoopConfig",
     "SingleGpuModelConfig",
+    "SingleGpuPaddingConfig",
     "SingleGpuTrainingConfig",
     "load_single_gpu_training_config",
 ]

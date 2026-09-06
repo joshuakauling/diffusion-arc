@@ -15,6 +15,7 @@ from diffusion_arc.training.single_gpu_config import (
     SingleGpuDataConfig,
     SingleGpuLoopConfig,
     SingleGpuModelConfig,
+    SingleGpuPaddingConfig,
     SingleGpuTrainingConfig,
 )
 from scripts.train_single_gpu import _ProfiledModule, main, train_from_config
@@ -62,6 +63,7 @@ def _config(root: Path) -> SingleGpuTrainingConfig:
             epsilon=1e-8,
             weight_decay=0.01,
         ),
+        padding=SingleGpuPaddingConfig(flux_bucket_boundaries=(256, 512, 8400)),
     )
 
 
@@ -184,6 +186,7 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
         self.assertEqual(training_kwargs["min_context_pairs_before_target"], 2)
         self.assertEqual(training_kwargs["nvarc_source_batch_size"], 8)
         self.assertEqual(training_kwargs["vae_microbatch_size"], 8)
+        self.assertEqual(training_kwargs["flux_bucket_boundaries"], (256, 512, 8400))
         self.assertEqual(training_kwargs["generator"], flow_generator)
         self.assertIsNotNone(training_kwargs["on_optimizer_step"])
         expected_profiled_modules = (

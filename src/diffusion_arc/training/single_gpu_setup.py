@@ -29,6 +29,7 @@ from diffusion_arc.model.contracts import (
 from diffusion_arc.model.flux_vae import FluxVaeDecoder, FluxVaeEncoder
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 from .dataset import ArcTrainingDataset
 from .single_gpu_config import SingleGpuTrainingConfig
@@ -146,7 +147,10 @@ def load_single_gpu_models(
         expected_dtype=nvarc_dtype,
     )
     tokenizer.model_max_length = NVARC_MAX_TOKENS
-    nvarc_runner = NvarcBatchRunner(nvarc_model)
+    nvarc_runner = NvarcBatchRunner(
+        nvarc_model,
+        length_buckets=SequenceLengthBuckets(config.padding.nvarc_bucket_boundaries),
+    )
 
     vae = AutoencoderKLFlux2.from_pretrained(
         config.models.flux_checkpoint,

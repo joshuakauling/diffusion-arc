@@ -19,6 +19,7 @@ from diffusion_arc.training import (
     NvarcSequenceState,
     build_flux_microbatch,
 )
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 
 def _flux_inputs() -> tuple[FluxInput, ...]:
@@ -41,6 +42,26 @@ def _flux_inputs() -> tuple[FluxInput, ...]:
 
 
 class FluxMicrobatchTests(unittest.TestCase):
+    def test_bucketed_microbatch_releases_states_after_copying_real_prefixes(self) -> None:
+        inputs = _flux_inputs()
+        state = inputs[0].nvarc_sequence_state
+        microbatch = build_flux_microbatch(inputs, length_buckets=SequenceLengthBuckets((8,)))
+        self.assertEqual(microbatch.text_inputs.encoder_hidden_states.shape, (3, 8, 4))
+        self.assertEqual(microbatch.text_inputs.text_attention_mask.sum(dim=1).tolist(), [2, 4, 6])
+        self.assertTrue(state.is_released)
+        self.assertEqual(state.allocated_bytes, 0)
+        self.assertEqual(microbatch.clean_latents[:, 0, 0].tolist(), [1, 2, 3])
+        torch.testing.assert_close(microbatch.text_inputs.encoder_hidden_states[0, :2],
+                                   torch.arange(8, dtype=torch.float32).reshape(2, 4))
+
+    def test_bucket_overflow_keeps_all_prefixes_pending(self) -> None:
+        inputs = _flux_inputs()
+        state = inputs[0].nvarc_sequence_state
+        with self.assertRaisesRegex(ValueError, "exceeds the largest bucket"):
+            build_flux_microbatch(inputs, length_buckets=SequenceLengthBuckets((4,)))
+        self.assertEqual(state.pending_prefix_ends, frozenset({2, 4, 6}))
+        self.assertFalse(state.is_released)
+
     def test_sequence_owner_rejects_autograd_state(self) -> None:
         with self.assertRaisesRegex(ValueError, "autograd graph"):
             NvarcSequenceState(

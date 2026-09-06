@@ -16,6 +16,7 @@ from torch.optim import Optimizer
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 from .flux_input import FluxInput, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
@@ -51,6 +52,7 @@ def _train_optimizer_batch(
     on_optimizer_step: Callable[[Tensor, int, int], None] | None,
     max_grad_norm: float | None,
     on_optimizer_step_metrics: Callable[[OptimizerStepMetrics], None] | None,
+    flux_length_buckets: SequenceLengthBuckets,
 ) -> None:
     """Train one fixed optimizer batch through one or more FLUX microbatches."""
 
@@ -66,7 +68,8 @@ def _train_optimizer_batch(
 
     for start in range(0, optimizer_target_count, flux_microbatch_size):
         microbatch = build_flux_microbatch(
-            flux_inputs[start : start + flux_microbatch_size]
+            flux_inputs[start : start + flux_microbatch_size],
+            length_buckets=flux_length_buckets,
         )
         loss = compute_flux_microbatch_loss(
             transformer,
@@ -164,6 +167,7 @@ def run_single_gpu_training(
     min_context_pairs_before_target: int = 1,
     nvarc_source_batch_size: int = 1,
     vae_microbatch_size: int | None = None,
+    flux_bucket_boundaries: tuple[int, ...] | None = None,
     generator: torch.Generator | None = None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None = None,
     max_grad_norm: float | None = None,
@@ -211,6 +215,7 @@ def run_single_gpu_training(
     ):
         raise TypeError("on_optimizer_step_metrics must be callable")
 
+    flux_length_buckets = SequenceLengthBuckets(flux_bucket_boundaries)
     transformer.train()
     flux_input_buffer: deque[FluxInput] = deque()
     optimizer_steps = 0
@@ -250,6 +255,7 @@ def run_single_gpu_training(
                 on_optimizer_step=on_optimizer_step,
                 max_grad_norm=max_grad_norm,
                 on_optimizer_step_metrics=on_optimizer_step_metrics,
+                flux_length_buckets=flux_length_buckets,
             )
             optimizer_steps += 1
 
@@ -264,6 +270,7 @@ def run_single_gpu_training(
             on_optimizer_step=on_optimizer_step,
             max_grad_norm=max_grad_norm,
             on_optimizer_step_metrics=on_optimizer_step_metrics,
+            flux_length_buckets=flux_length_buckets,
         )
 
 

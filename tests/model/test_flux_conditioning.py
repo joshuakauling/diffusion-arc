@@ -14,6 +14,7 @@ from diffusion_arc.model import (
     build_flux_joint_attention_mask,
     pad_flux_text_prefixes,
 )
+from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 
 def _source_hidden_states(
@@ -56,6 +57,21 @@ def _tiny_flux_model():
 
 
 class FluxTextInputTests(unittest.TestCase):
+    def test_bucket_shapes_preserve_real_text_and_position_ids(self) -> None:
+        sources = _source_hidden_states((3, 5))
+        exact = pad_flux_text_prefixes(sources)
+        padded = pad_flux_text_prefixes(sources, length_buckets=SequenceLengthBuckets((8, 16)))
+        self.assertEqual(padded.encoder_hidden_states.shape, (2, 8, NVARC_CONTEXT_WIDTH))
+        self.assertEqual(padded.text_position_ids.shape, (2, 8, 4))
+        torch.testing.assert_close(padded.encoder_hidden_states[:, :5], exact.encoder_hidden_states)
+        torch.testing.assert_close(padded.text_position_ids[:, :5], exact.text_position_ids)
+        torch.testing.assert_close(padded.text_attention_mask[:, :5], exact.text_attention_mask)
+        self.assertFalse(padded.text_attention_mask[:, 5:].any())
+        self.assertEqual(torch.count_nonzero(padded.encoder_hidden_states[:, 5:]), 0)
+        joint = build_flux_joint_attention_mask(padded.text_attention_mask, 900)
+        self.assertEqual(joint.shape, (2, 1, 1, 908))
+        self.assertTrue(joint[..., 8:].all())
+
     def test_builds_exact_prefixes_with_dynamic_right_padding(self) -> None:
         sources = _source_hidden_states((5, 4))
 
@@ -150,14 +166,22 @@ class FluxTextInputTests(unittest.TestCase):
             result.text_position_ids = torch.ones((1, 1, 4))  # type: ignore[misc]
 
     def test_masked_batch_matches_unpadded_outputs_and_gradients(self) -> None:
+        self._assert_masked_outputs_and_gradients(SequenceLengthBuckets(), (3, 5))
+
+    def test_bucket_padding_matches_exact_outputs_and_gradients(self) -> None:
+        for lengths in ((3,), (3, 5)):
+            with self.subTest(lengths=lengths):
+                self._assert_masked_outputs_and_gradients(SequenceLengthBuckets((8,)), lengths)
+
+    def _assert_masked_outputs_and_gradients(self, length_buckets, lengths) -> None:
         torch.manual_seed(7)
-        sources = _source_hidden_states((3, 5), random=True)
-        text_inputs = pad_flux_text_prefixes(sources)
+        sources = _source_hidden_states(lengths, random=True)
+        text_inputs = pad_flux_text_prefixes(sources, length_buckets=length_buckets)
         image_token_count = 3
-        image_states = torch.randn(2, image_token_count, 8)
-        image_ids = torch.zeros((2, image_token_count, 4), dtype=torch.int64)
+        image_states = torch.randn(len(lengths), image_token_count, 8)
+        image_ids = torch.zeros((len(lengths), image_token_count, 4), dtype=torch.int64)
         image_ids[:, :, 2] = torch.arange(image_token_count)
-        timesteps = torch.tensor([0.25, 0.75])
+        timesteps = torch.linspace(0.25, 0.75, len(lengths))
         joint_mask = build_flux_joint_attention_mask(
             text_inputs.text_attention_mask,
             image_token_count,
