@@ -52,6 +52,7 @@ class _ProfiledModule(nn.Module):
         self.range_name = range_name
 
     def forward(self, *args: object, **kwargs: object) -> object:
+        # Profiler range: label this model call in the trace timeline.
         with torch.profiler.record_function(self.range_name):
             return self.wrapped_module(*args, **kwargs)
 
@@ -108,11 +109,13 @@ def train_from_config(config_path: str | Path) -> None:
             active=PROFILER_ACTIVE_STEPS,
             repeat=1,
         ),
+        # Profiler callback: export the completed capture.
         on_trace_ready=export_trace,
         record_shapes=False,
         profile_memory=False,
         with_stack=False,
     ) as profiler:
+        # Step callback: advance the learning-rate and profiler schedules.
         def on_optimizer_step(*_args: object) -> None:
             if scheduler is not None:
                 scheduler.step()
@@ -134,6 +137,8 @@ def train_from_config(config_path: str | Path) -> None:
             nvarc_source_batch_size=config.loop.nvarc_source_batch_size,
             vae_microbatch_size=config.loop.vae_microbatch_size,
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
+            nvarc_scheduling=config.nvarc_scheduling,
+            flux_scheduling=config.flux_scheduling,
             generator=flow_generator,
             on_optimizer_step=on_optimizer_step,
         )

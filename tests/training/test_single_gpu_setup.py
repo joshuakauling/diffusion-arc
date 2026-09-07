@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from dataclasses import replace
+from itertools import permutations
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
 
 import torch
 from torch import nn
+from diffusion_arc.training.dataset import ArcTrainingDataset
+from tests.training.test_dataset import build_layout, make_nvarc_tokenizer
 
 from diffusion_arc.model import NVARC_HIDDEN_SIZE, NVARC_VOCAB_SIZE
 from diffusion_arc.training.single_gpu_config import (
@@ -62,6 +66,15 @@ class _FakeTokenizer:
         if add_special_tokens:
             raise AssertionError("the checkpoint probe must not add tokens")
         return [14, 11, 10, 0, 15, 14, 12, 10]
+
+
+class _SlowFirstDataset(ArcTrainingDataset):
+    """Exercise ordered delivery when the first worker has slower CPU work."""
+
+    def __getitem__(self, index):
+        if index == 0:
+            time.sleep(0.1)
+        return super().__getitem__(index)
 
 
 class _FakeNvarc(nn.Module):
@@ -148,6 +161,55 @@ def _config(root: Path, *, shuffle: bool = False) -> SingleGpuTrainingConfig:
 
 
 class SingleGpuSetupTests(unittest.TestCase):
+    def test_spawn_prefetch_matches_serial_samples_and_preserves_flow_rng(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            keys = ["task-a_ID_0123456789_" + ",".join(map(str, order))
+                    for order in list(permutations(range(4)))[:8]]
+            split, _ = build_layout(root, keys=keys)
+            config = _config(root, shuffle=True)
+            config = replace(config, data=replace(config.data, split_directory=split))
+            tokenizer = make_nvarc_tokenizer()
+            serial = tuple(build_single_sample_loader(config, tokenizer=tokenizer))
+            parallel_config = replace(config, data=replace(config.data, num_workers=2, prefetch_factor=8))
+            flow_generator = build_flow_generator(config, device=torch.device("cpu"))
+            flow_state = flow_generator.get_state().clone()
+            with patch("diffusion_arc.training.single_gpu_setup.ArcTrainingDataset", _SlowFirstDataset):
+                loader = build_single_sample_loader(parallel_config, tokenizer=tokenizer)
+            self.assertEqual(loader.multiprocessing_context.get_start_method(), "spawn")
+            self.assertEqual(loader.prefetch_factor, 8)
+            self.assertTrue(loader.in_order)
+            self.assertEqual(tuple(loader), serial)
+            self.assertEqual(tuple(build_single_sample_loader(parallel_config, tokenizer=tokenizer)), serial)
+            torch.testing.assert_close(flow_generator.get_state(), flow_state)
+
+    def test_spawn_workers_report_data_errors_and_stop_after_early_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split, _ = build_layout(root)
+            config = _config(root)
+            config = replace(config, data=replace(config.data, split_directory=split,
+                                                  num_workers=2, prefetch_factor=8))
+            loader = build_single_sample_loader(config, tokenizer=make_nvarc_tokenizer())
+            iterator = iter(loader)
+            workers = tuple(iterator._workers)
+            next(iterator)
+            del iterator
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+
+            build_layout(root, max_tokens=1)
+            loader = build_single_sample_loader(config, tokenizer=make_nvarc_tokenizer())
+            iterator = iter(loader)
+            workers = tuple(iterator._workers)
+            with self.assertRaisesRegex(ValueError, "exceeding 1"):
+                next(iterator)
+            del iterator
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+
     def test_cosine_schedule_and_legacy_constant_lr(self) -> None:
         config = _config(Path("/unused"))
         optimizer = build_flux_optimizer(config, transformer=nn.Linear(1, 1))
@@ -242,6 +304,7 @@ class SingleGpuSetupTests(unittest.TestCase):
             )
 
         self.assertIs(models.tokenizer, tokenizer)
+        self.assertEqual(models.tokenizer.model_max_length, 9330)
         self.assertIs(models.nvarc_runner.model, nvarc)
         self.assertEqual(models.nvarc_runner.length_buckets.boundaries, (4096, 8400))
         self.assertIs(models.vae_encoder.vae, vae)

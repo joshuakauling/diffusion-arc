@@ -16,17 +16,22 @@ def pad_flux_text_prefixes(
     hidden_state_prefixes: Sequence[Tensor],
     *,
     length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
+    padded_length: int | None = None,
 ) -> FluxTextInputs:
     """Right-pad exact NVARC prefixes into one FLUX text batch.
 
     Prefix selection and ownership remain training-side concerns. This pure
     tensor operation trusts a non-empty sequence of compatible exact prefixes
-    and preserves their order.
+    and preserves their order. A validated scheduler can supply an explicit
+    ``padded_length`` instead of rounding to ``length_buckets``.
     """
 
     prefix_lengths = tuple(prefix.shape[0] for prefix in hidden_state_prefixes)
     target_count = len(hidden_state_prefixes)
-    max_prefix_length = length_buckets.padded_length(max(prefix_lengths))
+    max_prefix_length = (
+        length_buckets.padded_length(max(prefix_lengths))
+        if padded_length is None else padded_length
+    )
 
     reference_prefix = hidden_state_prefixes[0]
     encoder_hidden_states = reference_prefix.new_zeros(

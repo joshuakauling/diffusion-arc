@@ -9,6 +9,7 @@ from diffusion_arc.model.flow_matching import (
     flow_matching_loss,
     sample_flow_matching_batch,
 )
+from diffusion_arc.model.contracts import FlowMatchingBatch
 from diffusion_arc.model.flux_velocity import predict_flux_velocity
 
 from .flux_microbatch import FluxMicrobatch
@@ -20,13 +21,15 @@ def compute_flux_microbatch_loss(
     *,
     compute_dtype: torch.dtype,
     generator: torch.Generator | None = None,
+    flow_batch: FlowMatchingBatch | None = None,
 ) -> Tensor:
-    """Run one BF16-autocast FLUX forward and return its FP32 mean loss."""
+    """Return the FP32 mean loss, optionally using already assigned flow inputs."""
 
-    flow_batch = sample_flow_matching_batch(
-        microbatch.clean_latents,
-        generator=generator,
-    )
+    if flow_batch is None:
+        flow_batch = sample_flow_matching_batch(
+            microbatch.clean_latents,
+            generator=generator,
+        )
     predicted_velocity = predict_flux_velocity(
         transformer,
         flow_batch.noisy_latents,

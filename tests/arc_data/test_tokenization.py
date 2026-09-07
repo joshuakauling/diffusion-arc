@@ -7,6 +7,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Split
 from transformers import PreTrainedTokenizerFast
 
+from diffusion_arc._constants import NVARC_TOKENIZER_MAX_TOKENS
 from diffusion_arc.arc_data import (
     ArcAugmentationKey,
     ArcAugmentationSpec,
@@ -92,9 +93,12 @@ class ArcNvarcTokenizationTest(unittest.TestCase):
         rendered = render_training_prompt(augmented)
         tokenizer = make_nvarc_tokenizer()
 
-        tokenized = tokenize_nvarc_training_sample(rendered, tokenizer)
+        tokenizer.model_max_length = NVARC_TOKENIZER_MAX_TOKENS
+        with self.assertNoLogs("transformers.tokenization_utils_base", level="WARNING"):
+            tokenized = tokenize_nvarc_training_sample(rendered, tokenizer)
 
         self.assertEqual(NVARC_MAX_TOKENS, 8400)
+        self.assertEqual(tokenizer.model_max_length, 9330)
         self.assertEqual(len(tokenized.input_ids), 9330)
         self.assertEqual(tokenized.prefix_token_ends, (2802, 4668, 6534, 8400))
         self.assertEqual(tokenized.target_grids, (grid,) * 4)

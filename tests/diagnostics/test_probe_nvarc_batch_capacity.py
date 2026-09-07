@@ -111,7 +111,7 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(metadata["latent_bytes"], 96 * 2 * 3 * 4)
         self.assertEqual(metadata["total_bytes"], sum(probe._tensor_bytes(t) for t in tensors))
 
-    def test_initialization_runs_real_loss_backward_and_adamw_without_clearing_gradients(self):
+    def test_initialization_retains_real_gradients_across_training_cleanup(self):
         class Nvarc(nn.Module):
             def forward(self, ids, offsets):
                 return NvarcBatchOutput((torch.ones(len(ids), 4),))
@@ -134,9 +134,18 @@ class WorkloadTests(unittest.TestCase):
         )
         config = _config()
         optimizer = probe.build_flux_optimizer(config, transformer=models.transformer)
-        metadata = probe.initialize_training_memory(
-            config, models, optimizer, device=torch.device("cpu"),
-        )
+        cleared_gradients = []
+        zero_grad = optimizer.zero_grad
+
+        def clear_gradients(**kwargs):
+            zero_grad(**kwargs)
+            cleared_gradients.append(models.transformer.weight.grad)
+
+        with patch.object(optimizer, "zero_grad", side_effect=clear_gradients):
+            metadata = probe.initialize_training_memory(
+                config, models, optimizer, device=torch.device("cpu"),
+            )
+        self.assertEqual(cleared_gradients, [None, None])
         parameter = models.transformer.weight
         self.assertIsNotNone(parameter.grad)
         self.assertTrue(torch.isfinite(parameter.grad))

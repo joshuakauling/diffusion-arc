@@ -18,6 +18,7 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 
+from diffusion_arc._constants import NVARC_TOKENIZER_MAX_TOKENS
 from diffusion_arc.model.contracts import (
     NVARC_HIDDEN_SIZE,
     NVARC_HIDDEN_STATE_INDICES,
@@ -146,7 +147,7 @@ def load_single_gpu_models(
         expected_device=device,
         expected_dtype=nvarc_dtype,
     )
-    tokenizer.model_max_length = NVARC_MAX_TOKENS
+    tokenizer.model_max_length = NVARC_TOKENIZER_MAX_TOKENS
     nvarc_runner = NvarcBatchRunner(
         nvarc_model,
         length_buckets=SequenceLengthBuckets(config.padding.nvarc_bucket_boundaries),
@@ -216,7 +217,13 @@ def build_single_sample_loader(
     *,
     tokenizer: PreTrainedTokenizerBase,
 ) -> DataLoader:
-    """Build one finite DataLoader stream without automatic source batching."""
+    """Yield individual CPU samples in seeded sampler order.
+
+    Optional workers prefetch ``num_workers * prefetch_factor`` sample tasks,
+    including data loading and tokenization. This does not enlarge the GPU
+    preparation window: the training loop groups samples only as it consumes
+    them. The loader's random generator is independent of flow-noise sampling.
+    """
 
     dataset = ArcTrainingDataset(
         split_directory=config.data.split_directory,
@@ -224,12 +231,22 @@ def build_single_sample_loader(
         tokenizer=tokenizer,
     )
     data_generator = torch.Generator(device="cpu").manual_seed(config.seed)
+    worker_arguments = {}
+    if config.data.num_workers:
+        # Models can already own CUDA contexts. Workers must start fresh and
+        # return samples in sampler order, regardless of tokenization latency.
+        worker_arguments = {
+            "multiprocessing_context": "spawn",
+            "prefetch_factor": config.data.prefetch_factor,
+            "in_order": True,
+        }
     return DataLoader(
         dataset,
         batch_size=None,
         shuffle=config.data.shuffle,
         num_workers=config.data.num_workers,
         generator=data_generator,
+        **worker_arguments,
     )
 
 

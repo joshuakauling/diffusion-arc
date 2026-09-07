@@ -130,9 +130,15 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 
 def initialize_training_memory(config, models, optimizer, *, device):
-    """Allocate real AdamW state and retain the gradients left by an actual update."""
+    """Allocate real AdamW state and retain gradients for accumulation capacity probes."""
 
     sample = make_sample(models.tokenizer, seed=config.seed, grid_size=1, pair_count=2)
+    gradients = {}
+
+    def retain_gradients(_loss, _targets, _microbatches):
+        # Keep the actual buffers across the training loop's end-of-step cleanup.
+        gradients.update((parameter, parameter.grad) for parameter in models.transformer.parameters())
+
     # Apply the same initial LR as B0, including its zero-LR first warm-up step.
     scheduler = build_flux_scheduler(config, optimizer=optimizer)
     run_single_gpu_training(
@@ -142,7 +148,10 @@ def initialize_training_memory(config, models, optimizer, *, device):
         max_optimizer_steps=1, optimizer_batch_size=1, flux_microbatch_size=1,
         min_context_pairs_before_target=1, nvarc_source_batch_size=1,
         vae_microbatch_size=1, generator=build_flow_generator(config, device=device),
+        on_optimizer_step=retain_gradients,
     )
+    for parameter, gradient in gradients.items():
+        parameter.grad = gradient
     gradient_bytes = optimizer_state_bytes = 0
     for parameter in models.transformer.parameters():
         if not parameter.requires_grad:

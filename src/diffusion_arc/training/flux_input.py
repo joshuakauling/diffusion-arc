@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -14,10 +14,33 @@ from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
+from .nvarc_schedule import NvarcSchedulingPolicy, NvarcSourceBatch, schedule_nvarc_sources
+
+
+# Benchmark metadata: source identities and the physical batches used to prepare them.
+@dataclass(frozen=True)
+class PreparedSource:
+    """CPU-only identity and eligible prefix lengths in logical source order."""
+
+    key: str
+    prefix_ends: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PreparationMetrics:
+    """Sources and physical NVARC calls actually executed for one window."""
+
+    sources: tuple[PreparedSource, ...]
+    nvarc_batches: tuple[NvarcSourceBatch, ...]
+
 
 class NvarcSequenceState:
-    """Own one sequence's hidden states until every dependent input is built.
+    """Own full source states until all needed prefixes enter FLUX microbatches.
 
+    Logical ``FluxInput`` objects share this owner. ``build_flux_microbatch``
+    copies their prefixes into a physical batch before marking them consumed.
+    After the final prefix is consumed, the owner drops its full-source tensor
+    reference; the physical microbatch owns the copied conditioning states.
     Prefix ends are unique within one ARC sequence, so the owner can use them
     directly for consumption bookkeeping without global training identities.
     """
@@ -138,7 +161,12 @@ class FluxInput:
 
 @dataclass(frozen=True)
 class _EligibleSequence:
-    """One source and the target suffix retained for frozen preparation."""
+    """Training targets with enough preceding demonstration pairs and their input.
+
+    ``prefix_ends`` and ``target_grids`` contain only those targets.
+    ``input_ids`` stops before the final target output; earlier outputs remain
+    available as context.
+    """
 
     input_ids: tuple[int, ...]
     prefix_ends: tuple[int, ...]
@@ -155,6 +183,8 @@ def _select_eligible_sequence(
     *,
     min_context_pairs_before_target: int,
 ) -> _EligibleSequence | None:
+    """Select targets with enough demonstrations and trim IDs to their last prefix."""
+
     first_target_position = min_context_pairs_before_target - 1
     target_count = len(sequence.target_grids)
     if first_target_position >= target_count:
@@ -201,13 +231,21 @@ def prepare_flux_inputs_batch(
     vae_encoder: FluxVaeEncoder,
     min_context_pairs_before_target: int = 1,
     vae_microbatch_size: int | None = None,
+    nvarc_scheduling: NvarcSchedulingPolicy | None = None,
+    on_preparation: Callable[[PreparationMetrics], None] | None = None,
 ) -> tuple[FluxInput, ...]:
-    """Prepare several sources with one NVARC batch and bounded VAE batches.
+    """Prepare one source window with independent NVARC and VAE batches.
 
-    Eligible sources are packed in their input order and executed together by
-    frozen NVARC. Eligible target images retain source-major order and are
-    encoded in chunks of at most ``vae_microbatch_size``. Passing ``None`` keeps
-    the original single-call VAE behavior.
+    First select eligible targets and trim each source to its last needed
+    prefix. Then execute the optional NVARC schedule, indexing returned states
+    by original eligible-source position. Without scheduling, all eligible
+    sources execute in one physical NVARC batch.
+
+    VAE chunks span the whole window's targets in original source-major order,
+    independently of NVARC groups. ``vae_microbatch_size=None`` encodes them
+    in one call. Finally, pair each latent with its source state and prefix in
+    that same order, preserving the target FIFO and optimizer-batch membership.
+    Flow noise and timesteps are sampled later, when FLUX consumes the inputs.
     """
 
     source_sequences = tuple(sequences)
@@ -224,6 +262,7 @@ def prepare_flux_inputs_batch(
         )
 
     eligible_sequences_list: list[_EligibleSequence] = []
+    prepared_sources: list[PreparedSource] = []
     for sequence in source_sequences:
         eligible = _select_eligible_sequence(
             sequence,
@@ -231,25 +270,49 @@ def prepare_flux_inputs_batch(
         )
         if eligible is not None:
             eligible_sequences_list.append(eligible)
+            # Benchmark metadata: retain logical source order before scheduling.
+            if on_preparation is not None:
+                prepared_sources.append(PreparedSource(str(sequence.key), eligible.prefix_ends))
     eligible_sequences = tuple(eligible_sequences_list)
     if not eligible_sequences:
         return ()
 
-    packed_input_ids: list[int] = []
-    sequence_offsets = [0]
-    for eligible in eligible_sequences:
-        packed_input_ids.extend(eligible.input_ids)
-        sequence_offsets.append(len(packed_input_ids))
-
-    nvarc_output = nvarc_runner(
-        torch.tensor(packed_input_ids, dtype=torch.int64),
-        torch.tensor(sequence_offsets, dtype=torch.int64),
-    )
-    if len(nvarc_output.sequence_hidden_states) != len(eligible_sequences):
-        raise RuntimeError(
-            "batched preparation requires one NVARC output per eligible source"
+    source_lengths = tuple(len(eligible.input_ids) for eligible in eligible_sequences)
+    if nvarc_scheduling is None:
+        # The legacy runner owns padding. Read that same policy for reporting,
+        # without introducing a second scheduler in the benchmark entrypoint.
+        padded_length = (
+            nvarc_runner.length_buckets.padded_length(max(source_lengths))
+            if on_preparation is not None else max(source_lengths)
         )
+        batches = (NvarcSourceBatch(tuple(range(len(eligible_sequences))), padded_length),)
+    else:
+        batches = schedule_nvarc_sources(source_lengths, nvarc_scheduling)
 
+    # Keep outputs indexed by logical source position so scheduling cannot
+    # change the alignment between conditioning states and VAE targets.
+    source_hidden_states: dict[int, Tensor] = {}
+    for batch in batches:
+        packed_input_ids: list[int] = []
+        sequence_offsets = [0]
+        for index in batch.source_indices:
+            packed_input_ids.extend(eligible_sequences[index].input_ids)
+            sequence_offsets.append(len(packed_input_ids))
+        padding_arguments = (
+            {} if nvarc_scheduling is None else {"padded_length": batch.padded_length}
+        )
+        nvarc_output = nvarc_runner(
+            torch.tensor(packed_input_ids, dtype=torch.int64),
+            torch.tensor(sequence_offsets, dtype=torch.int64),
+            **padding_arguments,
+        )
+        if len(nvarc_output.sequence_hidden_states) != len(batch.source_indices):
+            raise RuntimeError(
+                "batched preparation requires one NVARC output per eligible source"
+            )
+        source_hidden_states.update(zip(batch.source_indices, nvarc_output.sequence_hidden_states))
+
+    # VAE chunks span the logical window, not the physical NVARC groups.
     target_grids = tuple(
         target_grid
         for eligible in eligible_sequences
@@ -273,13 +336,9 @@ def prepare_flux_inputs_batch(
 
     flux_inputs: list[FluxInput] = []
     latent_index = 0
-    for eligible, hidden_states in zip(
-        eligible_sequences,
-        nvarc_output.sequence_hidden_states,
-        strict=True,
-    ):
+    for index, eligible in enumerate(eligible_sequences):
         sequence_state = NvarcSequenceState(
-            hidden_states=hidden_states,
+            hidden_states=source_hidden_states[index],
             pending_prefix_ends=eligible.prefix_ends,
         )
         for prefix_end in eligible.prefix_ends:
@@ -292,12 +351,17 @@ def prepare_flux_inputs_batch(
             )
             latent_index += 1
 
+    # Benchmark callback: report this window after frozen preparation completes.
+    if on_preparation is not None:
+        on_preparation(PreparationMetrics(tuple(prepared_sources), batches))
     return tuple(flux_inputs)
 
 
 __all__ = [
     "FluxInput",
     "NvarcSequenceState",
+    "PreparationMetrics",
+    "PreparedSource",
     "prepare_flux_inputs",
     "prepare_flux_inputs_batch",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import copy
 from types import SimpleNamespace
 
 import torch
@@ -12,6 +13,8 @@ from diffusion_arc.model import (
     TARGET_LATENT_TOKEN_COUNT,
 )
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
+from diffusion_arc.model.contracts import FlowMatchingBatch, FluxSpatialShape
+from diffusion_arc.model.flow_matching import sample_flow_matching_batch
 from diffusion_arc.training import (
     FluxInput,
     FluxMicrobatch,
@@ -100,6 +103,42 @@ class _DtypeRecordingTransformer(torch.nn.Module):
 
 
 class FluxForwardTests(unittest.TestCase):
+    def test_tiny_flux_scheduled_padding_matches_singleton_loss_and_gradients(self) -> None:
+        torch.manual_seed(13)
+        template = _tiny_transformer()
+        hidden = torch.randn(6, 16)
+        latents = torch.randn(3, 4, TARGET_LATENT_CHANNELS)
+        generator = torch.Generator().manual_seed(15)
+        flows = tuple(sample_flow_matching_batch(z.unsqueeze(0), generator=generator) for z in latents)
+
+        def run(groups):
+            model = copy.deepcopy(template)
+            state = NvarcSequenceState(hidden_states=hidden.clone(), pending_prefix_ends=(2, 4, 6))
+            inputs = tuple(FluxInput(state, length, latents[i]) for i, length in enumerate((2, 4, 6)))
+            total = 0
+            for indices in groups:
+                batch = build_flux_microbatch(tuple(inputs[i] for i in indices),
+                                              spatial_shape=FluxSpatialShape(2, 2),
+                                              padded_length=None if len(groups) == 3 else 8)
+                flow = FlowMatchingBatch(
+                    noisy_latents=torch.cat(tuple(flows[i].noisy_latents for i in indices)),
+                    timesteps=torch.cat(tuple(flows[i].timesteps for i in indices)),
+                    target_velocity=torch.cat(tuple(flows[i].target_velocity for i in indices)),
+                )
+                loss = compute_flux_microbatch_loss(model, batch, compute_dtype=torch.bfloat16, flow_batch=flow)
+                (loss * (len(indices) / 3)).backward()
+                total += float(loss.detach()) * len(indices) / 3
+            self.assertTrue(state.is_released)
+            return total, dict(model.named_parameters())
+
+        reference, grouped = run(((0,), (1,), (2,))), run(((2, 1), (0,)))
+        self.assertAlmostEqual(grouped[0], reference[0], delta=0.002)
+        # BF16 batched kernels can round differently. Compare aggregate gradient
+        # error instead of relative errors of individual near-zero components.
+        a = torch.cat(tuple(p.grad.flatten() for p in reference[1].values() if p.grad is not None))
+        b = torch.cat(tuple(p.grad.flatten() for p in grouped[1].values() if p.grad is not None))
+        self.assertLess(float(torch.linalg.vector_norm(a - b) / torch.linalg.vector_norm(a)), 0.02)
+
     def test_computes_finite_loss_and_transformer_gradients(self) -> None:
         torch.manual_seed(7)
         transformer = _tiny_transformer()

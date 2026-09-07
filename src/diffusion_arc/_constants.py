@@ -2,6 +2,8 @@
 
 NVARC_VOCAB_SIZE = 16
 NVARC_MAX_TOKENS = 8400
+# Full five-pair prompt, including the final output excluded from model input.
+NVARC_TOKENIZER_MAX_TOKENS = 9330
 NVARC_PAD_TOKEN_ID = 13
 NVARC_HIDDEN_SIZE = 2560
 NVARC_HIDDEN_STATE_INDICES = (9, 18, 27)
@@ -14,5 +16,6 @@ __all__ = [
     "NVARC_HIDDEN_STATE_INDICES",
     "NVARC_MAX_TOKENS",
     "NVARC_PAD_TOKEN_ID",
+    "NVARC_TOKENIZER_MAX_TOKENS",
     "NVARC_VOCAB_SIZE",
 ]

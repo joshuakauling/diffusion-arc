@@ -42,6 +42,20 @@ def _flux_inputs() -> tuple[FluxInput, ...]:
 
 
 class FluxMicrobatchTests(unittest.TestCase):
+    def test_scheduled_padding_preserves_reordered_rows_and_releases_shared_owner(self) -> None:
+        inputs = _flux_inputs()
+        state = inputs[0].nvarc_sequence_state
+        microbatch = build_flux_microbatch((inputs[2], inputs[0]), padded_length=9)
+        self.assertEqual(microbatch.text_inputs.encoder_hidden_states.shape, (2, 9, 4))
+        self.assertEqual(microbatch.text_inputs.text_attention_mask.sum(dim=1).tolist(), [6, 2])
+        self.assertEqual(microbatch.clean_latents[:, 0, 0].tolist(), [3, 1])
+        self.assertEqual(state.pending_prefix_ends, frozenset({4}))
+        mask = microbatch.text_inputs.text_attention_mask
+        self.assertTrue(torch.all(microbatch.text_inputs.encoder_hidden_states[~mask] == 0))
+        self.assertEqual(microbatch.text_inputs.text_position_ids[0, :, 3].tolist(), list(range(9)))
+        build_flux_microbatch((inputs[1],), padded_length=9)
+        self.assertTrue(state.is_released)
+
     def test_bucketed_microbatch_releases_states_after_copying_real_prefixes(self) -> None:
         inputs = _flux_inputs()
         state = inputs[0].nvarc_sequence_state

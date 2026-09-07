@@ -9,7 +9,6 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
-from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -28,7 +27,8 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from diffusion_arc.arc_data import load_arc_split_config
 from diffusion_arc.arc_data._split_io import resolve_inside
 from diffusion_arc.arc_data._split_layout import resolve_split_layout
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from diffusion_arc.training.flux_input import PreparationMetrics
+from diffusion_arc.training.flux_schedule import FluxTargetBatch
 from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
 from diffusion_arc.training.single_gpu_loop import run_single_gpu_training
 from diffusion_arc.training.single_gpu_setup import (
@@ -110,27 +110,38 @@ class _StepRecorder:
         self.pending_targets: deque[tuple[int, bool]] = deque()
         self.sources: list[dict] = []
         self.padded_tokens = 0
-        self.nvarc_buckets = SequenceLengthBuckets(config.padding.nvarc_bucket_boundaries)
-        self.flux_buckets = SequenceLengthBuckets(config.padding.flux_bucket_boundaries)
+        self.nvarc_batches: list[dict] = []
+        self.flux_batches: tuple[FluxTargetBatch, ...] | None = None
 
-    def samples(self, samples):
-        iterator = iter(samples)
-        while batch := tuple(islice(iterator, self.config.loop.nvarc_source_batch_size)):
-            lengths = []
-            for sample in batch:
-                prefixes = sample.prefix_token_ends[
-                    self.config.loop.min_context_pairs_before_target - 1 :
-                ]
-                if prefixes:
-                    lengths.append(prefixes[-1])
-                    self.sources.append({"key": str(sample.key), "tokens": prefixes[-1]})
-                    self.pending_targets.extend(
-                        (length, index == len(prefixes) - 1)
-                        for index, length in enumerate(prefixes)
-                    )
-            if lengths:
-                self.padded_tokens += self.nvarc_buckets.padded_length(max(lengths)) * len(lengths)
-            yield from batch
+    def flux_schedule(self, batches: tuple[FluxTargetBatch, ...]) -> None:
+        """Retain the actual physical plan without recomputing the scheduler."""
+
+        self.flux_batches = batches
+
+    def preparation(self, metrics: PreparationMetrics) -> None:
+        """Charge completed preparation to the next recorded optimizer step.
+
+        Source metadata describes work done since the previous update, while
+        target metadata follows FIFO consumption and can span updates. CPU
+        prefetch alone adds neither prepared sources nor pending targets here.
+        """
+
+        # Batch indices are window-local; stored indices address this step's
+        # prepared_sources, which may contain several preparation windows.
+        source_offset = len(self.sources)
+        for source in metrics.sources:
+            self.sources.append({"key": source.key, "tokens": source.prefix_ends[-1]})
+            self.pending_targets.extend(
+                (length, index == len(source.prefix_ends) - 1)
+                for index, length in enumerate(source.prefix_ends)
+            )
+        for batch in metrics.nvarc_batches:
+            self.padded_tokens += batch.padded_length * len(batch.source_indices)
+            self.nvarc_batches.append({
+                "batch_size": len(batch.source_indices),
+                "padded_length": batch.padded_length,
+                "source_indices": [source_offset + index for index in batch.source_indices],
+            })
 
     def start(self):
         torch.cuda.synchronize(self.device)
@@ -138,17 +149,23 @@ class _StepRecorder:
         self.started = time.perf_counter()
 
     def step(self, loss, target_count, microbatch_count):
+        # Step callback: retain the LR used, then advance the training schedule.
         learning_rate = self.optimizer.param_groups[0]["lr"]
         if self.scheduler is not None:
             self.scheduler.step()
+        # Benchmark recording: finish timing and record consumed FIFO targets.
         torch.cuda.synchronize(self.device)
         seconds = time.perf_counter() - self.started
         consumed = [self.pending_targets.popleft() for _ in range(target_count)]
-        padded_prefixes = []
-        for start in range(0, target_count, self.config.loop.flux_microbatch_size):
-            microbatch = consumed[start : start + self.config.loop.flux_microbatch_size]
-            padded_length = self.flux_buckets.padded_length(max(length for length, _ in microbatch))
-            padded_prefixes.extend([padded_length] * len(microbatch))
+        batches = self.flux_batches
+        if batches is None:
+            raise RuntimeError("FLUX benchmark requires the executed schedule")
+        if len(batches) != microbatch_count:
+            raise RuntimeError("FLUX schedule and executed microbatch count disagree")
+        padded_prefixes = [0] * target_count
+        for batch in batches:
+            for index in batch.target_indices:
+                padded_prefixes[index] = batch.padded_length
         self.rows.append({
             "step": len(self.rows) + 1,
             "phase": "warmup" if len(self.rows) < self.config.benchmark.warmup_steps else "measure",
@@ -157,10 +174,17 @@ class _StepRecorder:
             "learning_rate": learning_rate,
             "targets": target_count,
             "flux_microbatches": microbatch_count,
+            "flux_batches": [
+                {"batch_size": len(batch.target_indices), "padded_length": batch.padded_length,
+                 "target_indices": list(batch.target_indices)}
+                for batch in batches
+            ],
             "completed_sources": sum(last for _, last in consumed),
             "prepared_sources": self.sources,
             "nvarc_unpadded_tokens": sum(source["tokens"] for source in self.sources),
             "nvarc_padded_tokens": self.padded_tokens,
+            "nvarc_calls": len(self.nvarc_batches),
+            "nvarc_batches": self.nvarc_batches,
             "target_prefix_tokens": [length for length, _ in consumed],
             "flux_padded_prefix_tokens": padded_prefixes,
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
@@ -169,6 +193,8 @@ class _StepRecorder:
         if target_count != self.config.loop.optimizer_batch_size:
             raise RuntimeError("Benchmark exhausted its data with an incomplete optimizer batch")
         self.sources, self.padded_tokens = [], 0
+        self.nvarc_batches = []
+        self.flux_batches = None
         torch.cuda.reset_peak_memory_stats(self.device)
         self.started = time.perf_counter()
 
@@ -227,7 +253,7 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
         recorder = _StepRecorder(config, device, optimizer, scheduler)
         recorder.start()
         run_single_gpu_training(
-            recorder.samples(samples),
+            samples,
             nvarc_runner=models.nvarc_runner,
             vae_encoder=models.vae_encoder,
             transformer=models.transformer,
@@ -235,6 +261,10 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             flux_compute_dtype=models.flux_compute_dtype,
             **asdict(config.loop),
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
+            nvarc_scheduling=config.nvarc_scheduling,
+            flux_scheduling=config.flux_scheduling,
+            on_preparation=recorder.preparation,
+            on_flux_schedule=recorder.flux_schedule,
             generator=generator,
             on_optimizer_step=recorder.step,
         )

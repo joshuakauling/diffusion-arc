@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import weakref
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -23,6 +24,10 @@ from diffusion_arc.model import (
 )
 from diffusion_arc.training import run_single_gpu_training
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
+from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy
+from diffusion_arc.training.flux_loss import compute_flux_microbatch_loss
+from diffusion_arc.model.flow_matching import sample_flow_matching_batch
 from tests.model.test_nvarc_encoder import FakeNvarc
 
 
@@ -88,6 +93,7 @@ class RecordingLoss:
         *,
         compute_dtype: torch.dtype,
         generator: torch.Generator | None = None,
+        flow_batch=None,
     ) -> Tensor:
         if compute_dtype != torch.bfloat16:
             raise AssertionError("single-GPU tests require BF16 compute")
@@ -115,7 +121,161 @@ def _sample(target_count: int) -> ArcTokenizedTrainingSample:
 
 
 class SingleGpuTrainingTests(unittest.TestCase):
-    def test_b1_preserves_two_optimizer_batches_and_per_target_loss_weights(self) -> None:
+    def test_releases_gradients_before_preparation_and_after_final_update(self) -> None:
+        for max_steps, expected_steps, expected_weight in ((1, 1, 0.85), (4, 3, 0.0)):
+            with self.subTest(max_steps=max_steps):
+                transformer = ScalarTransformer()
+                transformer.weight.grad = torch.tensor(100.0)
+                optimizer = torch.optim.SGD(transformer.parameters(), lr=0.1)
+                nvarc, vae = RecordingNvarcRunner(), NumberedVaeEncoder()
+                preparation, gradients, gradient_refs, metrics = [], [], [], []
+
+                def before_preparation(module, _args):
+                    self.assertIsNone(transformer.weight.grad)
+                    preparation.append(module)
+
+                def on_step(_loss, _targets, _microbatches):
+                    gradients.append(float(transformer.weight.grad))
+                    gradient_refs.append(weakref.ref(transformer.weight.grad))
+
+                def on_metrics(metric):
+                    self.assertIsNotNone(transformer.weight.grad)
+                    metrics.append(metric)
+
+                nvarc.register_forward_pre_hook(before_preparation)
+                vae.register_forward_pre_hook(before_preparation)
+                with patch(
+                    "diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
+                    side_effect=RecordingLoss(),
+                ):
+                    run_single_gpu_training(
+                        (_sample(2), _sample(2), _sample(1)),
+                        nvarc_runner=nvarc, vae_encoder=vae,
+                        transformer=transformer, optimizer=optimizer,
+                        flux_compute_dtype=torch.bfloat16, max_optimizer_steps=max_steps,
+                        optimizer_batch_size=2, flux_microbatch_size=1,
+                        on_optimizer_step=on_step, on_optimizer_step_metrics=on_metrics,
+                    )
+
+                self.assertEqual(preparation, [nvarc, vae] * expected_steps)
+                self.assertEqual(gradients, [1.5, 3.5, 5.0][:expected_steps])
+                self.assertEqual([metric.gradient_norm for metric in metrics], gradients)
+                torch.testing.assert_close(transformer.weight.detach(), torch.tensor(expected_weight))
+                self.assertIsNone(transformer.weight.grad)
+                self.assertTrue(all(reference() is None for reference in gradient_refs))
+
+    def test_dynamic_flux_preserves_fifo_windows_rng_weighting_and_parameter_updates(self) -> None:
+        samples = []
+        for index in range(34):
+            sample = _sample(3 if index == 33 else 4)
+            ends = tuple(end + index % 4 for end in sample.prefix_token_ends)
+            samples.append(replace(sample, input_ids=tuple(range(ends[-1] + 1)), prefix_token_ends=ends))
+        policy = FluxSchedulingPolicy((
+            FluxBatchShape(1, 4, 1), FluxBatchShape(1, 12, 2.5),
+            FluxBatchShape(2, 8, 1.2), FluxBatchShape(2, 12, 4), FluxBatchShape(4, 8, 2),
+        ))
+
+        def run(scheduling, max_steps=3):
+            model, steps, plans, draws, executed, weights = ScalarTransformer(), [], [], {}, [], []
+            generator = torch.Generator().manual_seed(41)
+
+            def loss(transformer, microbatch, *, generator, flow_batch=None, **kwargs):
+                if flow_batch is None:
+                    flow_batch = sample_flow_matching_batch(microbatch.clean_latents, generator=generator)
+                ids = tuple(int(v) for v in microbatch.clean_latents[:, 0, 0])
+                executed.extend(ids)
+                for row, target in enumerate(ids):
+                    self.assertNotIn(target, draws)
+                    draws[target] = torch.cat((
+                        flow_batch.noisy_latents[row, 0, :8], flow_batch.timesteps[row:row + 1],
+                        flow_batch.target_velocity[row, 0, :8],
+                        microbatch.text_inputs.text_attention_mask[row].sum().reshape(1),
+                        microbatch.text_inputs.encoder_hidden_states[row, 0, :4],
+                    ))
+                result = compute_flux_microbatch_loss(transformer, microbatch, flow_batch=flow_batch, **kwargs)
+                result.register_hook(lambda grad: weights.append((len(ids), float(grad))))
+                return result
+
+            def step(loss, count, calls):
+                steps.append((tuple(executed[-count:]), float(loss), float(model.weight.grad),
+                              float(model.weight.detach()), count, calls))
+
+            # Exercise real flow sampling/loss/backward with a small deterministic
+            # velocity predictor; the separate tiny-FLUX test covers attention.
+            with (
+                patch("diffusion_arc.training.flux_input._render_valid_grid_canvas",
+                      return_value=torch.zeros(1, 1, 1)),
+                patch("diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss", side_effect=loss),
+                patch("diffusion_arc.training.flux_loss.predict_flux_velocity",
+                      side_effect=lambda m, z, *_args, **_kwargs: m.weight * z),
+            ):
+                run_single_gpu_training(
+                    samples, nvarc_runner=NvarcBatchRunner(FakeNvarc()), vae_encoder=NumberedVaeEncoder(),
+                    transformer=model, optimizer=torch.optim.SGD(model.parameters(), lr=1e-5),
+                    flux_compute_dtype=torch.bfloat16, max_optimizer_steps=max_steps,
+                    optimizer_batch_size=48, flux_microbatch_size=None if scheduling else 1,
+                    min_context_pairs_before_target=2, nvarc_source_batch_size=16, vae_microbatch_size=48,
+                    nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 12), NvarcBatchShape(4, 12)), 1),
+                    flux_scheduling=scheduling, on_flux_schedule=plans.append, generator=generator,
+                    on_optimizer_step=step,
+                )
+            return steps, plans, draws, weights, generator.get_state()
+
+        reference, scheduled = run(None), run(policy)
+        self.assertEqual([s[4] for s in scheduled[0]], [48, 48, 5])
+        self.assertEqual(set(reference[2]), set(scheduled[2]))
+        for target in reference[2]:
+            torch.testing.assert_close(scheduled[2][target], reference[2][target], rtol=0, atol=0)
+        torch.testing.assert_close(scheduled[4], reference[4], rtol=0, atol=0)
+        self.assertTrue(any(a[0] != b[0] for a, b in zip(reference[0], scheduled[0])))
+        for a, b, plan in zip(reference[0], scheduled[0], scheduled[1]):
+            self.assertEqual(sorted(a[0]), sorted(b[0]))
+            torch.testing.assert_close(torch.tensor(b[1:4]), torch.tensor(a[1:4]), rtol=2e-6, atol=1e-5)
+            self.assertEqual(b[5], len(plan))
+            self.assertEqual(sorted(i for group in plan for i in group.target_indices), list(range(b[4])))
+            self.assertLess(b[5], a[5])
+        offset = 0
+        for step in scheduled[0]:
+            for size, weight in scheduled[3][offset:offset + step[5]]:
+                self.assertAlmostEqual(weight, size / step[4], places=7)
+            offset += step[5]
+        stopped = run(policy, max_steps=1)
+        self.assertEqual(len(stopped[0]), 1)
+        self.assertEqual(sorted(stopped[2]), list(range(1, 49)))
+
+    def test_b2_odd_windows_preserve_fifo_membership_and_partial_tail_loss(self) -> None:
+        samples = tuple(_sample(count) for count in (2, 3, 1, 2, 2))
+        policy = NvarcSchedulingPolicy((NvarcBatchShape(2, 4), NvarcBatchShape(2, 8)), 0)
+
+        def run(window, scheduling):
+            model, recording_loss, updates, reports = ScalarTransformer(), RecordingLoss(), [], []
+            with (
+                patch("diffusion_arc.training.flux_input._render_valid_grid_canvas",
+                      return_value=torch.zeros(1, 1, 1)),
+                patch("diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
+                      side_effect=recording_loss),
+            ):
+                run_single_gpu_training(
+                    samples, nvarc_runner=NvarcBatchRunner(FakeNvarc()), vae_encoder=NumberedVaeEncoder(),
+                    transformer=model, optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                    flux_compute_dtype=torch.bfloat16, max_optimizer_steps=3,
+                    optimizer_batch_size=3, min_context_pairs_before_target=2,
+                    nvarc_source_batch_size=window, vae_microbatch_size=48,
+                    nvarc_scheduling=scheduling, on_preparation=reports.append,
+                    on_optimizer_step=lambda loss, count, calls: updates.append((float(loss), count, calls)),
+                )
+            return recording_loss.target_values, updates, model.weight.detach(), reports
+
+        reference, scheduled = run(1, None), run(4, policy)
+        self.assertEqual(scheduled[:2], reference[:2])
+        self.assertEqual([row[1:] for row in scheduled[1]], [(3, 3), (2, 2)])
+        torch.testing.assert_close(scheduled[2], reference[2])
+        torch.testing.assert_close(scheduled[2], torch.tensor(0.35))
+        self.assertEqual([len(report.sources) for report in scheduled[3]], [3, 1])
+        self.assertEqual([sum(len(batch.source_indices) == 1 for batch in report.nvarc_batches)
+                          for report in scheduled[3]], [1, 1])
+
+    def test_b1_and_b2_preserve_two_optimizer_batches_and_per_target_loss_weights(self) -> None:
         samples = []
         for index in range(32):
             sample = _sample(4)
@@ -128,8 +288,9 @@ class SingleGpuTrainingTests(unittest.TestCase):
                 target_grids=tuple(((index // 10, index % 10, target),) for target in range(4)),
             ))
 
-        def run(source_batch, vae_batch, nvarc_bounds, flux_bounds):
+        def run(source_batch, vae_batch, nvarc_bounds, flux_bounds, scheduling=None):
             events, targets, prefixes, padded_lengths, weights, steps = [], [], [], [], [], []
+            random_draws, hidden_values, preparations = [], [], []
 
             class Nvarc(FakeNvarc):
                 def forward(self, **kwargs):
@@ -148,6 +309,8 @@ class SingleGpuTrainingTests(unittest.TestCase):
                 targets.append(target)
                 prefixes.append(int(microbatch.text_inputs.text_attention_mask.sum()))
                 padded_lengths.append(microbatch.text_inputs.encoder_hidden_states.shape[1])
+                hidden_values.append(float(microbatch.text_inputs.encoder_hidden_states[0, 0, 0]))
+                random_draws.append(float(torch.rand((), generator=_kwargs["generator"])))
                 events.append(("flux", target))
                 value = model.weight * microbatch.clean_latents[:, 0, 0].mean()
                 value.register_hook(lambda grad: weights.append(float(grad)))
@@ -178,11 +341,28 @@ class SingleGpuTrainingTests(unittest.TestCase):
                     min_context_pairs_before_target=2,
                     nvarc_source_batch_size=source_batch, vae_microbatch_size=vae_batch,
                     flux_bucket_boundaries=flux_bounds, on_optimizer_step=on_step,
+                    nvarc_scheduling=scheduling, on_preparation=preparations.append,
+                    generator=torch.Generator().manual_seed(17),
                 )
-            return events, targets, prefixes, padded_lengths, weights, steps, model.weight.detach()
+            return (events, targets, prefixes, padded_lengths, weights, steps, model.weight.detach(),
+                    random_draws, hidden_values, preparations)
 
         b0 = run(1, 1, None, None)
         b1 = run(16, 48, (16,), (8, 16))
+        b2 = run(16, 48, None, (8, 16), NvarcSchedulingPolicy(
+            (NvarcBatchShape(2, 8), NvarcBatchShape(2, 10), NvarcBatchShape(4, 10)), 1,
+        ))
+        self.assertEqual(b2[1:6], b1[1:6])
+        torch.testing.assert_close(b2[6], b1[6])
+        self.assertEqual(b2[7:9], b1[7:9])
+        self.assertEqual(b2[7:9], b0[7:9])
+        self.assertEqual([source.key for report in b2[9] for source in report.sources],
+                         [str(sample.key) for sample in samples])
+        self.assertEqual([event for event in b2[0] if event[0] != "nvarc"],
+                         [event for event in b1[0] if event[0] != "nvarc"])
+        for report in b2[9]:
+            self.assertGreater(len(report.nvarc_batches), 1)
+            self.assertEqual(sorted(i for batch in report.nvarc_batches for i in batch.source_indices), list(range(16)))
         self.assertEqual(b1[1], list(range(1, 97)))
         self.assertEqual(b1[1:3], b0[1:3])
         self.assertEqual(b1[3], [8 if length <= 8 else 16 for length in b1[2]])

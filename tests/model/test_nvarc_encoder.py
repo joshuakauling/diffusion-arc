@@ -104,11 +104,32 @@ class NvarcBatchRunnerTests(unittest.TestCase):
         runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8,)))
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
         padded = runner(ids, torch.tensor([0, 2, 6]))
+        explicit = runner(ids, torch.tensor([0, 2, 6]), padded_length=11)
         exact_runner = NvarcBatchRunner(model)
         for index, tokens in enumerate((ids[:2], ids[2:])):
             exact = exact_runner(tokens, torch.tensor([0, len(tokens)]))
             torch.testing.assert_close(padded.sequence_hidden_states[index],
                                        exact.sequence_hidden_states[0], atol=3e-6, rtol=3e-6)
+            torch.testing.assert_close(explicit.sequence_hidden_states[index],
+                                       exact.sequence_hidden_states[0], atol=3e-6, rtol=3e-6)
+
+    def test_explicit_padding_overrides_fixed_policy_without_mutating_it(self) -> None:
+        model = FakeNvarc()
+        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8,)))
+        ids, offsets = torch.tensor([1, 2, 3, 4, 5, 6]), torch.tensor([0, 2, 6])
+        result = runner(ids, offsets, padded_length=6)
+        self.assertEqual(tuple(model.last_input_ids.shape), (2, 6))
+        self.assertEqual(model.last_attention_mask.tolist(),
+                         [[True, True, False, False, False, False],
+                          [True, True, True, True, False, False]])
+        self.assertTrue(torch.all(model.last_input_ids[~model.last_attention_mask] == NVARC_PAD_TOKEN_ID))
+        for states, length in zip(result.sequence_hidden_states, (2, 4)):
+            self.assertEqual(states.shape[0], length)
+            self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
+            self.assertFalse(states.requires_grad)
+        runner(ids, offsets)
+        self.assertEqual(tuple(model.last_input_ids.shape), (2, 8))
+        self.assertEqual(model.forward_calls, 2)
 
     def test_bucket_overflow_fails_before_model_execution(self) -> None:
         model = FakeNvarc()
@@ -122,7 +143,7 @@ class NvarcBatchRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             parameter_names,
-            ("self", "input_ids", "sequence_offsets"),
+            ("self", "input_ids", "sequence_offsets", "padded_length"),
         )
 
     def test_batches_variable_lengths_and_returns_independent_sequence_states(

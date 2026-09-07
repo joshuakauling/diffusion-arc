@@ -66,15 +66,33 @@ class NvarcBatchRunner(nn.Module):
         self,
         input_ids: Tensor,
         sequence_offsets: Tensor,
+        *,
+        padded_length: int | None = None,
     ) -> NvarcBatchOutput:
-        """Encode all complete sources into independent compact tensors."""
+        """Encode packed sources into compact, independently stored hidden states.
+
+        ``input_ids`` concatenates B sources; ``sequence_offsets`` contains
+        their B + 1 boundaries, from zero through the total token count.
+        An explicit ``padded_length`` overrides ``length_buckets`` and must be
+        a validated integer covering every source. When omitted, the runner
+        selects a bucket covering the longest source, or its exact length if
+        no buckets are configured.
+
+        The model receives masked, right-padded IDs of shape [B, padded_length].
+        Results retain packed source order: one frozen [L_i, D] tensor per
+        source, with selected layers concatenated along D and padding removed.
+        """
 
         offsets = sequence_offsets.tolist()
         source_lengths = tuple(
             end - start for start, end in zip(offsets, offsets[1:])
         )
         source_count = len(source_lengths)
-        max_length = self.length_buckets.padded_length(max(source_lengths))
+        max_length = (
+            self.length_buckets.padded_length(max(source_lengths))
+            if padded_length is None
+            else padded_length
+        )
         model_device = _module_input_device(self.model)
 
         flat_input_ids = input_ids.to(device=model_device)

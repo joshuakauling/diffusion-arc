@@ -19,6 +19,8 @@ from diffusion_arc.training.single_gpu_config import (
     SingleGpuTrainingConfig,
 )
 from scripts.train_single_gpu import _ProfiledModule, main, train_from_config
+from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
+from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy
 
 
 class _AcceptAnyModule(torch.nn.Module):
@@ -51,7 +53,7 @@ def _config(root: Path) -> SingleGpuTrainingConfig:
         loop=SingleGpuLoopConfig(
             max_optimizer_steps=7,
             optimizer_batch_size=5,
-            flux_microbatch_size=2,
+            flux_microbatch_size=None,
             min_context_pairs_before_target=2,
             nvarc_source_batch_size=8,
             vae_microbatch_size=8,
@@ -63,7 +65,9 @@ def _config(root: Path) -> SingleGpuTrainingConfig:
             epsilon=1e-8,
             weight_decay=0.01,
         ),
-        padding=SingleGpuPaddingConfig(flux_bucket_boundaries=(256, 512, 8400)),
+        padding=SingleGpuPaddingConfig(),
+        nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 8400),), 2560),
+        flux_scheduling=FluxSchedulingPolicy((FluxBatchShape(1, 8400, 747.171),)),
     )
 
 
@@ -182,11 +186,13 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
         self.assertEqual(training_kwargs["flux_compute_dtype"], torch.bfloat16)
         self.assertEqual(training_kwargs["max_optimizer_steps"], 7)
         self.assertEqual(training_kwargs["optimizer_batch_size"], 5)
-        self.assertEqual(training_kwargs["flux_microbatch_size"], 2)
+        self.assertIsNone(training_kwargs["flux_microbatch_size"])
         self.assertEqual(training_kwargs["min_context_pairs_before_target"], 2)
         self.assertEqual(training_kwargs["nvarc_source_batch_size"], 8)
         self.assertEqual(training_kwargs["vae_microbatch_size"], 8)
-        self.assertEqual(training_kwargs["flux_bucket_boundaries"], (256, 512, 8400))
+        self.assertIsNone(training_kwargs["flux_bucket_boundaries"])
+        self.assertIs(training_kwargs["nvarc_scheduling"], config.nvarc_scheduling)
+        self.assertIs(training_kwargs["flux_scheduling"], config.flux_scheduling)
         self.assertEqual(training_kwargs["generator"], flow_generator)
         self.assertIsNotNone(training_kwargs["on_optimizer_step"])
         expected_profiled_modules = (

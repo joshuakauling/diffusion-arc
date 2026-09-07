@@ -9,9 +9,11 @@ their measured performance and remaining costs.
 | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
 | B0 | Completed | 1 | 1 | 1 | 48 | Exact prefix length | FIFO |
 | B1 | Completed | 16 | 48 | 1 | 48 | Fixed bucket padding | FIFO |
+| B2 | Completed | 2, 4, 8 within 16-source windows | 48 | 1, 2, 4 | 48 | Scheduled bucket shapes | FIFO membership; reordered within each step |
 
 B0 establishes the baseline. B1 combines larger fixed preparation batches
-with reusable attention shapes.
+with reusable attention shapes. B2 reduces NVARC padding, schedules larger
+FLUX microbatches, and overlaps CPU data preparation with GPU work.
 
 ## Shared benchmark setup
 
@@ -33,14 +35,16 @@ verifies parent membership in the training split and records the selected data.
 
 ### Hardware and training
 
-Both variants use one NVIDIA H200 with 139.80 GiB device memory, eight physical
+All variants use one NVIDIA H200 with 139.80 GiB device memory, eight allocated
 CPU cores, and 64 GiB host RAM. The software environment is PyTorch 2.13.0,
 CUDA 13.0, Transformers 4.56.1, Diffusers 0.39.0, and Accelerate 1.12.0.
 
 NVARC remains frozen in BF16 and the VAE remains frozen in FP32. The complete
 FLUX transformer is trained with FP32 parameters and BF16 compute. Activation
 checkpointing is disabled. Each optimizer update contains the same 48 targets
-from 16 sources, with unchanged target order and loss weighting in B0 and B1.
+from 16 sources, with unchanged optimizer-batch membership and per-target loss
+weighting. B0 and B1 execute targets in FIFO order; B2 may reorder execution
+within an already selected optimizer batch.
 
 AdamW uses a peak learning rate of `1e-5`, linear warm-up over 213 updates,
 then cosine decay to zero at update 7,245. This fixed horizon is separate from
@@ -66,16 +70,17 @@ model and data initialization are excluded.
 
 Results report median and p95 step latency, target throughput, and peak
 allocated/reserved GPU memory over the pooled measured steps. Allocated memory
-tracks live tensor storage; reserved memory also includes allocator-held
+tracks live PyTorch allocations; reserved memory also includes allocator-held
 blocks available for reuse. Neither includes every allocation outside PyTorch.
 
 ### Profiling
 
 Separate seven-step runs use two wait steps, two profiler warm-up steps, and
-three active steps, recording optimizer steps 5–7. They retain each variant's
-training configuration and enable CPU/CUDA tracing without shape, memory, or
+three active steps, recording optimizer steps 5–7. They use each variant's
+workload and enable CPU/CUDA tracing without shape, memory, or
 stack recording. Profiler overhead affects timing, so phase measurements
 explain the mechanism while the unprofiled benchmark measures overall speed.
+The B2 trace predates its final gradient-release change, as noted below.
 
 Phase timings distinguish **activity**, the union of recorded GPU kernel,
 memory-copy, and memory-set intervals within a GPU range, from **gaps**, the
@@ -83,19 +88,20 @@ remaining time inside that range: **total range = activity + gaps**. Activity
 includes padding work and is not a measure of useful FLOPs or SM utilization.
 
 Configs:
-[B0 profiler](../../configs/training/profiling/single_gpu_b0_torch_profile.json)
-and [B1 profiler](../../configs/training/profiling/single_gpu_b1_torch_profile.json).
+[B0 profiler](../../configs/training/profiling/single_gpu_b0_torch_profile.json),
+[B1 profiler](../../configs/training/profiling/single_gpu_b1_torch_profile.json),
+and [B2 profiler](../../configs/training/profiling/single_gpu_b2_torch_profile.json).
 
 ### Comparison and reproducibility
 
-B0 and B1 keep the dataset, optimizer-batch membership, loss normalization,
+All variants keep the dataset, optimizer-batch membership, loss normalization,
 precision, optimizer schedule, software, and hardware allocation fixed.
 Step records were checked for matching source order, target counts, real
 prefix lengths, learning rates, and data hashes. Pooled and per-repetition
 summaries were independently recomputed from those records.
 
 Run manifests retain commands, resolved configs, source revisions, and
-environment details. Both runs included uncommitted source changes, so the
+environment details. The reported runs included uncommitted source changes, so the
 recorded base commits alone do not identify the executed code. Checkpoint
 weight contents were not hashed; exact checkpoint identity remains a
 reproducibility limitation.
@@ -286,3 +292,125 @@ benchmark.
 Data loading fetches 16 samples synchronously before NVARC preparation,
 taking 0.171 s of CPU range time per step. This is not a measurement of GPU
 idle time.
+
+## B2 — Length-aware dynamic-batch single-GPU pipeline
+
+B2 addresses B1's NVARC padding and singleton FLUX calls while preserving
+the same 48-target optimizer batches:
+
+- Within each consecutive 16-source window, NVARC uses catalog batches of
+  2, 4, or 8 sources. Scheduling minimizes padded positions plus a fixed
+  per-call penalty. Outputs return to logical source order.
+- VAE encoding follows all NVARC groups and processes the window's 48 targets
+  together. Its batch size is independent of the physical NVARC batches.
+- FLUX schedules the selected 48 targets into catalog microbatches of 1, 2,
+  or 4, minimizing the sum of measured per-shape forward/backward times.
+  Flow noise and timesteps are assigned in original target order; loss means
+  are weighted by each microbatch's share of the optimizer batch.
+- Two CPU workers prefetch samples in order. In the final implementation,
+  gradients are released after each optimizer batch, before the next frozen
+  preparation phase. The tokenizer accepts the full 9,330-token training
+  prompt; the consumed NVARC prefix remains limited to 8,400 tokens.
+
+The [B2 config](../../configs/training/benchmarks/single_gpu_b2.json) combines
+the [NVARC scheduling and prefetch policy](b2-preparation-policy.md) with the
+[measured FLUX shape catalog](flux-batch-shapes.md). Reordering stays within
+each preparation window or optimizer batch; there are no cross-step bucket
+queues or changes to optimizer-batch membership.
+
+### B2 benchmark result
+
+| Metric | B1 | B2 | Change |
+| --- | ---: | ---: | ---: |
+| Median optimizer step | 13.91 s | 11.32 s | -18.6% |
+| p95 optimizer step | 15.77 s | 13.47 s | -14.6% |
+| Targets/s | 3.461 | 4.201 | +21.4% |
+| Peak allocated | 113.90 GiB | 126.48 GiB | +12.58 GiB (+11.0%) |
+| Peak reserved | 118.84 GiB | 133.06 GiB | +14.23 GiB (+12.0%) |
+
+B2 improves complete-pipeline throughput by **21.4% over B1** and **35.8%
+over B0**, using more peak GPU memory than B1. These gains measure NVARC
+scheduling, preparation decoupling, CPU prefetch, FLUX batching, and gradient
+release together; their individual runtime contributions were not isolated.
+
+| B2 repetition | Measured steps | Median step | p95 step | Targets/s |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 50 | 11.271 s | 13.491 s | 4.206 |
+| 2 | 50 | 11.331 s | 13.343 s | 4.197 |
+| 3 | 50 | 11.371 s | 13.463 s | 4.199 |
+
+All three repetitions completed, including 8,400-token inputs.
+Benchmark run: `20260907T164538783729Z`.
+An earlier run exposed internally recovered cuDNN workspace warnings; the
+reported benchmark completed without those warnings after moving gradient
+release to the end of each optimizer batch.
+
+Source identities, target-prefix lengths, target counts, learning rates, and
+dataset hashes match B1. Across 180 matched updates, the mean absolute
+step-loss difference is **0.0000444**, with a maximum of **0.000236**.
+This checks loss agreement for the benchmark, not full-model gradient/update
+equivalence or long-term training quality.
+
+### Executed batching and padding
+
+These values come from the 50 measured steps per repetition; real source and
+target lengths are identical across variants and repetitions.
+
+| Work per optimizer step | B1 | B2 |
+| --- | ---: | ---: |
+| Mean NVARC calls | 1.00 | 4.14 |
+| NVARC padded / real token positions | 2.14x | 1.22x |
+| Mean FLUX microbatches | 48.00 | 18.68 |
+| FLUX text padding above real positions | 7.88% | 10.14% |
+
+Smaller NVARC groups reduce total padded positions by **42.8%** despite
+requiring more calls. FLUX uses **61.1% fewer microbatches**, accepting some
+additional text padding to combine targets. These are workload counts,
+not FLOP or runtime multipliers. Both schedulers were fitted to this benchmark
+subset; their performance on the full training distribution remains unmeasured.
+
+### B2 profiler findings: activity, gaps, and total ranges
+
+**This diagnostic trace predates the final gradient-release change.** It
+captures the same NVARC/FLUX scheduling, VAE batching, and CPU prefetch, but
+its memory-pressure effects must not be attributed to the final benchmark.
+The table uses the same three active steps and GPU-range method as B1;
+recomputing B1 with this method reproduces the preceding B1 table.
+
+| Phase | Activity B1 | Activity B2 | Gaps B1 | Gaps B2 | Total B1 | Total B2 | Change total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| NVARC | 2.198 | 1.081 | 0.016 | 0.355 | 2.214 | 1.436 | -35.1% |
+| VAE | 0.374 | 0.390 | 0.001 | 0.051 | 0.375 | 0.440 | +17.4% |
+| FLUX forward | 2.824 | 2.674 | 0.409 | 0.198 | 3.233 | 2.872 | -11.2% |
+| FLUX backward (reconstructed) | 6.380 | 5.325 | 0.323 | 0.629 | 6.702 | 5.954 | -11.2% |
+
+Values are seconds per optimizer step; changes use unrounded totals.
+Backward uses 52 non-overlapping spans reconstructed from GPU activity
+attributed to the autograd worker, matching the 52 FLUX microbatches in this
+window. As in B1, this is not a decomposition of benchmark wall time.
+
+**NVARC GPU activity falls by 50.8%.** Grouping similar source lengths reduces
+padding work. The active window executes 11 NVARC calls instead of three;
+larger gaps offset part of the activity reduction, leaving a **35.1% shorter
+total range**. Five NVARC attention CPU calls still exceed 20 ms, versus none
+in B1, consistent with residual plan setup in this early window. The trace does
+not isolate setup from other dispatch or allocation gaps.
+
+**FLUX forward and backward ranges each shrink by 11.2%.** Forward activity
+decreases by 5.3% and its gaps roughly halve. Backward activity decreases by
+16.5%, while its gaps increase, partially offsetting that gain. Across the
+active window, each pass performs 1,300 attention calls rather than 3,600;
+eight calls per pass exceed 20 ms, versus two in B1. The window averages
+17.33 microbatches per step, compared with 18.68 during benchmark measurement,
+so its percentages are not estimates of the full benchmark's phase gains.
+
+**VAE keeps the same 48-image batch.** Its older B2 trace includes additional
+allocation and [plan-retry](https://github.com/pytorch/pytorch/blob/v2.13.0/aten/src/ATen/native/cudnn/Conv_v8.cpp#L973-L1046)
+gaps, consistent with the recovered cuDNN workspace
+warnings. The **17.4% longer range** describes that diagnostic run; it is not
+a measured VAE regression after the final gradient-release change.
+
+DataLoader retrieval still makes **16 calls per step**, but their combined
+CPU range falls from **0.171 s to 0.009 s** with ordered background prefetch.
+The work moves to workers rather than disappearing. These CPU ranges do not
+measure GPU idle time or independently establish the end-to-end prefetch gain.

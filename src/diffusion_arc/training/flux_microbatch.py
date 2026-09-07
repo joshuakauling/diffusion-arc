@@ -24,8 +24,7 @@ from .flux_input import FluxInput, NvarcSequenceState
 class FluxMicrobatch:
     """Physical deterministic inputs for one later FLUX execution.
 
-    Flow noise and timesteps are intentionally absent and are sampled only when
-    this microbatch enters the trainable FLUX step.
+    Flow noise and timesteps are supplied separately by the trainable FLUX step.
     """
 
     text_inputs: FluxTextInputs
@@ -44,12 +43,15 @@ def build_flux_microbatch(
     *,
     spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
     length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
+    padded_length: int | None = None,
 ) -> FluxMicrobatch:
     """Copy logical inputs into one physical batch and release consumed states.
 
     Every validation and tensor allocation completes before any pending prefix
     is removed. A failed build therefore leaves all source states
-    available for diagnosis or retry.
+    available for diagnosis or retry. Once copying succeeds, owners with no
+    remaining prefixes release their full-source tensor references; this batch
+    retains its own conditioning tensors for the later FLUX forward/backward.
     """
 
     inputs = tuple(flux_inputs)
@@ -71,7 +73,9 @@ def build_flux_microbatch(
         flux_input.nvarc_sequence_state._prefix_for(flux_input.prefix_end)
         for flux_input in inputs
     )
-    text_inputs = pad_flux_text_prefixes(hidden_state_prefixes, length_buckets=length_buckets)
+    text_inputs = pad_flux_text_prefixes(
+        hidden_state_prefixes, length_buckets=length_buckets, padded_length=padded_length,
+    )
     clean_latents = torch.stack(
         tuple(flux_input.clean_latent for flux_input in inputs)
     )

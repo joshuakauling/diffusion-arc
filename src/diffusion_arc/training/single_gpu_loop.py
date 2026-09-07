@@ -14,13 +14,17 @@ from torch import Tensor, nn
 from torch.optim import Optimizer
 
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
+from diffusion_arc.model.contracts import FlowMatchingBatch
+from diffusion_arc.model.flow_matching import sample_flow_matching_batch
 from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
-from .flux_input import FluxInput, prepare_flux_inputs_batch
+from .flux_input import FluxInput, PreparationMetrics, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
+from .flux_schedule import FluxSchedulingPolicy, FluxTargetBatch, schedule_flux_targets
+from .nvarc_schedule import NvarcSchedulingPolicy
 
 
 @dataclass(frozen=True)
@@ -47,40 +51,76 @@ def _train_optimizer_batch(
     transformer: nn.Module,
     optimizer: Optimizer,
     flux_compute_dtype: torch.dtype,
-    flux_microbatch_size: int,
+    flux_microbatch_size: int | None,
     generator: torch.Generator | None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None,
     max_grad_norm: float | None,
     on_optimizer_step_metrics: Callable[[OptimizerStepMetrics], None] | None,
     flux_length_buckets: SequenceLengthBuckets,
+    flux_scheduling: FluxSchedulingPolicy | None,
+    on_flux_schedule: Callable[[tuple[FluxTargetBatch, ...]], None] | None,
 ) -> None:
     """Train one fixed optimizer batch through one or more FLUX microbatches."""
 
+    # These metrics time FLUX and the optimizer only. The benchmark entrypoint
+    # separately includes data loading and frozen-model preparation in its timer.
     if on_optimizer_step_metrics is not None:
         _synchronize_transformer_device(transformer)
         step_started = time.perf_counter()
     else:
         step_started = None
     optimizer_target_count = len(flux_inputs)
-    optimizer.zero_grad(set_to_none=True)
     reported_loss: Tensor | None = None
     microbatch_count = 0
 
-    for start in range(0, optimizer_target_count, flux_microbatch_size):
-        microbatch = build_flux_microbatch(
-            flux_inputs[start : start + flux_microbatch_size],
-            length_buckets=flux_length_buckets,
+    prefix_lengths = tuple(target.prefix_end for target in flux_inputs)
+    target_flows = None
+    if flux_scheduling is None:
+        batches = tuple(
+            FluxTargetBatch(
+                tuple(range(start, min(start + flux_microbatch_size, optimizer_target_count))),
+                flux_length_buckets.padded_length(max(prefix_lengths[start : start + flux_microbatch_size])),
+            )
+            for start in range(0, optimizer_target_count, flux_microbatch_size)
         )
+    else:
+        batches = schedule_flux_targets(prefix_lengths, flux_scheduling)
+        # Assign randomness in FIFO order using the same per-target draws as B1.
+        # Execution order and physical batch size then cannot reassign noise/time.
+        target_flows = tuple(
+            sample_flow_matching_batch(target.clean_latent.unsqueeze(0), generator=generator)
+            for target in flux_inputs
+        )
+    # Benchmark metadata: report the actual plan, indexed in logical FIFO order.
+    if on_flux_schedule is not None:
+        on_flux_schedule(batches)
+
+    for batch in batches:
+        microbatch = build_flux_microbatch(
+            tuple(flux_inputs[index] for index in batch.target_indices),
+            padded_length=batch.padded_length,
+        )
+        flow_kwargs = {}
+        if target_flows is not None:
+            selected = tuple(target_flows[index] for index in batch.target_indices)
+            flow_kwargs["flow_batch"] = FlowMatchingBatch(
+                noisy_latents=torch.cat(tuple(flow.noisy_latents for flow in selected)),
+                timesteps=torch.cat(tuple(flow.timesteps for flow in selected)),
+                target_velocity=torch.cat(tuple(flow.target_velocity for flow in selected)),
+            )
         loss = compute_flux_microbatch_loss(
             transformer,
             microbatch,
             compute_dtype=flux_compute_dtype,
             generator=generator,
+            **flow_kwargs,
         )
         if loss.ndim != 0:
             raise RuntimeError("FLUX microbatch loss must be a scalar")
         if not bool(torch.isfinite(loss.detach()).item()):
             raise FloatingPointError("FLUX microbatch loss is non-finite")
+        # Weight microbatch means by target count to preserve the optimizer-batch
+        # mean, including a smaller final microbatch. Use it for loss and gradients.
         weight = microbatch.target_count / optimizer_target_count
         loss_contribution = loss.detach() * weight
         if reported_loss is None:
@@ -93,6 +133,7 @@ def _train_optimizer_batch(
 
     gradient_norm: float | None = None
     gradient_clipped = False
+    # Gradient metrics and optional clipping before the optimizer update.
     if max_grad_norm is not None or on_optimizer_step_metrics is not None:
         trainable_parameters = tuple(
             parameter
@@ -110,6 +151,7 @@ def _train_optimizer_batch(
             max_grad_norm is not None and gradient_norm > max_grad_norm
         )
     optimizer.step()
+    # Optional step metrics: finish timing after the optimizer update.
     if on_optimizer_step_metrics is not None:
         _synchronize_transformer_device(transformer)
         if step_started is None:
@@ -118,12 +160,14 @@ def _train_optimizer_batch(
 
     if reported_loss is None:
         raise AssertionError("non-empty optimizer batch produced no loss")
+    # Step callback: report the update and let the entrypoint advance its schedules.
     if on_optimizer_step is not None:
         on_optimizer_step(
             reported_loss,
             optimizer_target_count,
             microbatch_count,
         )
+    # Metrics callback: publish timing, gradient, and learning-rate measurements.
     if on_optimizer_step_metrics is not None:
         if gradient_norm is None:
             raise AssertionError("metrics callback requires a gradient norm")
@@ -140,6 +184,9 @@ def _train_optimizer_batch(
                 step_seconds=step_seconds,
             )
         )
+
+    # Callbacks can inspect the completed gradients; frozen preparation cannot use them.
+    optimizer.zero_grad(set_to_none=True)
 
 
 def _synchronize_transformer_device(transformer: nn.Module) -> None:
@@ -163,11 +210,15 @@ def run_single_gpu_training(
     flux_compute_dtype: torch.dtype,
     max_optimizer_steps: int,
     optimizer_batch_size: int,
-    flux_microbatch_size: int = 1,
+    flux_microbatch_size: int | None = 1,
     min_context_pairs_before_target: int = 1,
     nvarc_source_batch_size: int = 1,
     vae_microbatch_size: int | None = None,
     flux_bucket_boundaries: tuple[int, ...] | None = None,
+    nvarc_scheduling: NvarcSchedulingPolicy | None = None,
+    flux_scheduling: FluxSchedulingPolicy | None = None,
+    on_preparation: Callable[[PreparationMetrics], None] | None = None,
+    on_flux_schedule: Callable[[tuple[FluxTargetBatch, ...]], None] | None = None,
     generator: torch.Generator | None = None,
     on_optimizer_step: Callable[[Tensor, int, int], None] | None = None,
     max_grad_norm: float | None = None,
@@ -175,15 +226,25 @@ def run_single_gpu_training(
 ) -> None:
     """Train from one sample stream until its end or an exact step limit.
 
-    Consecutive source sequences are prepared in fixed NVARC batches without
-    reordering. A FIFO queue holds their targets until a complete optimizer
-    batch is available. Stream exhaustion flushes one smaller tail batch.
+    ``nvarc_source_batch_size`` limits the number of consecutive raw samples in
+    each preparation window, before eligibility filtering. Optional scheduling
+    subdivides that window into physical NVARC batches; returned targets retain
+    logical source order. Window boundaries do not define optimizer batches:
+    the target FIFO carries any surplus into the next update.
+
+    A complete optimizer batch contains ``optimizer_batch_size`` targets,
+    processed in FLUX microbatches. Stream exhaustion flushes a smaller tail.
     Reaching ``max_optimizer_steps`` stops without consuming that tail.
+    ``flux_scheduling`` reorders only the selected optimizer batch and requires
+    ``flux_microbatch_size=None`` with no separate FLUX padding boundaries.
     """
 
     _require_positive_integer(max_optimizer_steps, name="max_optimizer_steps")
     _require_positive_integer(optimizer_batch_size, name="optimizer_batch_size")
-    _require_positive_integer(flux_microbatch_size, name="flux_microbatch_size")
+    if flux_scheduling is None:
+        _require_positive_integer(flux_microbatch_size, name="flux_microbatch_size")
+    elif flux_microbatch_size is not None or flux_bucket_boundaries is not None:
+        raise ValueError("flux_scheduling requires null flux_microbatch_size and flux_bucket_boundaries")
     _require_positive_integer(
         nvarc_source_batch_size,
         name="nvarc_source_batch_size",
@@ -216,6 +277,7 @@ def run_single_gpu_training(
         raise TypeError("on_optimizer_step_metrics must be callable")
 
     flux_length_buckets = SequenceLengthBuckets(flux_bucket_boundaries)
+    optimizer.zero_grad(set_to_none=True)
     transformer.train()
     flux_input_buffer: deque[FluxInput] = deque()
     optimizer_steps = 0
@@ -234,6 +296,8 @@ def run_single_gpu_training(
                 vae_encoder=vae_encoder,
                 min_context_pairs_before_target=min_context_pairs_before_target,
                 vae_microbatch_size=vae_microbatch_size,
+                nvarc_scheduling=nvarc_scheduling,
+                on_preparation=on_preparation,
             )
         )
 
@@ -256,6 +320,8 @@ def run_single_gpu_training(
                 max_grad_norm=max_grad_norm,
                 on_optimizer_step_metrics=on_optimizer_step_metrics,
                 flux_length_buckets=flux_length_buckets,
+                flux_scheduling=flux_scheduling,
+                on_flux_schedule=on_flux_schedule,
             )
             optimizer_steps += 1
 
@@ -271,6 +337,8 @@ def run_single_gpu_training(
             max_grad_norm=max_grad_norm,
             on_optimizer_step_metrics=on_optimizer_step_metrics,
             flux_length_buckets=flux_length_buckets,
+            flux_scheduling=flux_scheduling,
+            on_flux_schedule=on_flux_schedule,
         )
 
 

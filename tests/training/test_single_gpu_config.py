@@ -56,6 +56,97 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 class SingleGpuTrainingConfigTests(unittest.TestCase):
+    def test_b2_adds_exact_approved_flux_catalog_and_preserves_preparation(self) -> None:
+        root = Path(__file__).resolve().parents[2] / "configs/training/benchmarks"
+        preparation = load_single_gpu_training_config(root / "single_gpu_b2_preparation.json")
+        b2 = load_single_gpu_training_config(root / "single_gpu_b2.json")
+        self.assertEqual(replace(b2, loop=preparation.loop, padding=preparation.padding,
+                                 flux_scheduling=None), preparation)
+        self.assertEqual(replace(b2.loop, flux_microbatch_size=1), preparation.loop)
+        self.assertIsNone(b2.loop.flux_microbatch_size)
+        self.assertIsNone(b2.padding.flux_bucket_boundaries)
+        expected = {
+            1: [487, 2422, 3325, 4210, 4837, 6100, 8400],
+            2: [487, 1348, 2126, 2422, 2749, 2990, 3325, 3714, 4210, 4837],
+            4: [487, 778, 1090, 1348, 1578, 1818, 2126],
+        }
+        self.assertEqual(len(b2.flux_scheduling.shapes), 24)
+        for size, bounds in expected.items():
+            self.assertEqual([s.max_tokens for s in b2.flux_scheduling.shapes if s.batch_size == size], bounds)
+
+    def test_schema_v6_rejects_ambiguous_or_incomplete_flux_policies(self) -> None:
+        path = Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b2.json"
+        original = json.loads(path.read_text())
+        mutations = (
+            lambda p: p.pop("flux_scheduling"),
+            lambda p: p.update(flux_scheduling=None),
+            lambda p: p["loop"].update(flux_microbatch_size=1),
+            lambda p: p["padding"].update(flux_bucket_boundaries=[8400]),
+            lambda p: p["flux_scheduling"].update(shapes={}),
+            lambda p: p["flux_scheduling"].update(shapes=[]),
+            lambda p: p["flux_scheduling"].update(call_overhead_tokens=1),
+            lambda p: p["flux_scheduling"].update(shapes=[{"batch_size": 1, "max_tokens": 8399, "forward_backward_ms": 1}]),
+            lambda p: p["flux_scheduling"]["shapes"][0].pop("forward_backward_ms"),
+            lambda p: p["flux_scheduling"]["shapes"][0].update(forward_backward_ms=True),
+            lambda p: p["flux_scheduling"]["shapes"].append(p["flux_scheduling"]["shapes"][0]),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, mutate in enumerate(mutations):
+                payload = json.loads(json.dumps(original))
+                mutate(payload)
+                with self.subTest(index=index), self.assertRaises((ValueError, TypeError)):
+                    load_single_gpu_training_config(_write_config(Path(directory), payload))
+            original["flux_scheduling"] = None
+            original["loop"]["flux_microbatch_size"] = 1
+            self.assertIsNone(load_single_gpu_training_config(_write_config(Path(directory), original)).flux_scheduling)
+
+    def test_b2_preparation_preserves_b1_training_and_flux_policy(self) -> None:
+        root = Path(__file__).resolve().parents[2] / "configs/training/benchmarks"
+        b1 = load_single_gpu_training_config(root / "single_gpu_b1.json")
+        b2 = load_single_gpu_training_config(root / "single_gpu_b2_preparation.json")
+        self.assertEqual(replace(b2, data=b1.data, padding=b1.padding, nvarc_scheduling=None), b1)
+        self.assertEqual(b2.padding.flux_bucket_boundaries, b1.padding.flux_bucket_boundaries)
+        self.assertIsNone(b2.padding.nvarc_bucket_boundaries)
+        self.assertEqual((b2.data.num_workers, b2.data.prefetch_factor), (2, 8))
+        self.assertEqual(replace(b2.data, num_workers=0, prefetch_factor=None), b1.data)
+        self.assertEqual(len(b2.nvarc_scheduling.shapes), 20)
+        self.assertEqual(b2.nvarc_scheduling.call_overhead_tokens, 2560)
+        self.assertEqual(set(b2.nvarc_scheduling.__dataclass_fields__), {"shapes", "call_overhead_tokens"})
+
+    def test_schema_v5_validates_prefetch_and_explicit_shape_catalog(self) -> None:
+        path = Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b2_preparation.json"
+        original = json.loads(path.read_text())
+        mutations = (
+            lambda p: p["data"].update(num_workers=-1),
+            lambda p: p["data"].update(num_workers=True),
+            lambda p: p["data"].update(prefetch_factor=0),
+            lambda p: p["data"].update(prefetch_factor=True),
+            lambda p: p["data"].update(prefetch_factor=None),
+            lambda p: p["data"].update(num_workers=0),
+            lambda p: p["nvarc_scheduling"].update(shapes=[]),
+            lambda p: p["nvarc_scheduling"].update(shapes={}),
+            lambda p: p["nvarc_scheduling"].update(odd_source_bucket_length=8400),
+            lambda p: p["nvarc_scheduling"].update(shapes=[{"batch_size": 2, "max_tokens": 8399}]),
+            lambda p: p["nvarc_scheduling"].update(call_overhead_tokens=-1),
+            lambda p: p["nvarc_scheduling"]["shapes"].append(p["nvarc_scheduling"]["shapes"][0]),
+            lambda p: p["nvarc_scheduling"]["shapes"][0].update(batch_size=3),
+            lambda p: p["nvarc_scheduling"]["shapes"][0].update(dummy_sources=True),
+            lambda p: p["padding"].update(nvarc_bucket_boundaries=[8400]),
+            lambda p: p.pop("nvarc_scheduling"),
+            lambda p: p["data"].pop("prefetch_factor"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, mutate in enumerate(mutations):
+                payload = json.loads(json.dumps(original))
+                mutate(payload)
+                with self.subTest(index=index), self.assertRaises((TypeError, ValueError)):
+                    load_single_gpu_training_config(_write_config(Path(directory), payload))
+            original["data"].update(num_workers=0, prefetch_factor=None)
+            original["nvarc_scheduling"] = None
+            config = load_single_gpu_training_config(_write_config(Path(directory), original))
+            self.assertEqual(config.data.num_workers, 0)
+            self.assertIsNone(config.nvarc_scheduling)
+
     def test_b1_changes_only_fixed_preparation_batches_and_padding(self) -> None:
         root = Path(__file__).resolve().parents[2]
         b0 = load_single_gpu_training_config(root / "configs/training/benchmarks/single_gpu_b0.json")
@@ -184,7 +275,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
     def test_rejects_unsupported_schema_device_and_dtype(self) -> None:
         cases = (
-            ("schema_version", 5, "unsupported schema_version"),
+            ("schema_version", 7, "unsupported schema_version"),
             ("device", "cpu", "device must be"),
         )
         for field, value, message in cases:
@@ -294,7 +385,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
             + train_single_gpu.PROFILER_ACTIVE_STEPS
         )
         self.assertEqual(profile_steps, 7)
-        for variant in ("b0", "b1"):
+        for variant in ("b0", "b1", "b2"):
             with self.subTest(variant=variant):
                 benchmark = load_single_gpu_training_config(
                     root / f"configs/training/benchmarks/single_gpu_{variant}.json"
