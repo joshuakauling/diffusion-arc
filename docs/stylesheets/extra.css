@@ -1,0 +1,14 @@
+/* Give benchmark tables and annotated Python signatures more room. */
+.md-grid {
+  max-width: 90rem;
+}
+
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset .md-typeset__table {
+  display: block;
+}

@@ -1,0 +1,65 @@
+site_name: Diffusion-ARC
+site_description: Architecture, performance results, and Python API reference.
+repo_url: https://github.com/joshuakauling/diffusion-arc
+docs_dir: docs
+site_dir: site
+theme:
+  name: material
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      accent: light blue
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+extra_css:
+  - stylesheets/extra.css
+nav:
+  - Overview: README.md
+  - Architecture:
+      - Initial approach: architecture/initial-flow-only-architecture.md
+      - FLUX.2 Klein: architecture/flux2-klein-architecture.md
+      - NVARC: architecture/nvarc-overview.md
+  - Training: training/README.md
+  - Performance:
+      - Benchmark report: performance/README.md
+      - B1 bucket policy: performance/b1-bucket-policy.md
+      - B2 preparation policy: performance/b2-preparation-policy.md
+  - Experiments: experiments/README.md
+  - Research ideas: research-ideas.md
+  - Code reference: api.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            allow_inspection: false
+            members_order: source
+            show_source: false
+            show_signature_annotations: true
+            heading_level: 3
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+watch:
+  - src/diffusion_arc
