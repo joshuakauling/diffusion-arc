@@ -15,6 +15,13 @@ B0 establishes the baseline. B1 combines larger fixed preparation batches
 with reusable attention shapes. B2 reduces NVARC padding, schedules larger
 FLUX microbatches, and overlaps CPU data preparation with GPU work.
 
+The subsequent NVARC diagnostics compare
+[bucket shapes and alignment](nvarc-batch-shapes.md) and
+[packed attention backends](nvarc-packing.md). They select unpadded FA3 Varlen
+for the NVARC component of B3: one packed forward per 16-source window,
+with independent causal attention inside each source. This is a component
+measurement and implementation decision, not a completed B3 training benchmark.
+
 ## Shared benchmark setup
 
 ### Dataset

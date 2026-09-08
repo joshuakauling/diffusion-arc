@@ -40,6 +40,8 @@ nav:
       - Benchmark report: performance/README.md
       - B1 bucket policy: performance/b1-bucket-policy.md
       - B2 preparation policy: performance/b2-preparation-policy.md
+      - NVARC shapes and alignment: performance/nvarc-batch-shapes.md
+      - NVARC packed attention: performance/nvarc-packing.md
   - Experiments: experiments/README.md
   - Research ideas: research-ideas.md
   - Code reference: api.md
