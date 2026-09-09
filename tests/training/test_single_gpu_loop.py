@@ -25,7 +25,7 @@ from diffusion_arc.model import (
 from diffusion_arc.training import run_single_gpu_training
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
-from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy
+from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxPackingPolicy, FluxSchedulingPolicy
 from diffusion_arc.training.flux_loss import compute_flux_microbatch_loss
 from diffusion_arc.model.flow_matching import sample_flow_matching_batch
 from tests.model.test_nvarc_encoder import FakeNvarc
@@ -175,7 +175,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
             FluxBatchShape(2, 8, 1.2), FluxBatchShape(2, 12, 4), FluxBatchShape(4, 8, 2),
         ))
 
-        def run(scheduling, max_steps=3):
+        def run(scheduling, max_steps=3, packing=False):
             model, steps, plans, draws, executed, weights = ScalarTransformer(), [], [], {}, [], []
             generator = torch.Generator().manual_seed(41)
 
@@ -184,13 +184,16 @@ class SingleGpuTrainingTests(unittest.TestCase):
                     flow_batch = sample_flow_matching_batch(microbatch.clean_latents, generator=generator)
                 ids = tuple(int(v) for v in microbatch.clean_latents[:, 0, 0])
                 executed.extend(ids)
+                text_rows = (microbatch.text.split(microbatch.layout.text_lengths) if packing else
+                             microbatch.text_inputs.encoder_hidden_states)
+                lengths = (microbatch.layout.text_lengths if packing else
+                           microbatch.text_inputs.text_attention_mask.sum(dim=1).tolist())
                 for row, target in enumerate(ids):
                     self.assertNotIn(target, draws)
                     draws[target] = torch.cat((
                         flow_batch.noisy_latents[row, 0, :8], flow_batch.timesteps[row:row + 1],
                         flow_batch.target_velocity[row, 0, :8],
-                        microbatch.text_inputs.text_attention_mask[row].sum().reshape(1),
-                        microbatch.text_inputs.encoder_hidden_states[row, 0, :4],
+                        torch.tensor([lengths[row]]), text_rows[row][0, :4],
                     ))
                 result = compute_flux_microbatch_loss(transformer, microbatch, flow_batch=flow_batch, **kwargs)
                 result.register_hook(lambda grad: weights.append((len(ids), float(grad))))
@@ -208,40 +211,46 @@ class SingleGpuTrainingTests(unittest.TestCase):
                 patch("diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss", side_effect=loss),
                 patch("diffusion_arc.training.flux_loss.predict_flux_velocity",
                       side_effect=lambda m, z, *_args, **_kwargs: m.weight * z),
+                patch("diffusion_arc.model.flux_packing.predict_packed_flux_velocity",
+                      side_effect=lambda m, z, *_args, **_kwargs: m.weight * z),
             ):
                 run_single_gpu_training(
                     samples, nvarc_runner=NvarcBatchRunner(FakeNvarc()), vae_encoder=NumberedVaeEncoder(),
                     transformer=model, optimizer=torch.optim.SGD(model.parameters(), lr=1e-5),
                     flux_compute_dtype=torch.bfloat16, max_optimizer_steps=max_steps,
-                    optimizer_batch_size=48, flux_microbatch_size=None if scheduling else 1,
+                    optimizer_batch_size=48, flux_microbatch_size=None if scheduling or packing else 1,
                     min_context_pairs_before_target=2, nvarc_source_batch_size=16, vae_microbatch_size=48,
                     nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 12), NvarcBatchShape(4, 12)), 1),
                     flux_scheduling=scheduling, on_flux_schedule=plans.append, generator=generator,
+                    flux_packing=FluxPackingPolicy() if packing else None,
+                    flux_packing_backend=object() if packing else None,
                     on_optimizer_step=step,
                 )
             return steps, plans, draws, weights, generator.get_state()
 
-        reference, scheduled = run(None), run(policy)
-        self.assertEqual([s[4] for s in scheduled[0]], [48, 48, 5])
-        self.assertEqual(set(reference[2]), set(scheduled[2]))
-        for target in reference[2]:
-            torch.testing.assert_close(scheduled[2][target], reference[2][target], rtol=0, atol=0)
-        torch.testing.assert_close(scheduled[4], reference[4], rtol=0, atol=0)
-        self.assertTrue(any(a[0] != b[0] for a, b in zip(reference[0], scheduled[0])))
-        for a, b, plan in zip(reference[0], scheduled[0], scheduled[1]):
-            self.assertEqual(sorted(a[0]), sorted(b[0]))
-            torch.testing.assert_close(torch.tensor(b[1:4]), torch.tensor(a[1:4]), rtol=2e-6, atol=1e-5)
-            self.assertEqual(b[5], len(plan))
-            self.assertEqual(sorted(i for group in plan for i in group.target_indices), list(range(b[4])))
-            self.assertLess(b[5], a[5])
-        offset = 0
-        for step in scheduled[0]:
-            for size, weight in scheduled[3][offset:offset + step[5]]:
-                self.assertAlmostEqual(weight, size / step[4], places=7)
-            offset += step[5]
-        stopped = run(policy, max_steps=1)
-        self.assertEqual(len(stopped[0]), 1)
-        self.assertEqual(sorted(stopped[2]), list(range(1, 49)))
+        reference = run(None)
+        for packing in (False, True):
+            scheduled = run(None if packing else policy, packing=packing)
+            self.assertEqual([s[4] for s in scheduled[0]], [48, 48, 5])
+            self.assertEqual(set(reference[2]), set(scheduled[2]))
+            for target in reference[2]:
+                torch.testing.assert_close(scheduled[2][target], reference[2][target], rtol=0, atol=0)
+            torch.testing.assert_close(scheduled[4], reference[4], rtol=0, atol=0)
+            self.assertTrue(any(a[0] != b[0] for a, b in zip(reference[0], scheduled[0])))
+            for a, b, plan in zip(reference[0], scheduled[0], scheduled[1]):
+                self.assertEqual(sorted(a[0]), sorted(b[0]))
+                torch.testing.assert_close(torch.tensor(b[1:4]), torch.tensor(a[1:4]), rtol=2e-6, atol=1e-5)
+                self.assertEqual(b[5], len(plan))
+                self.assertEqual(sorted(i for group in plan for i in group.target_indices), list(range(b[4])))
+                self.assertLess(b[5], a[5])
+            offset = 0
+            for step in scheduled[0]:
+                for size, weight in scheduled[3][offset:offset + step[5]]:
+                    self.assertAlmostEqual(weight, size / step[4], places=7)
+                offset += step[5]
+            stopped = run(None if packing else policy, max_steps=1, packing=packing)
+            self.assertEqual(len(stopped[0]), 1)
+            self.assertEqual(sorted(stopped[2]), list(range(1, 49)))
 
     def test_b2_odd_windows_preserve_fifo_membership_and_partial_tail_loss(self) -> None:
         samples = tuple(_sample(count) for count in (2, 3, 1, 2, 2))

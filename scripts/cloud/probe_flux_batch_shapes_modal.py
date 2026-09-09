@@ -75,7 +75,11 @@ def probe_flux_batch_shapes(config: str, metadata: dict) -> str:
             metadata={**metadata, "modal_resources": RESOURCES}, on_progress=model_volume.commit,
         )
         if result["status"] != "complete":
-            raise RuntimeError(f"FLUX shape probe {result['status']}; partial results: {destination}")
+            detail = result.get("error", "worker did not finish within the configured budget")
+            raise RuntimeError(
+                f"FLUX shape probe {result['status']}: {detail}; "
+                f"active case: {result.get('active_case')}; partial results: {destination}"
+            )
     finally:
         model_volume.commit()
         print(f"FLUX shape results directory: {destination}")

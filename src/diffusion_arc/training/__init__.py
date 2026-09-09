@@ -18,7 +18,7 @@ from .flux_input import (
     prepare_flux_inputs_batch,
 )
 from .flux_loss import compute_flux_microbatch_loss
-from .flux_microbatch import FluxMicrobatch, build_flux_microbatch
+from .flux_microbatch import FluxMicrobatch, PackedFluxMicrobatch, build_flux_microbatch
 from .single_gpu_loop import OptimizerStepMetrics, run_single_gpu_training
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "CollatedTrainingBatch",
     "FluxInput",
     "FluxMicrobatch",
+    "PackedFluxMicrobatch",
     "FixedFlowProbeResult",
     "NvarcSequenceState",
     "OptimizerStepMetrics",

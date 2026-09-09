@@ -325,6 +325,12 @@ the [NVARC scheduling and prefetch policy](b2-preparation-policy.md) with the
 each preparation window or optimizer batch; there are no cross-step bucket
 queues or changes to optimizer-batch membership.
 
+The later [FA3 packed-training recipe](../training/flux-sequence-packing.md)
+replaces the FLUX shape catalog with a 12,288 joint-token budget and FP32
+modulation-gradient sums. Its local integration tests and reconstructed call
+counts are documented separately; the B2 GPU measurements below retain their
+original meaning.
+
 ### B2 benchmark result
 
 | Metric | B1 | B2 | Change |

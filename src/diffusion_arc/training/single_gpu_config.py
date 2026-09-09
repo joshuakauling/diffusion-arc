@@ -12,11 +12,11 @@ from typing import Any
 from diffusion_arc._constants import NVARC_MAX_TOKENS
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 from .nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
-from .flux_schedule import FluxBatchShape, FluxSchedulingPolicy
+from .flux_schedule import FluxBatchShape, FluxPackingPolicy, FluxSchedulingPolicy
 
 
-SINGLE_GPU_TRAINING_SCHEMA_VERSION = 6
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
+SINGLE_GPU_TRAINING_SCHEMA_VERSION = 7
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -106,6 +106,7 @@ class SingleGpuTrainingConfig:
     padding: SingleGpuPaddingConfig = SingleGpuPaddingConfig()
     nvarc_scheduling: NvarcSchedulingPolicy | None = None
     flux_scheduling: FluxSchedulingPolicy | None = None
+    flux_packing: FluxPackingPolicy | None = None
 
 
 def load_single_gpu_training_config(
@@ -129,6 +130,8 @@ def load_single_gpu_training_config(
         config_fields.add("nvarc_scheduling")
     if schema_version >= 6:
         config_fields.add("flux_scheduling")
+    if schema_version >= 7:
+        config_fields.add("flux_packing")
     _fields(payload, config_fields, name="config")
 
     seed = _integer(payload["seed"], name="seed")
@@ -341,6 +344,15 @@ def load_single_gpu_training_config(
         if padding.nvarc_bucket_boundaries is not None:
             raise ValueError("nvarc_scheduling and padding.nvarc_bucket_boundaries are mutually exclusive")
 
+    flux_packing = None
+    if payload.get("flux_packing") is not None:
+        section = _object(payload["flux_packing"], name="flux_packing")
+        _fields(section, {"max_tokens"}, name="flux_packing")
+        flux_packing = FluxPackingPolicy(**section)
+        if (payload.get("flux_scheduling") is not None or flux_microbatch_size is not None
+                or padding.flux_bucket_boundaries is not None):
+            raise ValueError("flux_packing requires null flux_scheduling, flux_microbatch_size and flux_bucket_boundaries")
+
     flux_scheduling = None
     if payload.get("flux_scheduling") is not None:
         section = _object(payload["flux_scheduling"], name="flux_scheduling")
@@ -357,7 +369,7 @@ def load_single_gpu_training_config(
             raise ValueError(f"flux_scheduling must cover {NVARC_MAX_TOKENS} tokens")
         if padding.flux_bucket_boundaries is not None or flux_microbatch_size is not None:
             raise ValueError("flux_scheduling requires null flux_microbatch_size and flux_bucket_boundaries")
-    elif flux_microbatch_size is None:
+    elif flux_microbatch_size is None and flux_packing is None:
         raise ValueError("loop.flux_microbatch_size must be positive without flux_scheduling")
 
     return SingleGpuTrainingConfig(
@@ -378,6 +390,7 @@ def load_single_gpu_training_config(
         padding=padding,
         nvarc_scheduling=nvarc_scheduling,
         flux_scheduling=flux_scheduling,
+        flux_packing=flux_packing,
     )
 
 

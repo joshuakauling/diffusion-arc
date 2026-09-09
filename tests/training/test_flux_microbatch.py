@@ -6,6 +6,7 @@ from dataclasses import replace
 import gc
 import unittest
 import weakref
+from unittest.mock import patch
 
 import torch
 
@@ -16,6 +17,7 @@ from diffusion_arc.model import (
 from diffusion_arc.training import (
     FluxInput,
     FluxMicrobatch,
+    PackedFluxMicrobatch,
     NvarcSequenceState,
     build_flux_microbatch,
 )
@@ -42,6 +44,37 @@ def _flux_inputs() -> tuple[FluxInput, ...]:
 
 
 class FluxMicrobatchTests(unittest.TestCase):
+    def test_packed_copy_preserves_segments_and_releases_consumed_source(self) -> None:
+        inputs = _flux_inputs()
+        state = inputs[0].nvarc_sequence_state
+        hidden_ref = weakref.ref(state._hidden_states)
+        microbatch = build_flux_microbatch((inputs[2], inputs[0]), max_joint_tokens=12288)
+        self.assertIsInstance(microbatch, PackedFluxMicrobatch)
+        self.assertEqual(microbatch.text.shape, (8, 4))
+        self.assertEqual(microbatch.layout.cumulative.tolist(), [0, 906, 1808])
+        self.assertEqual(microbatch.layout.text_positions[:, 3].tolist(), [0, 1, 2, 3, 4, 5, 0, 1])
+        self.assertEqual(microbatch.clean_latents[:, 0, 0].tolist(), [3, 1])
+        torch.testing.assert_close(microbatch.text[:2], microbatch.text[-2:], rtol=0, atol=0)
+        self.assertEqual(state.pending_prefix_ends, frozenset({4}))
+        build_flux_microbatch((inputs[1],), max_joint_tokens=12288)
+        self.assertTrue(state.is_released)
+        gc.collect()
+        self.assertIsNone(hidden_ref())
+        self.assertEqual(microbatch.target_count, 2)
+
+    def test_packed_budget_and_failed_metadata_allocation_preserve_owners(self) -> None:
+        inputs = _flux_inputs()
+        state = inputs[0].nvarc_sequence_state
+        for kwargs in ({"max_joint_tokens": 1000}, {"max_joint_tokens": 12288, "padded_length": 8}):
+            with self.assertRaises(ValueError):
+                build_flux_microbatch(inputs, **kwargs)
+            self.assertEqual(state.pending_prefix_ends, frozenset({2, 4, 6}))
+        with patch("diffusion_arc.model.flux_packing.packing_layout", side_effect=torch.OutOfMemoryError("test")):
+            with self.assertRaises(torch.OutOfMemoryError):
+                build_flux_microbatch(inputs, max_joint_tokens=12288)
+        self.assertEqual(state.pending_prefix_ends, frozenset({2, 4, 6}))
+        self.assertFalse(state.is_released)
+
     def test_scheduled_padding_preserves_reordered_rows_and_releases_shared_owner(self) -> None:
         inputs = _flux_inputs()
         state = inputs[0].nvarc_sequence_state

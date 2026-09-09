@@ -93,6 +93,14 @@ class FluxProbeModalTests(unittest.TestCase):
                 self.launcher.main()
         self.launcher.probe_flux_batch_shapes.remote.assert_not_called()
 
+    def test_alignment_configuration_uses_the_existing_modal_launcher(self):
+        config = "configs/diagnostics/flux_alignment.json"
+        with patch.object(probe, "source_metadata", return_value={"source_sha256": {}}):
+            self.launcher.main(config)
+        call = self.launcher.probe_flux_batch_shapes.remote.call_args.args
+        self.assertEqual(call[0], config)
+        self.assertEqual(set(call[1]["config_sha256"]), {"probe", "training"})
+
     def test_remote_persists_progress_and_propagates_incomplete_sweeps(self):
         for status in ("complete", "timeout", "error"):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
@@ -105,7 +113,7 @@ class FluxProbeModalTests(unittest.TestCase):
                     self.assertEqual(metadata["modal_resources"]["gpu"], "H200")
                     self.assertIs(on_progress, self.volume.commit)
                     on_progress()
-                    return {"status": status}
+                    return {"status": status, "error": "original diagnostic failure"}
 
                 with (
                     patch.object(self.launcher, "REMOTE_REPOSITORY_ROOT", repository),
@@ -116,7 +124,7 @@ class FluxProbeModalTests(unittest.TestCase):
                         result = self.launcher.probe_flux_batch_shapes(CONFIG, {})
                         self.assertTrue(Path(result).is_relative_to(volume))
                     else:
-                        with self.assertRaisesRegex(RuntimeError, status):
+                        with self.assertRaisesRegex(RuntimeError, status + ": original diagnostic failure"):
                             self.launcher.probe_flux_batch_shapes(CONFIG, {})
                 run_mock.assert_called_once()
                 self.assertEqual(self.volume.commit.call_count, 2)

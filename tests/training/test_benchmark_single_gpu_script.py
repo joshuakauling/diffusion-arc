@@ -17,7 +17,7 @@ from diffusion_arc.training.single_gpu_config import (
 )
 from diffusion_arc.training.flux_input import PreparationMetrics, PreparedSource
 from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy, NvarcSourceBatch
-from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy, FluxTargetBatch
+from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxPackingPolicy, FluxSchedulingPolicy, FluxTargetBatch
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 from diffusion_arc.model import NvarcBatchRunner
 from scripts import benchmark_single_gpu as bench
@@ -302,7 +302,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(json.loads((root / "failed/summary.json").read_text())["status"], "failed")
 
     def test_shared_loop_wiring_and_incomplete_run_is_not_a_result(self):
-        for completed_steps in (3, 2):
+        for completed_steps, packed in ((3, False), (2, False), (3, True), (2, True)):
             with self.subTest(completed_steps=completed_steps), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config_path = root / "config.json"
@@ -310,16 +310,24 @@ class BenchmarkTests(unittest.TestCase):
                 models = SimpleNamespace(
                     tokenizer=object(), nvarc_runner=object(), vae_encoder=object(),
                     transformer=object(), flux_compute_dtype=torch.bfloat16,
+                    flux_packing_backend=SimpleNamespace(binding="flash_attn_3.flash_attn_interface.flash_attn_varlen_func"),
                 )
                 optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
                 config = replace(
                     _config(), padding=SingleGpuPaddingConfig(flux_bucket_boundaries=(256, 512, 8400)),
                     nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 8400),), 2560),
                 )
+                if packed:
+                    config = replace(config, flux_packing=FluxPackingPolicy(),
+                                     loop=replace(config.loop, flux_microbatch_size=None),
+                                     padding=SingleGpuPaddingConfig())
                 def run(samples, **kwargs):
+                    self.assertIs(kwargs["flux_packing"], config.flux_packing)
+                    if packed:
+                        self.assertIs(kwargs["flux_packing_backend"], models.flux_packing_backend)
                     self.assertEqual(kwargs["max_optimizer_steps"], 3)
                     self.assertEqual(kwargs["vae_microbatch_size"], 1)
-                    self.assertEqual(kwargs["flux_bucket_boundaries"], (256, 512, 8400))
+                    self.assertEqual(kwargs["flux_bucket_boundaries"], config.padding.flux_bucket_boundaries)
                     self.assertNotIn("on_optimizer_step_metrics", kwargs)
                     self.assertIs(kwargs["nvarc_scheduling"], config.nvarc_scheduling)
                     self.assertIs(kwargs["flux_scheduling"], config.flux_scheduling)
@@ -327,8 +335,10 @@ class BenchmarkTests(unittest.TestCase):
                         if index == completed_steps:
                             break
                         kwargs["on_preparation"](_preparation([sample]))
-                        kwargs["on_flux_schedule"](tuple(FluxTargetBatch((i,), 256) for i in range(3)))
-                        kwargs["on_optimizer_step"](torch.tensor(0.5), 3, 3)
+                        batches = ((FluxTargetBatch((2, 0, 1), None, 2790),) if packed else
+                                   tuple(FluxTargetBatch((i,), 256) for i in range(3)))
+                        kwargs["on_flux_schedule"](batches)
+                        kwargs["on_optimizer_step"](torch.tensor(0.5), 3, len(batches))
                 with ExitStack() as stack:
                     self._mock_cuda(stack)
                     for name, result in {
@@ -342,6 +352,8 @@ class BenchmarkTests(unittest.TestCase):
                     stack.enter_context(patch.object(torch.cuda, "get_device_properties", return_value=SimpleNamespace(total_memory=1024)))
                     stack.enter_context(patch.object(torch.cuda, "device_count", return_value=1))
                     stack.enter_context(patch.object(bench, "run_single_gpu_training", side_effect=run))
+                    if packed:
+                        stack.enter_context(patch.object(bench, "version", return_value="test-pinned"))
                     profiler = stack.enter_context(patch.object(torch.profiler, "profile", side_effect=AssertionError("no profiler")))
                     if completed_steps == 3:
                         bench.benchmark_once(config_path, root / "result")
@@ -351,7 +363,14 @@ class BenchmarkTests(unittest.TestCase):
                     profiler.assert_not_called()
                 manifest = json.loads((root / "result/manifest.json").read_text())
                 self.assertEqual(manifest["status"], "complete" if completed_steps == 3 else "failed")
-                self.assertEqual(len((root / "result/steps.jsonl").read_text().splitlines()), completed_steps)
+                rows = [json.loads(line) for line in (root / "result/steps.jsonl").read_text().splitlines()]
+                self.assertEqual(len(rows), completed_steps)
+                if packed:
+                    self.assertEqual(manifest["execution"]["flux_packed_token_budget"], 12288)
+                    self.assertEqual(manifest["execution"]["modulation_reduction"], "fp32")
+                    self.assertEqual(rows[0]["flux_padded_prefix_tokens"], [20, 30, 40])
+                    self.assertEqual(rows[0]["flux_batches"], [dict(batch_size=3, padded_length=None,
+                        joint_tokens=2790, target_indices=[2, 0, 1])])
 
 
 if __name__ == "__main__":

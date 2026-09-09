@@ -56,6 +56,34 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 class SingleGpuTrainingConfigTests(unittest.TestCase):
+    def test_packed_recipe_replaces_only_flux_execution_and_preserves_preparation(self) -> None:
+        root = Path(__file__).resolve().parents[2] / "configs/training/benchmarks"
+        previous = load_single_gpu_training_config(root / "single_gpu_b2.json")
+        packed = load_single_gpu_training_config(root / "single_gpu_packed.json")
+        self.assertEqual(replace(packed, flux_scheduling=previous.flux_scheduling, flux_packing=None), previous)
+        self.assertEqual(packed.flux_packing.max_tokens, 12288)
+        self.assertIsNone(packed.flux_scheduling)
+        smoke = load_single_gpu_training_config(root / "single_gpu_packed_smoke.json")
+        self.assertEqual(smoke.benchmark.repetitions, 1)
+        self.assertEqual(smoke.loop.max_optimizer_steps, 3)
+
+    def test_schema_v7_rejects_ambiguous_or_incomplete_packing(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        original = json.loads((root / "configs/training/benchmarks/single_gpu_packed.json").read_text())
+        changes = (lambda p: p.pop("flux_packing"),
+                   lambda p: p["flux_packing"].update(max_tokens=True),
+                   lambda p: p["flux_packing"].update(max_tokens=9299),
+                   lambda p: p["flux_packing"].update(backend="sdpa"),
+                   lambda p: p["loop"].update(flux_microbatch_size=1),
+                   lambda p: p["padding"].update(flux_bucket_boundaries=[8400]),
+                   lambda p: p.update(flux_scheduling={"shapes": []}))
+        with tempfile.TemporaryDirectory() as directory:
+            for change in changes:
+                payload = json.loads(json.dumps(original))
+                change(payload)
+                with self.assertRaises((ValueError, TypeError)):
+                    load_single_gpu_training_config(_write_config(Path(directory), payload))
+
     def test_b2_adds_exact_approved_flux_catalog_and_preserves_preparation(self) -> None:
         root = Path(__file__).resolve().parents[2] / "configs/training/benchmarks"
         preparation = load_single_gpu_training_config(root / "single_gpu_b2_preparation.json")
@@ -275,7 +303,7 @@ class SingleGpuTrainingConfigTests(unittest.TestCase):
 
     def test_rejects_unsupported_schema_device_and_dtype(self) -> None:
         cases = (
-            ("schema_version", 7, "unsupported schema_version"),
+            ("schema_version", 8, "unsupported schema_version"),
             ("device", "cpu", "device must be"),
         )
         for field, value, message in cases:

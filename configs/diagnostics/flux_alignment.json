@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "training_config": "../training/benchmarks/single_gpu_b2.json",
+  "alignment_multiples": [8, 32, 64, 128],
+  "warmup_calls": 2,
+  "measured_calls": 5,
+  "rounds": 3,
+  "max_duration_seconds": 1700,
+  "profile_groups": [[1, 2422], [2, 2749], [4, 1348]]
+}

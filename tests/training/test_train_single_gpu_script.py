@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, Mock, patch
@@ -19,6 +21,7 @@ from diffusion_arc.training.single_gpu_config import (
     SingleGpuTrainingConfig,
 )
 from scripts.train_single_gpu import _ProfiledModule, main, train_from_config
+from diffusion_arc.training.flux_schedule import FluxPackingPolicy
 from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
 from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy
 
@@ -72,6 +75,28 @@ def _config(root: Path) -> SingleGpuTrainingConfig:
 
 
 class TrainSingleGpuScriptTests(unittest.TestCase):
+    def test_packed_training_passes_original_transformer_and_preflighted_backend(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            config = replace(_config(root), flux_scheduling=None, flux_packing=FluxPackingPolicy())
+            models = SimpleNamespace(tokenizer=object(), nvarc_runner=_AcceptAnyModule(),
+                vae_encoder=_AcceptAnyModule(), transformer=_AcceptAnyModule(),
+                flux_compute_dtype=torch.bfloat16, flux_packing_backend=object())
+            for name, value in {
+                "load_single_gpu_training_config": config, "prepare_single_gpu_device": torch.device("cuda:0"),
+                "seed_single_gpu_process": None, "load_single_gpu_models": models,
+                "build_single_sample_loader": [], "build_flux_optimizer": object(),
+                "build_flux_scheduler": None, "build_flow_generator": object(),
+            }.items():
+                stack.enter_context(patch(f"scripts.train_single_gpu.{name}", return_value=value))
+            stack.enter_context(patch("scripts.train_single_gpu.torch.profiler.profile"))
+            stack.enter_context(patch("scripts.train_single_gpu.PROFILER_OUTPUT_ROOT", root))
+            run = stack.enter_context(patch("scripts.train_single_gpu.run_single_gpu_training"))
+            train_from_config(root / "packed.json")
+            self.assertIs(run.call_args.kwargs["transformer"], models.transformer)
+            self.assertIs(run.call_args.kwargs["flux_packing_backend"], models.flux_packing_backend)
+            self.assertIs(run.call_args.kwargs["flux_packing"], config.flux_packing)
+
     def test_forwards_constructed_runtime_and_every_loop_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

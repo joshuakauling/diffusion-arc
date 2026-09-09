@@ -58,6 +58,10 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
     """Validate both user configurations before any model load or remote launch."""
 
     raw = json.loads(path.read_text())
+    if isinstance(raw, dict) and type(raw.get("schema_version")) is int and raw["schema_version"] == 2:
+        from scripts.diagnostics import _flux_alignment
+
+        return _flux_alignment.load_config(path, raw, require_checkpoints=require_checkpoints)
     fields = {
         "schema_version", "training_config", "text_bucket_boundaries", "microbatch_sizes",
         "warmup_calls", "measured_calls", "max_duration_seconds",
@@ -89,6 +93,13 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
         **{name: raw[name] for name in ("warmup_calls", "measured_calls", "max_duration_seconds")},
     )
     training = load_single_gpu_training_config(policy.training_config)
+    validate_training_layout(training, require_checkpoints=require_checkpoints)
+    return policy, training
+
+
+def validate_training_layout(training, *, require_checkpoints):
+    """Share the production layout and checkpoint contract across both probe modes."""
+
     if (
         training.loop.optimizer_batch_size != 48
         or training.loop.nvarc_source_batch_size != 16
@@ -106,7 +117,6 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
         for checkpoint in (training.models.nvarc_checkpoint, training.models.flux_checkpoint):
             if not checkpoint.is_dir():
                 raise FileNotFoundError(f"local checkpoint directory does not exist: {checkpoint}")
-    return policy, training
 
 
 def source_hashes() -> dict:
@@ -114,6 +124,7 @@ def source_hashes() -> dict:
 
     sources = [
         Path(__file__), REPOSITORY_ROOT / "scripts/cloud/probe_flux_batch_shapes_modal.py",
+        REPOSITORY_ROOT / "scripts/diagnostics/_flux_alignment.py",
         REPOSITORY_ROOT / "scripts/diagnostics/probe_nvarc_batch_capacity.py",
         REPOSITORY_ROOT / "pyproject.toml", *sorted((REPOSITORY_ROOT / "src").rglob("*.py")),
     ]
@@ -186,10 +197,11 @@ def prepare_runtime(training):
     }
 
 
-def build_probe_microbatch(reserve, *, text_length: int, batch_size: int):
+def build_probe_microbatch(reserve, *, text_length: int, batch_size: int, prefix_lengths=None):
     """Exercise production bucket padding, including a masked position in every row."""
 
-    prefix_lengths = tuple(max(1, text_length - 1 - row) for row in range(batch_size))
+    if prefix_lengths is None:
+        prefix_lengths = tuple(max(1, text_length - 1 - row) for row in range(batch_size))
     inputs = tuple(
         FluxInput(
             nvarc_sequence_state=NvarcSequenceState(
@@ -334,7 +346,7 @@ def run_worker(args) -> dict:
     return result
 
 
-def launch_worker(command, *, log_path, timeout_seconds, on_progress):
+def launch_worker(command, *, log_path, timeout_seconds, on_progress, progress_marker=PROGRESS_MARKER):
     """Stream progress and enforce the remaining wall-clock budget, including setup."""
 
     with log_path.open("w") as log, subprocess.Popen(
@@ -353,7 +365,7 @@ def launch_worker(command, *, log_path, timeout_seconds, on_progress):
             for line in process.stdout:
                 log.write(line)
                 log.flush()
-                if line.startswith(PROGRESS_MARKER + " "):
+                if line.startswith(progress_marker + " "):
                     print(line.strip(), flush=True)
                     on_progress()
             returncode = process.wait()
@@ -398,6 +410,12 @@ def run_probe(args, *, metadata=None, on_progress: Callable[[], None] | None = N
     """Run one bounded sweep, persist each shape, and restart only after candidate OOMs."""
 
     policy, training = load_probe_config(args.config)
+    from scripts.diagnostics import _flux_alignment
+
+    if isinstance(policy, _flux_alignment.AlignmentConfig):
+        return _flux_alignment.run_probe(
+            args, policy, training, metadata=metadata, on_progress=on_progress,
+        )
     hashes = config_hashes(args.config, policy)
     if metadata is None:
         identity = source_metadata()
@@ -482,11 +500,27 @@ def build_parser():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--worker-start-length-index", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--alignment-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--dry-run", action="store_true", help="print the alignment plan without model loads or writes")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.dry_run or args.alignment_worker:
+        from scripts.diagnostics import _flux_alignment
+
+        policy, training = load_probe_config(args.config, require_checkpoints=not args.dry_run)
+        if not isinstance(policy, _flux_alignment.AlignmentConfig):
+            raise ValueError("--dry-run and --alignment-worker require an alignment configuration")
+        if args.dry_run:
+            groups = _flux_alignment.build_plan(policy, training)
+            print(json.dumps({"groups": groups, "candidate_cases": sum(len(g["padded_lengths"]) for g in groups)}, indent=2))
+            return 0
+        if args.output_dir is None:
+            raise ValueError("alignment workers require an explicit output directory")
+        result = _flux_alignment.run_worker(args, policy, training)
+        return 0 if result["status"] == "complete" else 1
     if args.output_dir is None:
         args.output_dir = REPOSITORY_ROOT / "artifacts/flux-batch-shapes" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     if args.worker_start_length_index is not None:

@@ -24,6 +24,12 @@ update. Its selection policy is part of the experiment because it can change
 the training schedule. The microbatch planner only decides how those fixed
 targets are executed; it does not change optimizer-batch membership.
 
+The current [FA3 sequence-packing recipe](flux-sequence-packing.md) retains that
+FIFO optimizer selection and groups targets under a joint text/image token
+budget. It replaces FLUX padding with independent packed attention segments and
+FP32 modulation-gradient sums. The earlier baselines below remain available
+for reproducible comparisons.
+
 The diagram shows the target scheduler. The current FIFO baseline is summarized
 below. Frozen VAE target encoding is omitted from the diagram for clarity.
 
@@ -80,7 +86,8 @@ copied into a physical microbatch. Python later collects the small
 `NvarcSequenceState` object when no `FluxInput` references it anymore.
 
 Microbatch losses are weighted by target count, so changing the physical
-grouping does not change the optimizer update. The detailed batching rules and
+grouping preserves the mathematical objective; finite-precision gradients can
+still differ. The detailed batching rules and
 loss normalization are documented in the
 [`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md).
 
@@ -94,6 +101,7 @@ loss normalization are documented in the
 | [`single_gpu_setup.py`](../../src/diffusion_arc/training/single_gpu_setup.py) | Select the device, seed RNGs, load models, and construct the training components. |
 | [`flux_input.py`](../../src/diffusion_arc/training/flux_input.py) | Create target-level inputs from frozen NVARC and VAE outputs. |
 | [`flux_microbatch.py`](../../src/diffusion_arc/training/flux_microbatch.py) | Copy exact prefixes and build physical FLUX microbatches. |
+| [`flux_schedule.py`](../../src/diffusion_arc/training/flux_schedule.py) | Group one optimizer window by packed token budget or the earlier padded cost catalog. |
 | [`flux_loss.py`](../../src/diffusion_arc/training/flux_loss.py) | Sample flow states, run FLUX, and compute the velocity loss. |
 | [`single_gpu_loop.py`](../../src/diffusion_arc/training/single_gpu_loop.py) | Run the FIFO baseline, accumulate gradients, and update FLUX. |
 | [`flow_probes.py`](../../src/diffusion_arc/training/flow_probes.py) | Measure comparable fixed-noise flow losses. |
@@ -110,6 +118,7 @@ loss normalization are documented in the
 | [`flux-image-encoding.md`](flux-image-encoding.md) | Frozen VAE target encoding, latent packing, and normalization. |
 | [`flow-matching.md`](flow-matching.md) | Flow sampling, velocity supervision, loss computation, and validation. |
 | [`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md) | FIFO details, the target scheduler, batching invariants, and optimization gates. |
+| [`flux-sequence-packing.md`](flux-sequence-packing.md) | Production FA3 packing, FP32 modulation sums, token budgeting, and validation limits. |
 
 ## Validation
 

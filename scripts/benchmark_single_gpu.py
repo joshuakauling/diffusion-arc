@@ -165,7 +165,7 @@ class _StepRecorder:
         padded_prefixes = [0] * target_count
         for batch in batches:
             for index in batch.target_indices:
-                padded_prefixes[index] = batch.padded_length
+                padded_prefixes[index] = consumed[index][0] if batch.padded_length is None else batch.padded_length
         self.rows.append({
             "step": len(self.rows) + 1,
             "phase": "warmup" if len(self.rows) < self.config.benchmark.warmup_steps else "measure",
@@ -176,6 +176,7 @@ class _StepRecorder:
             "flux_microbatches": microbatch_count,
             "flux_batches": [
                 {"batch_size": len(batch.target_indices), "padded_length": batch.padded_length,
+                 **({"joint_tokens": batch.joint_tokens} if batch.joint_tokens is not None else {}),
                  "target_indices": list(batch.target_indices)}
                 for batch in batches
             ],
@@ -246,6 +247,10 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
         }
         seed_single_gpu_process(config.seed)
         models = load_single_gpu_models(config, device=device)
+        if config.flux_packing is not None:
+            manifest["packages"]["flash-attn-3"] = version("flash-attn-3")
+            manifest["execution"].update(flux_backend=models.flux_packing_backend.binding,
+                modulation_reduction="fp32", flux_packed_token_budget=config.flux_packing.max_tokens)
         samples = build_single_sample_loader(config, tokenizer=models.tokenizer)
         optimizer = build_flux_optimizer(config, transformer=models.transformer)
         scheduler = build_flux_scheduler(config, optimizer=optimizer)
@@ -263,6 +268,8 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
             nvarc_scheduling=config.nvarc_scheduling,
             flux_scheduling=config.flux_scheduling,
+            flux_packing=config.flux_packing,
+            **({"flux_packing_backend": models.flux_packing_backend} if config.flux_packing is not None else {}),
             on_preparation=recorder.preparation,
             on_flux_schedule=recorder.flux_schedule,
             generator=generator,

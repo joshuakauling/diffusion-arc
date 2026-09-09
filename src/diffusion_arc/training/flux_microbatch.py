@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
@@ -18,6 +19,9 @@ from diffusion_arc.model.flux_velocity import build_flux_image_position_ids
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
 from .flux_input import FluxInput, NvarcSequenceState
+
+if TYPE_CHECKING:
+    from diffusion_arc.model.flux_packing import PackingLayout
 
 
 @dataclass(frozen=True)
@@ -38,13 +42,28 @@ class FluxMicrobatch:
         return self.clean_latents.shape[0]
 
 
+@dataclass(frozen=True)
+class PackedFluxMicrobatch:
+    """Valid text tokens and independent attention segments for one physical call."""
+
+    text: Tensor
+    layout: PackingLayout
+    clean_latents: Tensor
+    image_position_ids: Tensor
+
+    @property
+    def target_count(self) -> int:
+        return self.clean_latents.shape[0]
+
+
 def build_flux_microbatch(
     flux_inputs: Sequence[FluxInput],
     *,
     spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
     length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
     padded_length: int | None = None,
-) -> FluxMicrobatch:
+    max_joint_tokens: int | None = None,
+) -> FluxMicrobatch | PackedFluxMicrobatch:
     """Copy logical inputs into one physical batch and release consumed states.
 
     Every validation and tensor allocation completes before any pending prefix
@@ -59,6 +78,13 @@ def build_flux_microbatch(
         raise ValueError("flux_inputs must not be empty")
     if not isinstance(spatial_shape, FluxSpatialShape):
         raise TypeError("spatial_shape must be a FluxSpatialShape")
+    if max_joint_tokens is not None:
+        if type(max_joint_tokens) is not int or max_joint_tokens <= 0:
+            raise ValueError("max_joint_tokens must be a positive integer")
+        if padded_length is not None or length_buckets != SequenceLengthBuckets():
+            raise ValueError("packed microbatches cannot request text padding")
+        if sum(item.prefix_end + spatial_shape.token_count for item in inputs) > max_joint_tokens:
+            raise ValueError("packed microbatch exceeds the joint token budget")
 
     pending_by_state: dict[NvarcSequenceState, list[int]] = {}
     for flux_input in inputs:
@@ -73,9 +99,15 @@ def build_flux_microbatch(
         flux_input.nvarc_sequence_state._prefix_for(flux_input.prefix_end)
         for flux_input in inputs
     )
-    text_inputs = pad_flux_text_prefixes(
-        hidden_state_prefixes, length_buckets=length_buckets, padded_length=padded_length,
-    )
+    if max_joint_tokens is None:
+        text_inputs = pad_flux_text_prefixes(
+            hidden_state_prefixes, length_buckets=length_buckets, padded_length=padded_length,
+        )
+    else:
+        from diffusion_arc.model.flux_packing import packing_layout
+
+        text = torch.cat(hidden_state_prefixes)
+        layout = packing_layout(tuple(item.prefix_end for item in inputs), spatial_shape.token_count, text.device)
     clean_latents = torch.stack(
         tuple(flux_input.clean_latent for flux_input in inputs)
     )
@@ -88,11 +120,12 @@ def build_flux_microbatch(
         clean_latents.device,
         spatial_shape=spatial_shape,
     )
-    microbatch = FluxMicrobatch(
-        text_inputs=text_inputs,
-        clean_latents=clean_latents,
-        image_position_ids=image_position_ids,
-    )
+    if max_joint_tokens is None:
+        microbatch = FluxMicrobatch(text_inputs, clean_latents, image_position_ids)
+    else:
+        if clean_latents.device != text.device:
+            raise ValueError("packed text and latents must use the same device")
+        microbatch = PackedFluxMicrobatch(text, layout, clean_latents, image_position_ids)
 
     for sequence_state, prefix_ends in pending_by_state.items():
         sequence_state._commit_prefixes(prefix_ends)
@@ -100,4 +133,4 @@ def build_flux_microbatch(
     return microbatch
 
 
-__all__ = ["FluxMicrobatch", "build_flux_microbatch"]
+__all__ = ["FluxMicrobatch", "PackedFluxMicrobatch", "build_flux_microbatch"]

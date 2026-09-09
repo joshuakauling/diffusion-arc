@@ -23,7 +23,10 @@ from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 from .flux_input import FluxInput, PreparationMetrics, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
-from .flux_schedule import FluxSchedulingPolicy, FluxTargetBatch, schedule_flux_targets
+from .flux_schedule import (
+    FluxPackingPolicy, FluxSchedulingPolicy, FluxTargetBatch,
+    schedule_flux_targets, schedule_packed_flux_targets,
+)
 from .nvarc_schedule import NvarcSchedulingPolicy
 
 
@@ -59,6 +62,8 @@ def _train_optimizer_batch(
     flux_length_buckets: SequenceLengthBuckets,
     flux_scheduling: FluxSchedulingPolicy | None,
     on_flux_schedule: Callable[[tuple[FluxTargetBatch, ...]], None] | None,
+    flux_packing: FluxPackingPolicy | None,
+    flux_packing_backend: object | None,
 ) -> None:
     """Train one fixed optimizer batch through one or more FLUX microbatches."""
 
@@ -75,7 +80,7 @@ def _train_optimizer_batch(
 
     prefix_lengths = tuple(target.prefix_end for target in flux_inputs)
     target_flows = None
-    if flux_scheduling is None:
+    if flux_scheduling is None and flux_packing is None:
         batches = tuple(
             FluxTargetBatch(
                 tuple(range(start, min(start + flux_microbatch_size, optimizer_target_count))),
@@ -84,7 +89,8 @@ def _train_optimizer_batch(
             for start in range(0, optimizer_target_count, flux_microbatch_size)
         )
     else:
-        batches = schedule_flux_targets(prefix_lengths, flux_scheduling)
+        batches = (schedule_packed_flux_targets(prefix_lengths, flux_packing)
+                   if flux_packing is not None else schedule_flux_targets(prefix_lengths, flux_scheduling))
         # Assign randomness in FIFO order using the same per-target draws as B1.
         # Execution order and physical batch size then cannot reassign noise/time.
         target_flows = tuple(
@@ -96,9 +102,11 @@ def _train_optimizer_batch(
         on_flux_schedule(batches)
 
     for batch in batches:
+        build_kwargs = ({"max_joint_tokens": flux_packing.max_tokens} if flux_packing is not None else {})
         microbatch = build_flux_microbatch(
             tuple(flux_inputs[index] for index in batch.target_indices),
             padded_length=batch.padded_length,
+            **build_kwargs,
         )
         flow_kwargs = {}
         if target_flows is not None:
@@ -108,6 +116,8 @@ def _train_optimizer_batch(
                 timesteps=torch.cat(tuple(flow.timesteps for flow in selected)),
                 target_velocity=torch.cat(tuple(flow.target_velocity for flow in selected)),
             )
+        if flux_packing is not None:
+            flow_kwargs["packing_backend"] = flux_packing_backend
         loss = compute_flux_microbatch_loss(
             transformer,
             microbatch,
@@ -130,6 +140,8 @@ def _train_optimizer_batch(
 
         (loss * weight).backward()
         microbatch_count += 1
+        # Release this call's copies before allocating the next physical batch.
+        del microbatch, loss, loss_contribution, flow_kwargs
 
     gradient_norm: float | None = None
     gradient_clipped = False
@@ -217,6 +229,8 @@ def run_single_gpu_training(
     flux_bucket_boundaries: tuple[int, ...] | None = None,
     nvarc_scheduling: NvarcSchedulingPolicy | None = None,
     flux_scheduling: FluxSchedulingPolicy | None = None,
+    flux_packing: FluxPackingPolicy | None = None,
+    flux_packing_backend: object | None = None,
     on_preparation: Callable[[PreparationMetrics], None] | None = None,
     on_flux_schedule: Callable[[tuple[FluxTargetBatch, ...]], None] | None = None,
     generator: torch.Generator | None = None,
@@ -237,14 +251,25 @@ def run_single_gpu_training(
     Reaching ``max_optimizer_steps`` stops without consuming that tail.
     ``flux_scheduling`` reorders only the selected optimizer batch and requires
     ``flux_microbatch_size=None`` with no separate FLUX padding boundaries.
+    ``flux_packing`` instead groups valid text and image tokens under one budget
+    and uses the explicitly preflighted FA3 backend with independent segments.
     """
 
     _require_positive_integer(max_optimizer_steps, name="max_optimizer_steps")
     _require_positive_integer(optimizer_batch_size, name="optimizer_batch_size")
-    if flux_scheduling is None:
+    if flux_packing is not None:
+        if not isinstance(flux_packing, FluxPackingPolicy):
+            raise TypeError("flux_packing must be a FluxPackingPolicy")
+        if flux_scheduling is not None:
+            raise ValueError("flux_packing and flux_scheduling are mutually exclusive")
+        if flux_packing_backend is None:
+            raise ValueError("flux_packing requires a preflighted FA3 backend")
+    elif flux_packing_backend is not None:
+        raise ValueError("flux_packing_backend requires a token packing policy")
+    if flux_scheduling is None and flux_packing is None:
         _require_positive_integer(flux_microbatch_size, name="flux_microbatch_size")
     elif flux_microbatch_size is not None or flux_bucket_boundaries is not None:
-        raise ValueError("flux_scheduling requires null flux_microbatch_size and flux_bucket_boundaries")
+        raise ValueError("FLUX scheduling/packing requires null flux_microbatch_size and flux_bucket_boundaries")
     _require_positive_integer(
         nvarc_source_batch_size,
         name="nvarc_source_batch_size",
@@ -321,6 +346,8 @@ def run_single_gpu_training(
                 on_optimizer_step_metrics=on_optimizer_step_metrics,
                 flux_length_buckets=flux_length_buckets,
                 flux_scheduling=flux_scheduling,
+                flux_packing=flux_packing,
+                flux_packing_backend=flux_packing_backend,
                 on_flux_schedule=on_flux_schedule,
             )
             optimizer_steps += 1
@@ -338,6 +365,8 @@ def run_single_gpu_training(
             on_optimizer_step_metrics=on_optimizer_step_metrics,
             flux_length_buckets=flux_length_buckets,
             flux_scheduling=flux_scheduling,
+            flux_packing=flux_packing,
+            flux_packing_backend=flux_packing_backend,
             on_flux_schedule=on_flux_schedule,
         )
 

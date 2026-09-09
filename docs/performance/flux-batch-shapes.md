@@ -5,6 +5,10 @@ measured candidate FLUX microbatches. The resulting initial catalog schedules
 targets within the existing 48-target optimizer batch; see the
 [B2 benchmark and profiler results](README.md#b2--length-aware-dynamic-batch-single-gpu-pipeline).
 
+The separate [FLUX alignment diagnostic](flux-alignment.md) compares the current
+24 catalog shapes against nearby text and joint-sequence alignments with fixed
+inputs. Its Modal launcher is prepared; those GPU measurements are pending.
+
 ## Existing evidence
 
 The [uncheckpointed memory experiment](../../experiments/training/single-gpu-memory-footprint-modal.ipynb)

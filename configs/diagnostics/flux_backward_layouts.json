@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "packing_fixture": "flux_packing.json",
+  "source_group": "short_b4",
+  "selected_labels": ["A", "B"],
+  "text_lengths": [468, 406],
+  "padded_length": 487,
+  "global_batch_size": 48,
+  "repetitions": 2,
+  "edge_width": 32,
+  "capture_blocks": ["double.0", "double.4", "single.0", "single.19"],
+  "max_duration_seconds": 840
+}

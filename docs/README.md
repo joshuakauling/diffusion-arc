@@ -39,6 +39,8 @@ and are not bundled into the website.
 
 ## Training
 
+- [FA3 sequence-packing training](training/flux-sequence-packing.md)
+
 - [Training system overview](training/README.md)
 - [Batching and efficiency roadmap](training/batching-and-efficiency-roadmap.md)
 - [NVARC batch runner](training/nvarc-batch-runner.md)
@@ -49,6 +51,15 @@ and are not bundled into the website.
 ## Performance
 
 - [Performance evaluation and benchmark protocol](performance/README.md)
+- [NVARC shape and alignment probe](performance/nvarc-batch-shapes.md)
+- [FLUX alignment diagnostic](performance/flux-alignment.md)
+- [Independent BFL transformer reference](performance/flux-bfl-reference.md)
+- [BFL and Diffusers precision differences](performance/flux-bfl-precision.md)
+- [Attention backends across native and ARC inputs](performance/flux-backend-conditions.md)
+- [Attention execution diagnostic plan](performance/attention-diagnostic-plan.md)
+- [Attention execution diagnostic: first wave](performance/attention-execution.md)
+- [FLUX attention packing diagnostic](performance/flux-packing.md)
+- [FA3 single-sequence length limit](performance/flux-sequence-capacity.md)
 
 ## Experiments
 

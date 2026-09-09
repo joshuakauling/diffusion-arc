@@ -52,6 +52,7 @@ class SingleGpuModels:
     vae_encoder: FluxVaeEncoder
     transformer: Flux2Transformer2DModel
     flux_compute_dtype: torch.dtype
+    flux_packing_backend: object | None = None
 
 
 def prepare_single_gpu_device(config: SingleGpuTrainingConfig) -> torch.device:
@@ -125,6 +126,11 @@ def load_single_gpu_models(
     flux_parameter_dtype = _TORCH_DTYPES[config.models.flux_parameter_dtype]
     flux_compute_dtype = _TORCH_DTYPES[config.models.flux_compute_dtype]
     device_map = {"": device}
+    flux_packing_backend = None
+    if config.flux_packing is not None:
+        from diffusion_arc.model.flux_packing import Flash3Backend
+
+        flux_packing_backend = Flash3Backend(device)
 
     tokenizer = AutoTokenizer.from_pretrained(
         config.models.nvarc_checkpoint,
@@ -192,6 +198,10 @@ def load_single_gpu_models(
         expected_dtype=flux_parameter_dtype,
     )
     transformer.requires_grad_(True)
+    if config.flux_packing is not None:
+        from diffusion_arc.model.flux_packing import validate_packed_transformer
+
+        validate_packed_transformer(transformer, flux_compute_dtype)
 
     if any(parameter.requires_grad for parameter in nvarc_runner.parameters()):
         raise RuntimeError("NVARC must remain frozen")
@@ -209,6 +219,7 @@ def load_single_gpu_models(
         vae_encoder=vae_encoder,
         transformer=transformer,
         flux_compute_dtype=flux_compute_dtype,
+        flux_packing_backend=flux_packing_backend,
     )
 
 

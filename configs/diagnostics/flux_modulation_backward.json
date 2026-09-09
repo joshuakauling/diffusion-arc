@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "backward_fixture": "flux_backward_layouts.json",
+  "backend": "fa3",
+  "modulation_reduction": "fp32_segment_sum",
+  "repetitions": 2,
+  "max_duration_seconds": 420
+}

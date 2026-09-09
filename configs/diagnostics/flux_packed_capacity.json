@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "packing_fixture": "flux_packing.json",
+  "backend": "fa3",
+  "comparison_group": "medium_b4",
+  "warmup_calls": 2,
+  "rounds": 4,
+  "measured_calls": 5,
+  "confirmation_calls": 3,
+  "max_duration_seconds": 480,
+  "families": [
+    {
+      "name": "typical",
+      "window": "median",
+      "target_indices": [10, 41, 3, 16, 36, 37, 38, 12],
+      "start_count": 4,
+      "flow_seed": 168
+    },
+    {
+      "name": "long_source",
+      "window": "longest_source",
+      "target_indices": [14, 6, 18, 19, 20, 9, 10, 11],
+      "start_count": 1,
+      "flow_seed": 170
+    }
+  ]
+}

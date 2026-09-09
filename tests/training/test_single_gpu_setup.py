@@ -14,6 +14,7 @@ from unittest.mock import ANY, patch
 import torch
 from torch import nn
 from diffusion_arc.training.dataset import ArcTrainingDataset
+from diffusion_arc.training.flux_schedule import FluxPackingPolicy
 from tests.training.test_dataset import build_layout, make_nvarc_tokenizer
 
 from diffusion_arc.model import NVARC_HIDDEN_SIZE, NVARC_VOCAB_SIZE
@@ -161,6 +162,35 @@ def _config(root: Path, *, shuffle: bool = False) -> SingleGpuTrainingConfig:
 
 
 class SingleGpuSetupTests(unittest.TestCase):
+    def test_packed_backend_is_preflighted_before_loading_and_returned_with_models(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = replace(_config(root), flux_packing=FluxPackingPolicy())
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            backend = object()
+            transformer = _FakeFluxTransformer()
+            with (
+                patch("diffusion_arc.model.flux_packing.Flash3Backend", return_value=backend) as build_backend,
+                patch("diffusion_arc.model.flux_packing.validate_packed_transformer") as validate,
+                patch("diffusion_arc.training.single_gpu_setup.AutoTokenizer.from_pretrained", return_value=_FakeTokenizer()),
+                patch("diffusion_arc.training.single_gpu_setup.AutoModelForCausalLM.from_pretrained", return_value=_FakeNvarc()),
+                patch("diffusion_arc.training.single_gpu_setup.AutoencoderKLFlux2.from_pretrained", return_value=_FakeVae()),
+                patch("diffusion_arc.training.single_gpu_setup.Flux2Transformer2DModel.from_pretrained", return_value=transformer),
+            ):
+                models = load_single_gpu_models(config, device=torch.device("cpu"))
+            build_backend.assert_called_once_with(torch.device("cpu"))
+            validate.assert_called_once_with(transformer, torch.bfloat16)
+            self.assertIs(models.flux_packing_backend, backend)
+            self.assertIs(models.transformer, transformer)
+            with (
+                patch("diffusion_arc.model.flux_packing.Flash3Backend", side_effect=RuntimeError("FA3 unavailable")),
+                patch("diffusion_arc.training.single_gpu_setup.AutoTokenizer.from_pretrained") as load,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "FA3 unavailable"):
+                    load_single_gpu_models(config, device=torch.device("cpu"))
+            load.assert_not_called()
+
     def test_spawn_prefetch_matches_serial_samples_and_preserves_flow_rng(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -125,7 +125,7 @@ def train_from_config(config_path: str | Path) -> None:
             training_samples,
             nvarc_runner=profiled_nvarc_runner,
             vae_encoder=profiled_vae_encoder,
-            transformer=profiled_transformer,
+            transformer=models.transformer if config.flux_packing is not None else profiled_transformer,
             optimizer=optimizer,
             flux_compute_dtype=models.flux_compute_dtype,
             max_optimizer_steps=config.loop.max_optimizer_steps,
@@ -139,6 +139,8 @@ def train_from_config(config_path: str | Path) -> None:
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
             nvarc_scheduling=config.nvarc_scheduling,
             flux_scheduling=config.flux_scheduling,
+            flux_packing=config.flux_packing,
+            **({"flux_packing_backend": models.flux_packing_backend} if config.flux_packing is not None else {}),
             generator=flow_generator,
             on_optimizer_step=on_optimizer_step,
         )
