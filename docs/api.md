@@ -4,9 +4,9 @@ This reference is generated from Python signatures and docstrings. Source files
 are parsed without importing the training stack or loading model checkpoints.
 For the overall data flow, start with the [training overview](training/README.md).
 
-## NVARC scheduling
+## NVARC attention
 
-::: diffusion_arc.training.nvarc_schedule
+::: diffusion_arc.model.nvarc_attention
 
 ## NVARC encoder
 
@@ -15,6 +15,18 @@ For the overall data flow, start with the [training overview](training/README.md
 ## Input preparation
 
 ::: diffusion_arc.training.flux_input
+
+## FLUX packed attention
+
+::: diffusion_arc.model.flux_packing
+
+## FLUX modulation reduction
+
+::: diffusion_arc.model.flux_modulation
+
+## FLUX scheduling
+
+::: diffusion_arc.training.flux_schedule
 
 ## FLUX microbatches
 

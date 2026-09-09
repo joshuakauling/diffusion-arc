@@ -14,8 +14,6 @@ from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 
-from .nvarc_schedule import NvarcSchedulingPolicy, NvarcSourceBatch, schedule_nvarc_sources
-
 
 # Benchmark metadata: source identities and the physical batches used to prepare them.
 @dataclass(frozen=True)
@@ -28,10 +26,10 @@ class PreparedSource:
 
 @dataclass(frozen=True)
 class PreparationMetrics:
-    """Sources and physical NVARC calls actually executed for one window."""
+    """Source identities and lengths encoded together in one unpadded NVARC call."""
 
     sources: tuple[PreparedSource, ...]
-    nvarc_batches: tuple[NvarcSourceBatch, ...]
+    source_lengths: tuple[int, ...]
 
 
 class NvarcSequenceState:
@@ -231,15 +229,13 @@ def prepare_flux_inputs_batch(
     vae_encoder: FluxVaeEncoder,
     min_context_pairs_before_target: int = 1,
     vae_microbatch_size: int | None = None,
-    nvarc_scheduling: NvarcSchedulingPolicy | None = None,
     on_preparation: Callable[[PreparationMetrics], None] | None = None,
 ) -> tuple[FluxInput, ...]:
     """Prepare one source window with independent NVARC and VAE batches.
 
     First select eligible targets and trim each source to its last needed
-    prefix. Then execute the optional NVARC schedule, indexing returned states
-    by original eligible-source position. Without scheduling, all eligible
-    sources execute in one physical NVARC batch.
+    prefix. Encode all eligible sources in one packed NVARC forward, retaining
+    their original order and independent causal attention.
 
     VAE chunks span the whole window's targets in original source-major order,
     independently of NVARC groups. ``vae_microbatch_size=None`` encodes them
@@ -270,7 +266,7 @@ def prepare_flux_inputs_batch(
         )
         if eligible is not None:
             eligible_sequences_list.append(eligible)
-            # Benchmark metadata: retain logical source order before scheduling.
+            # Benchmark metadata: retain logical source order before encoding.
             if on_preparation is not None:
                 prepared_sources.append(PreparedSource(str(sequence.key), eligible.prefix_ends))
     eligible_sequences = tuple(eligible_sequences_list)
@@ -278,41 +274,20 @@ def prepare_flux_inputs_batch(
         return ()
 
     source_lengths = tuple(len(eligible.input_ids) for eligible in eligible_sequences)
-    if nvarc_scheduling is None:
-        # The legacy runner owns padding. Read that same policy for reporting,
-        # without introducing a second scheduler in the benchmark entrypoint.
-        padded_length = (
-            nvarc_runner.length_buckets.padded_length(max(source_lengths))
-            if on_preparation is not None else max(source_lengths)
-        )
-        batches = (NvarcSourceBatch(tuple(range(len(eligible_sequences))), padded_length),)
-    else:
-        batches = schedule_nvarc_sources(source_lengths, nvarc_scheduling)
+    packed_input_ids: list[int] = []
+    sequence_offsets = [0]
+    for eligible in eligible_sequences:
+        packed_input_ids.extend(eligible.input_ids)
+        sequence_offsets.append(len(packed_input_ids))
+    nvarc_output = nvarc_runner(
+        torch.tensor(packed_input_ids, dtype=torch.int64),
+        torch.tensor(sequence_offsets, dtype=torch.int64),
+    )
+    source_hidden_states = nvarc_output.sequence_hidden_states
+    if len(source_hidden_states) != len(eligible_sequences):
+        raise RuntimeError("batched preparation requires one NVARC output per eligible source")
 
-    # Keep outputs indexed by logical source position so scheduling cannot
-    # change the alignment between conditioning states and VAE targets.
-    source_hidden_states: dict[int, Tensor] = {}
-    for batch in batches:
-        packed_input_ids: list[int] = []
-        sequence_offsets = [0]
-        for index in batch.source_indices:
-            packed_input_ids.extend(eligible_sequences[index].input_ids)
-            sequence_offsets.append(len(packed_input_ids))
-        padding_arguments = (
-            {} if nvarc_scheduling is None else {"padded_length": batch.padded_length}
-        )
-        nvarc_output = nvarc_runner(
-            torch.tensor(packed_input_ids, dtype=torch.int64),
-            torch.tensor(sequence_offsets, dtype=torch.int64),
-            **padding_arguments,
-        )
-        if len(nvarc_output.sequence_hidden_states) != len(batch.source_indices):
-            raise RuntimeError(
-                "batched preparation requires one NVARC output per eligible source"
-            )
-        source_hidden_states.update(zip(batch.source_indices, nvarc_output.sequence_hidden_states))
-
-    # VAE chunks span the logical window, not the physical NVARC groups.
+    # VAE chunks span the logical window, not the NVARC storage layout.
     target_grids = tuple(
         target_grid
         for eligible in eligible_sequences
@@ -353,7 +328,7 @@ def prepare_flux_inputs_batch(
 
     # Benchmark callback: report this window after frozen preparation completes.
     if on_preparation is not None:
-        on_preparation(PreparationMetrics(tuple(prepared_sources), batches))
+        on_preparation(PreparationMetrics(tuple(prepared_sources), source_lengths))
     return tuple(flux_inputs)
 
 

@@ -1,7 +1,13 @@
 # NVARC and FLUX Batching Roadmap
 
-For the current end-to-end training path and documentation reading order, see
-the [training system overview](README.md).
+This is the historical design note for the initial padded pipeline and planned
+length-aware schedulers. References below to "current" or "planned" describe
+that stage, not the B3 implementation. B3 retains the FIFO selection, ownership,
+flow objective and loss-weighting invariants, but replaces both bucket catalogs
+with unpadded FA3 segments. Cross-window lookahead remains unimplemented.
+For the current path, see the [training overview](README.md),
+[NVARC encoder](nvarc-batch-runner.md) and
+[FLUX packing guide](flux-sequence-packing.md).
 
 ## The problem
 

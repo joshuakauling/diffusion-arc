@@ -1,5 +1,11 @@
 # FA3 single-sequence length limit
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **13,312 joint tokens pass full FLUX forward/backward; 13,568 tokens fail
 with an allocation OOM.** The lower length passed three additional independent
 confirmations, and the upper OOM reproduced. The boundary is resolved to 256
@@ -73,9 +79,9 @@ is stopped with zero tasks. The worker took 113.61 seconds and app lifecycle
 run, **$0.404112** including the earlier capacity run, leaving approximately
 **$0.915888** of the user's reported $1.32. Actual account billing was not queried.
 
-- [Configuration](../../configs/diagnostics/flux_sequence_capacity.json)
-- [Coordinator](../../scripts/diagnostics/probe_flux_sequence_capacity.py)
-- [Bounded launcher](../../scripts/cloud/probe_flux_sequence_capacity_modal.py)
+- [Configuration](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_sequence_capacity.json)
+- [Coordinator](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/probe_flux_sequence_capacity.py)
+- [Bounded launcher](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/cloud/probe_flux_sequence_capacity_modal.py)
 - Volume artifacts: `results/flux-sequence-capacity/20260909T064617025018Z`
 
 Artifacts contain every probe, confirmation, allocation statistic/error,

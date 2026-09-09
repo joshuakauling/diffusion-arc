@@ -1,5 +1,11 @@
 # Attention backends across input conditions
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: completed on H200 on 2026-09-08.** All 13 conditions, 104 transformer
 forwards, and 312 isolated attention forward/backward pairs completed in
 **261.65 seconds**, without a retry. Local validation passed all **472 repository tests**. This diagnostic tests
@@ -135,7 +141,7 @@ normalization, and RoPE arithmetic remains intact.
 
 ## Inputs and provenance
 
-The [input fixture](../../configs/diagnostics/flux_backend_inputs.json) embeds
+The [input fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_backend_inputs.json) embeds
 only the two selected ARC training tasks, their source identities, augmentation
 membership, and the successful checkpoint manifest. Its historical source is
 the [step-4096 report](../../experiments/results/single-task-augmentation-generalization-overfitting/20260827T011822050154Z/report.json).
@@ -196,7 +202,7 @@ explicitly. TF32 is disabled. Input fingerprints guard reuse and mutation.
 Metrics include relative L2, absolute RMS and maximum error, reference and
 actual norms, and cosine similarity so small reference norms remain visible.
 
-The [configuration](../../configs/diagnostics/flux_backend_conditions.json)
+The [configuration](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_backend_conditions.json)
 fixes numerical screens before execution: 0.01% for FP32 model comparisons,
 2% for BF16 model comparisons, 1% for isolated attention outputs, and 2% for
 isolated attention derivatives. These are diagnostic screens, not demonstrated
@@ -204,7 +210,7 @@ training tolerances.
 
 ## Execution and interpretation
 
-The [launcher](../../scripts/cloud/probe_flux_backend_conditions_modal.py) uses
+The [launcher](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/cloud/probe_flux_backend_conditions_modal.py) uses
 one H200, eight CPU cores, and 64 GiB host memory, with a 1,800-second worker
 limit, a 1,920-second function timeout, one container, and zero configured
 retries. All model components come from the existing `diffusion-arc-models`

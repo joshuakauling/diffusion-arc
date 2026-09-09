@@ -1,6 +1,6 @@
 # FLUX training with token-budget packing
 
-The [packed training recipe](../../configs/training/benchmarks/single_gpu_packed.json)
+The [packed training recipe](../../configs/training/benchmarks/single_gpu_b3.json)
 replaces B2's FLUX padding/shape catalog with a **12,288 joint-token budget**
 and FA3 variable-length attention. The implementation lives in `src/`; the
 training path does not import diagnostic scripts.
@@ -13,8 +13,8 @@ targets first and places each in the tightest remaining space. Ties retain
 deterministic source order. Targets are neither split nor moved across optimizer
 boundaries. This is a fast call-count heuristic, not an exact bin-packing solver.
 
-Replaying the four recorded 48-target windows in
-`configs/diagnostics/flux_packing.json` gives:
+Replaying the four recorded 48-target windows in the
+[archived fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_packing.json) gives:
 
 | Window | B2 calls | Packed calls | Token-sum lower bound |
 | --- | ---: | ---: | ---: |
@@ -50,17 +50,19 @@ next physical batch is constructed.
 
 ## Configuration and runtime
 
-Schema v7 adds `"flux_packing": {"max_tokens": 12288}`. For this mode,
-`flux_scheduling`, `loop.flux_microbatch_size` and
-`padding.flux_bucket_boundaries` must be null. FA3 and FP32 modulation sums are
-mandatory in the packed training path. Older schemas and recorded B0/B1/B2
-recipes retain their original execution for reproducible comparisons.
+Schema v8 combines NVARC and FLUX packing. B3 sets
+`"flux_packing": {"max_tokens": 12288}`; `flux_scheduling`,
+`loop.flux_microbatch_size` and `padding.flux_bucket_boundaries` are null.
+FA3 and FP32 modulation sums are mandatory in this packed training path.
+Older schemas are rejected. Recorded B0/B1/B2 recipes and diagnostic code are
+recoverable from the [archive](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/).
 
-NVARC source scheduling, CPU prefetch, frozen VAE preparation, data selection,
-optimizer batches and the LR schedule are inherited from B2. This change
-integrates **FLUX training**; NVARC's production encoder and existing generation
-and fixed-probe entrypoints keep their existing attention paths. A matching
-packed generation adapter and a production NVARC-FA3 migration are separate work.
+The same runtime packs each 16-source NVARC window without padding and stops
+after block 27, retaining raw hidden states 9, 18 and 27. CPU prefetch, frozen
+VAE chunks of 48, FIFO optimizer membership, data selection and the LR schedule
+remain unchanged. See the [NVARC encoder guide](nvarc-batch-runner.md).
+Existing generation and fixed-probe entrypoints keep their own FLUX attention
+path; a matching packed generation adapter remains separate work.
 
 `load_single_gpu_models` explicitly checks the CUDA/Hopper FA3 build using a
 small BF16, head-128, unequal-segment forward/backward before loading the models.
@@ -70,16 +72,19 @@ and checkpoint formats remain unchanged. This implementation targets the
 current single-process trainer; distributed wrappers and gradient checkpointing
 require separate integration.
 
-The working FA3 build is pinned by cached image `im-R5CncDboPfMQryWnq0UZn4`;
-see the [build evidence](../performance/flux-packing.md). The budget starts below
-the [single-sequence execution boundary](../performance/flux-sequence-capacity.md),
+The shared Modal image builds pinned FA3 revision
+`ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820` with BF16 forward and backward,
+head dimension 128 and Hopper/SM90 support. NVARC and FLUX use separate adapters
+to the same extension, with causal and noncausal segments respectively.
+The budget starts below the [single-sequence execution boundary](../performance/flux-sequence-capacity.md),
 which confirmed 13,312 joint tokens and OOM at 13,568. A single-sequence limit
 does not certify every mixed-shape training allocation history.
 
 ## Validation and prepared GPU check
 
-95 targeted local tests passed across model, scheduling, construction, loop,
-configuration, setup and entrypoints. They include:
+The combined B3 tree passes 282 local tests, including the NVARC encoder,
+FLUX model, scheduling, construction, loop, configuration, setup and entrypoints.
+These CPU and mocked-runtime checks include:
 
 - Independent original FLUX singletons versus packed ABC/CBA and split packs:
   outputs, weighted loss, all parameter/input gradients and an SGD update in FP32.
@@ -91,12 +96,14 @@ configuration, setup and entrypoints. They include:
 - Explicit backend failure, strict config rejection and actual packed benchmark
   metadata through both training entrypoints.
 
-The [three-step smoke recipe](../../configs/training/benchmarks/single_gpu_packed_smoke.json)
+The [three-step smoke recipe](../../configs/training/benchmarks/single_gpu_b3_smoke.json)
 uses the existing B0 dataset, 48 targets per update and three real AdamW updates
 (one warmup, two measured), with one repetition. The bounded
-[cloud launcher](../../scripts/cloud/benchmark_flux_packing_modal.py) uses the
-cached FA3 image and limits its H200 lifecycle to 480 seconds; its resource
-estimate is at most $0.724 at the recorded rate. It is **prepared but not run**.
+[cloud launcher](../../scripts/cloud/benchmark_flux_packing_modal.py) retains
+the already compatible cached FA3 forward/backward image and its 480-second
+H200 lifecycle limit. The regular benchmark and profiler launchers use the
+shared image definition. The combined smoke is **prepared but not run**; this
+integration did not build an image or launch a GPU worker.
 An integrated H200 pass with changing packs and initialized optimizer state is
 the remaining validation before claiming production GPU capacity or throughput.
 

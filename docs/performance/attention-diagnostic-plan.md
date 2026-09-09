@@ -1,5 +1,11 @@
 # Attention execution diagnostic plan
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: first wave complete, 2026-09-09.** Local structural tests and the
 first bounded H200 diagnostic are implemented and validated. The fixed-Q/K/V
 tests support segmentation; operation replays isolate shape-sensitive linear

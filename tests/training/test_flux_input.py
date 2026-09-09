@@ -27,7 +27,6 @@ from diffusion_arc.training.flux_input import (
     prepare_flux_inputs,
     prepare_flux_inputs_batch,
 )
-from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
 
 
 class RecordingNvarcRunner(nn.Module):
@@ -94,7 +93,7 @@ def _sequence() -> ArcTokenizedTrainingSample:
 
 
 class FluxInputPreparationTests(unittest.TestCase):
-    def test_scheduling_restores_hidden_states_targets_and_observes_actual_calls(self) -> None:
+    def test_packing_preserves_hidden_states_targets_and_observes_actual_calls(self) -> None:
         sequences = tuple(replace(
             _sequence(), key=replace(_sequence().key, task_id=f"{index:08x}"),
             input_ids=(index,) * length,
@@ -102,13 +101,12 @@ class FluxInputPreparationTests(unittest.TestCase):
             target_grids=(((index,),), ((index,),), ((index,),)),
         ) for index, length in enumerate((3, 9, 4, 10, 5)))
         ineligible = replace(_sequence(), prefix_token_ends=(2,), target_grids=(((0,),),))
-        policy = NvarcSchedulingPolicy((NvarcBatchShape(2, 5), NvarcBatchShape(2, 10)), 0)
         calls, events, reports = [], [], []
 
         class Nvarc(nn.Module):
-            def forward(self, ids, offsets, *, padded_length):
+            def forward(self, ids, offsets):
                 offsets = offsets.tolist()
-                calls.append((tuple(int(ids[start]) for start in offsets[:-1]), padded_length))
+                calls.append(tuple(int(ids[start]) for start in offsets[:-1]))
                 events.append("nvarc")
                 return NvarcBatchOutput(tuple(ids[start:end, None].float().clone()
                                               for start, end in zip(offsets, offsets[1:])))
@@ -123,9 +121,9 @@ class FluxInputPreparationTests(unittest.TestCase):
             inputs = prepare_flux_inputs_batch(
                 (*sequences[:2], ineligible, *sequences[2:]),
                 nvarc_runner=Nvarc(), vae_encoder=Vae(), min_context_pairs_before_target=2,
-                vae_microbatch_size=6, nvarc_scheduling=policy, on_preparation=reports.append,
+                vae_microbatch_size=6, on_preparation=reports.append,
             )
-        self.assertEqual(events, ["nvarc"] * 3 + [("vae", 6), ("vae", 4)])
+        self.assertEqual(events, ["nvarc"] + [("vae", 6), ("vae", 4)])
         self.assertEqual([int(item.clean_latent[0, 0]) for item in inputs],
                          [index for index in range(5) for _ in range(2)])
         for index, item in enumerate(inputs):
@@ -134,16 +132,14 @@ class FluxInputPreparationTests(unittest.TestCase):
             self.assertFalse(state.requires_grad)
         report, = reports
         self.assertEqual([source.key for source in report.sources], [str(s.key) for s in sequences])
-        self.assertEqual([(batch.source_indices, batch.padded_length) for batch in report.nvarc_batches], calls)
-        self.assertEqual(sum(len(batch.source_indices) == 1 for batch in report.nvarc_batches), 1)
-        self.assertEqual(sorted(index for batch in report.nvarc_batches for index in batch.source_indices), list(range(5)))
+        self.assertEqual(calls, [(0, 1, 2, 3, 4)])
+        self.assertEqual(report.source_lengths, (3, 9, 4, 10, 5))
 
-    def test_scheduling_skips_empty_eligible_window_without_work_or_report(self) -> None:
+    def test_packing_skips_empty_eligible_window_without_work_or_report(self) -> None:
         nvarc, vae, reports = RecordingNvarcRunner(), RecordingVaeEncoder(), []
         result = prepare_flux_inputs_batch(
             (_sequence(),) * 3, nvarc_runner=nvarc, vae_encoder=vae,
             min_context_pairs_before_target=4,
-            nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 10),), 0),
             on_preparation=reports.append,
         )
         self.assertEqual((result, nvarc.calls, vae.calls, reports), ((), [], [], []))

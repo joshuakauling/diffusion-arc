@@ -39,9 +39,8 @@ and are not bundled into the website.
 
 ## Training
 
-- [FA3 sequence-packing training](training/flux-sequence-packing.md)
-
 - [Training system overview](training/README.md)
+- [FA3 sequence-packing training](training/flux-sequence-packing.md)
 - [Batching and efficiency roadmap](training/batching-and-efficiency-roadmap.md)
 - [NVARC batch runner](training/nvarc-batch-runner.md)
 - [FLUX text conditioning](training/flux-text-conditioning.md)
@@ -52,6 +51,7 @@ and are not bundled into the website.
 
 - [Performance evaluation and benchmark protocol](performance/README.md)
 - [NVARC shape and alignment probe](performance/nvarc-batch-shapes.md)
+- [NVARC packed attention and early-exit evidence](performance/nvarc-packing.md)
 - [FLUX alignment diagnostic](performance/flux-alignment.md)
 - [Independent BFL transformer reference](performance/flux-bfl-reference.md)
 - [BFL and Diffusers precision differences](performance/flux-bfl-precision.md)
@@ -59,6 +59,10 @@ and are not bundled into the website.
 - [Attention execution diagnostic plan](performance/attention-diagnostic-plan.md)
 - [Attention execution diagnostic: first wave](performance/attention-execution.md)
 - [FLUX attention packing diagnostic](performance/flux-packing.md)
+- [FLUX backward layouts](performance/flux-backward-layouts.md)
+- [FLUX modulation-gradient reduction](performance/flux-modulation-backward.md)
+- [FLUX packing performance](performance/flux-packing-performance.md)
+- [FLUX packed capacity and reduction cost](performance/flux-packed-capacity.md)
 - [FA3 single-sequence length limit](performance/flux-sequence-capacity.md)
 
 ## Experiments

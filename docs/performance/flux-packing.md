@@ -1,5 +1,11 @@
 # FLUX attention packing diagnostic
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: reversing A+B to B+A produced bitwise identical per-example outputs
 at every observed boundary on H200. Both repetitions and all four example-
 isolation checks passed exactly. Singleton-versus-packed differences remain:
@@ -76,7 +82,7 @@ Any CPU image building precedes the GPU function and is outside its time limit.
 This mode is mutually exclusive with `--correctness`; neither focused mode runs
 the throughput sweep.
 
-[`_flux_packing_forward.py`](../../scripts/diagnostics/_flux_packing_forward.py)
+[`_flux_packing_forward.py`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/_flux_packing_forward.py)
 reuses the production model loader, real input preparation, and existing packed
 processors. Unlike the training-memory setup used by the earlier diagnostic,
 it initializes no optimizer, persistent gradients, or training-memory reserve,
@@ -135,7 +141,7 @@ Operator counts and CUDA kernel names verify FA3 forward execution and record
 the actual SDPA backend of each original singleton.
 
 The passive hooks in
-[`_flux_packing_forward_boundaries.py`](../../scripts/diagnostics/_flux_packing_forward_boundaries.py)
+[`_flux_packing_forward_boundaries.py`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/_flux_packing_forward_boundaries.py)
 also capture the first Double block's text/image inputs, its normalized and
 modulated Attention inputs, and its Attention outputs. The final adaptive
 normalization's image and timestep-embedding inputs and its output are captured
@@ -299,7 +305,7 @@ configuration is unchanged. An offline preview uses the diagnostic Python
 command above with both `--correctness` and `--dry-run`.
 
 The diagnostic-only helper
-[`_flux_packing_correctness.py`](../../scripts/diagnostics/_flux_packing_correctness.py)
+[`_flux_packing_correctness.py`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/_flux_packing_correctness.py)
 executes three passes with identical weights, inputs, noise, timesteps and
 production weighted flow loss:
 
@@ -429,7 +435,7 @@ groups do not represent a dataset-weighted throughput estimate.
 
 ## Packed implementation
 
-[`_flux_packing.py`](../../scripts/diagnostics/_flux_packing.py) uses the real
+[`_flux_packing.py`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/_flux_packing.py) uses the real
 FLUX Single- and Double-Stream block modules, normalization, Q/K/V projections,
 fused QKV/MLP projections, MLPs, timestep modulation, positional embeddings and
 velocity head. No model parameters are duplicated. Explicit attention processors

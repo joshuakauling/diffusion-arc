@@ -1,9 +1,17 @@
 # NVARC packing and attention backends
 
+The diagnostic scripts and original configs are preserved at [revision db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f). Commands below apply to that revision; the current runtime has retired the compared NVARC paths.
+
 **Decision: use frozen BF16 NVARC with FlashAttention-3 Varlen, one packed
 16-source forward, and no padding or alignment.** This is the selected NVARC
 component for B3. Full-pipeline integration, memory and training agreement still
 need validation; the measurements below load NVARC alone.
+The training encoder now stops after block 27 and retains only the three selected
+states; the diagnostic below executed all 36 blocks and the language-model head.
+Its timings therefore do not include the early-exit optimization. Skipping 9 of
+36 blocks removes 25% of decoder-block execution, not a measured 25% reduction
+in total NVARC latency. Local tiny-Qwen tests compare the selected states with
+the complete forward; GPU speed and downstream training agreement remain unmeasured.
 
 ## Real-input results
 
@@ -140,16 +148,17 @@ failure. A preceding launch stopped before measurement because a diagnostic
 check incorrectly required `model.config.pad_token_id`; the tokenizer's
 validated PAD ID is 13 while the checkpoint config leaves it unset.
 
-The [probe config](../../configs/diagnostics/nvarc_packing.json),
-[diagnostic](../../scripts/diagnostics/probe_nvarc_packing.py) and
-[Modal launcher](../../scripts/cloud/probe_nvarc_packing_modal.py) define the
+The [probe config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/diagnostics/nvarc_packing.json),
+[diagnostic](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/scripts/diagnostics/probe_nvarc_packing.py) and
+[Modal launcher](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/scripts/cloud/probe_nvarc_packing_modal.py) define the
 replay. Results are retained under `results/nvarc-packing/<run_id>/` in the
 `diffusion-arc-models` Volume, environment `diffusion-arc`. Manifests record
 source/config/data hashes, commands and environment. Raw results and traces
 remain outside Git. Source hashes for the new run matched the archived code
 when this report was completed; checkpoint weight contents were not hashed.
 
-Reproduction requires the recorded checkpoint/data and package versions:
+Reproduction requires a checkout of the linked archive commit `db6d49f` and
+the recorded checkpoint/data and package versions:
 
 ```bash
 .venv/bin/modal run --detach --env diffusion-arc scripts/cloud/probe_nvarc_packing_modal.py \

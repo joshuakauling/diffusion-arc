@@ -1,5 +1,11 @@
 # FLUX packing performance
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 This bounded experiment compares existing B2 microbatches with padded cuDNN
 and full-model packing through FA2, FA3 and FA4. Target membership, order and
 baseline padding boundaries come unchanged from the recorded B2 scheduler.

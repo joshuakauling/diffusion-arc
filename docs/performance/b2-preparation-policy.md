@@ -78,7 +78,7 @@ expand the GPU preparation window or count unused samples as prepared work.
 
 ## Configuration and validation boundary
 
-[The preparation benchmark config](../../configs/training/benchmarks/single_gpu_b2_preparation.json)
+[The preparation benchmark config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b2_preparation.json)
 uses schema version 5. `nvarc_scheduling` declares the catalog and call weight;
 it is mutually exclusive with fixed NVARC padding boundaries. Exact-length
 singletons are the fixed rule for odd windows and need no separate length
@@ -92,7 +92,7 @@ consumption, including across optimizer boundaries.
 
 CPU tests cover scheduling, masking, source/target alignment, optimizer updates,
 worker ordering, configuration compatibility, and workload recording. The
-[completed combined B2 benchmark](README.md#b2--length-aware-dynamic-batch-single-gpu-pipeline)
+[completed combined B2 benchmark](README.md#b2-length-aware-dynamic-batch-single-gpu-pipeline)
 measures GPU memory, throughput, and step-loss agreement with dynamic FLUX
 batching included. The preparation-only variant was not benchmarked separately;
 the combined result does not isolate scheduling, prefetch, or FLUX batching.

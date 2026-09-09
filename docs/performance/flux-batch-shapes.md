@@ -1,9 +1,15 @@
 # FLUX batch-shape probe
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: shape probe and combined B2 GPU benchmark complete.** The probe
 measured candidate FLUX microbatches. The resulting initial catalog schedules
 targets within the existing 48-target optimizer batch; see the
-[B2 benchmark and profiler results](README.md#b2--length-aware-dynamic-batch-single-gpu-pipeline).
+[B2 benchmark and profiler results](README.md#b2-length-aware-dynamic-batch-single-gpu-pipeline).
 
 The separate [FLUX alignment diagnostic](flux-alignment.md) compares the current
 24 catalog shapes against nearby text and joint-sequence alignments with fixed
@@ -58,7 +64,7 @@ batch sizes and times.
 
 ## Probe protocol
 
-The [probe configuration](../../configs/diagnostics/flux_batch_shapes.json)
+The [probe configuration](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_batch_shapes.json)
 references the current B2 preparation training config and tests batch sizes
 1, 2, 4, and 8 at each candidate length. Each shape executes **two warm-up calls
 and five measured calls in one sweep**. The first call is part of warm-up and
@@ -119,7 +125,7 @@ includes resident FP32 gradients, AdamW moments, and the preparation reserve.
 | 2749, 2990, 3325, 3714, 4210, 4837 | 2 |
 | 6100, 8400 | 1 |
 
-The [B2 benchmark config](../../configs/training/benchmarks/single_gpu_b2.json)
+The [B2 benchmark config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b2.json)
 uses these **24 explicit shapes**, with the probe's median whole-call
 forward/backward milliseconds stored as `forward_backward_ms` for each shape:
 

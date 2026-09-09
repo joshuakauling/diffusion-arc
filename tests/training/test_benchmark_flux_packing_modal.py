@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 
 ROOT = Path(__file__).resolve().parents[2]
-CONFIG = "configs/training/benchmarks/single_gpu_packed_smoke.json"
+CONFIG = "configs/training/benchmarks/single_gpu_b3_smoke.json"
 IMAGE_ID = "im-R5CncDboPfMQryWnq0UZn4"
 MODULE = "scripts.benchmark_single_gpu"
 RUN_ID = "20260909T010203123456Z"

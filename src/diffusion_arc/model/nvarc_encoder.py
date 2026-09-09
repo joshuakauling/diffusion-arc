@@ -1,15 +1,14 @@
-"""Frozen batched NVARC encoding of packed complete source sequences."""
+"""Frozen NVARC encoding of sources concatenated end to end without padding."""
 
 from __future__ import annotations
 
 import torch
 from torch import Tensor, nn
 
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from .nvarc_attention import NVARC_ATTENTION_IMPLEMENTATION
 
 from .contracts import (
     NVARC_HIDDEN_STATE_INDICES,
-    NVARC_PAD_TOKEN_ID,
     NvarcBatchOutput,
 )
 
@@ -31,116 +30,75 @@ def _module_input_device(module: nn.Module) -> torch.device:
 
 
 class NvarcBatchRunner(nn.Module):
-    """Run frozen NVARC once for a batch of complete packed sources.
+    """Encode sources concatenated end to end in one frozen NVARC forward.
 
-    The public forward interface intentionally accepts no target metadata. It
-    right-pads the source sequences only for the NVARC call and removes those
-    padded positions before returning the selected hidden states.
+    The input contains all tokens of source 1, followed by source 2, and so on,
+    without padding between sources or at the end. FA3 Varlen uses their
+    boundaries to keep causal attention within each source. Position IDs restart
+    at zero for each source. Selected hidden states are returned as separate
+    compact tensors in the original source order. Only blocks 1 through 27 run;
+    the outputs of blocks 9, 18 and 27 are kept before final normalization.
     """
 
-    def __init__(
-        self,
-        model: nn.Module,
-        *,
-        length_buckets: SequenceLengthBuckets = SequenceLengthBuckets(),
-    ) -> None:
+    def __init__(self, model: nn.Module) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
-
+        if getattr(model.config, "_attn_implementation", None) != NVARC_ATTENTION_IMPLEMENTATION:
+            raise ValueError("NvarcBatchRunner requires the explicit nvarc_fa3 attention binding")
         self.model = model
-        self.length_buckets = length_buckets
         self.model.requires_grad_(False)
         self.train(False)
 
     def train(self, mode: bool = True) -> NvarcBatchRunner:
         """Keep both the runner and its frozen NVARC model in evaluation mode."""
 
-        if not isinstance(mode, bool):
-            raise ValueError("training mode is expected to be boolean")
         super().train(False)
         self.model.eval()
         return self
 
-    def forward(
-        self,
-        input_ids: Tensor,
-        sequence_offsets: Tensor,
-        *,
-        padded_length: int | None = None,
-    ) -> NvarcBatchOutput:
-        """Encode packed sources into compact, independently stored hidden states.
+    def forward(self, input_ids: Tensor, sequence_offsets: Tensor) -> NvarcBatchOutput:
+        """Encode flat IDs and validated CPU source offsets without padding.
 
-        ``input_ids`` concatenates B sources; ``sequence_offsets`` contains
-        their B + 1 boundaries, from zero through the total token count.
-        An explicit ``padded_length`` overrides ``length_buckets`` and must be
-        a validated integer covering every source. When omitted, the runner
-        selects a bucket covering the longest source, or its exact length if
-        no buckets are configured.
-
-        The model receives masked, right-padded IDs of shape [B, padded_length].
-        Results retain packed source order: one frozen [L_i, D] tensor per
-        source, with selected layers concatenated along D and padding removed.
+        Offsets include zero and the total token count. The model receives
+        [1, total_tokens] IDs, reset position IDs, and int32 GPU boundaries;
+        its maximum attention length is the longest individual source. Original
+        Qwen blocks run directly, skipping later blocks, final norm and LM head.
         """
 
         offsets = sequence_offsets.tolist()
-        source_lengths = tuple(
-            end - start for start, end in zip(offsets, offsets[1:])
-        )
-        source_count = len(source_lengths)
-        max_length = (
-            self.length_buckets.padded_length(max(source_lengths))
-            if padded_length is None
-            else padded_length
-        )
-        model_device = _module_input_device(self.model)
-
-        flat_input_ids = input_ids.to(device=model_device)
-        padded_input_ids = torch.full(
-            (source_count, max_length),
-            NVARC_PAD_TOKEN_ID,
-            dtype=torch.int64,
-            device=model_device,
-        )
-        attention_mask = torch.zeros(
-            (source_count, max_length),
-            dtype=torch.bool,
-            device=model_device,
-        )
-
-        source_start = 0
-        for source_index, source_length in enumerate(source_lengths):
-            source_end = source_start + source_length
-            padded_input_ids[source_index, :source_length] = flat_input_ids[
-                source_start:source_end
-            ]
-            attention_mask[source_index, :source_length] = True
-            source_start = source_end
-
+        lengths = tuple(end - start for start, end in zip(offsets, offsets[1:]))
+        device = _module_input_device(self.model)
+        positions = torch.cat(tuple(torch.arange(length) for length in lengths))
+        cumulative_lengths = sequence_offsets.to(device=device, dtype=torch.int32)
+        position_ids = positions.to(device=device).unsqueeze(0)
+        backbone = self.model.base_model
+        selected_states: list[Tensor] = []
         with torch.no_grad():
-            output = self.model(
-                input_ids=padded_input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                use_cache=False,
-                return_dict=True,
-            )
-
-        sequence_hidden_states = tuple(
-            torch.cat(
-                tuple(
-                    output.hidden_states[hidden_state_index][
-                        source_index, :source_length
-                    ]
-                    for hidden_state_index in NVARC_HIDDEN_STATE_INDICES
-                ),
-                dim=-1,
-            )
-            for source_index, source_length in enumerate(source_lengths)
-        )
-        return NvarcBatchOutput(
-            sequence_hidden_states=sequence_hidden_states,
-        )
+            hidden_states = backbone.embed_tokens(input_ids.to(device=device).unsqueeze(0))
+            position_embeddings = backbone.rotary_emb(hidden_states, position_ids)
+            # Keep the original block outputs: making block 27 the final model
+            # output would apply an extra normalization through the HF wrapper.
+            for index, block in enumerate(
+                backbone.layers[:max(NVARC_HIDDEN_STATE_INDICES)], start=1,
+            ):
+                hidden_states = block(
+                    hidden_states,
+                    position_ids=position_ids,
+                    position_embeddings=position_embeddings,
+                    attention_mask=None,
+                    cu_seq_lens_q=cumulative_lengths,
+                    cu_seq_lens_k=cumulative_lengths,
+                    max_length_q=max(lengths),
+                    max_length_k=max(lengths),
+                    use_cache=False,
+                )
+                if index in NVARC_HIDDEN_STATE_INDICES:
+                    selected_states.append(hidden_states)
+        return NvarcBatchOutput(sequence_hidden_states=tuple(
+            torch.cat(tuple(states[0, start:end] for states in selected_states), dim=-1)
+            for start, end in zip(offsets, offsets[1:])
+        ))
 
 
 __all__ = ["NvarcBatchRunner"]

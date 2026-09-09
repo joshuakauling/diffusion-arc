@@ -5,6 +5,12 @@ the [training system overview](README.md).
 
 ## Status and scope
 
+This page describes the padded reference interface. B3 training instead copies
+exact prefixes into unpadded segments; see the
+[FLUX packing guide](flux-sequence-packing.md). Prefix boundaries, per-source
+ownership and transactional consumption remain the same, while dense padding
+masks are replaced by cumulative attention-segment boundaries in that path.
+
 `pad_flux_text_prefixes` is the implemented pure tensor boundary between exact
 frozen-NVARC prefix tensors and the padded text portion of a physical FLUX
 microbatch. It pads the supplied prefixes to the longest one in that

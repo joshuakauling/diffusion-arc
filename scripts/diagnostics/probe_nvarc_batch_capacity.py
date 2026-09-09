@@ -76,10 +76,9 @@ def _load_config(path: Path, *, require_checkpoints: bool = True):
     config = load_single_gpu_training_config(path)
     if (
         config.loop.optimizer_batch_size != 48
-        or config.loop.flux_microbatch_size != 1
         or config.loop.min_context_pairs_before_target != 2
     ):
-        raise ValueError("capacity probe requires the B0 48-target, FLUX-1, two-demo layout")
+        raise ValueError("capacity probe requires the 48-target, two-demo layout")
     if require_checkpoints:
         for checkpoint in (config.models.nvarc_checkpoint, config.models.flux_checkpoint):
             if not checkpoint.is_dir():
@@ -139,7 +138,7 @@ def initialize_training_memory(config, models, optimizer, *, device):
         # Keep the actual buffers across the training loop's end-of-step cleanup.
         gradients.update((parameter, parameter.grad) for parameter in models.transformer.parameters())
 
-    # Apply the same initial LR as B0, including its zero-LR first warm-up step.
+    # Apply the configured initial LR, including its zero-LR first warm-up step.
     scheduler = build_flux_scheduler(config, optimizer=optimizer)
     run_single_gpu_training(
         (sample,), nvarc_runner=models.nvarc_runner, vae_encoder=models.vae_encoder,
@@ -381,7 +380,7 @@ def search_capacity(evaluate: Callable[[int], dict], *, maximum: int) -> dict:
         "smallest_tested_oom": upper, "boundary_known": upper is not None,
         "search_limit_reached": upper is None,
         "boundary_assumption": "feasibility is monotone within the searched bracket",
-        "b1_batch_size_validated": False, "candidates": candidates,
+        "full_pipeline_capacity_validated": False, "candidates": candidates,
     }
 
 

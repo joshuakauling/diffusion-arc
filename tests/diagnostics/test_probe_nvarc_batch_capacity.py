@@ -22,7 +22,7 @@ from scripts.diagnostics._nvarc_tokenizer import make_nvarc_tokenizer
 
 def _config():
     return load_single_gpu_training_config(
-        probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b0.json"
+        probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b3.json"
     )
 
 
@@ -39,7 +39,7 @@ class CapacitySearchTests(unittest.TestCase):
         self.assertEqual(result["largest_tested_success"], 6)
         self.assertEqual(result["smallest_tested_oom"], 7)
         self.assertTrue(result["boundary_known"])
-        self.assertFalse(result["b1_batch_size_validated"])
+        self.assertFalse(result["full_pipeline_capacity_validated"])
 
     def test_non_power_of_two_limit_is_not_reported_as_capacity(self):
         result = probe.search_capacity(

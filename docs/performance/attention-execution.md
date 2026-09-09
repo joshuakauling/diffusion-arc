@@ -1,5 +1,11 @@
 # Attention execution diagnostic — first wave
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: complete and independently validated, 2026-09-09.**
 
 This implements stages 0 and 1 of the approved

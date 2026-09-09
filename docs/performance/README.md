@@ -1,7 +1,8 @@
 # Performance Benchmarks
 
 This report compares the completed single-GPU training variants and explains
-their measured performance and remaining costs.
+their measured performance and remaining costs. B3 records the next implemented
+NVARC and FLUX changes; its full-pipeline benchmark is pending.
 
 ## Benchmark variants
 
@@ -10,17 +11,23 @@ their measured performance and remaining costs.
 | B0 | Completed | 1 | 1 | 1 | 48 | Exact prefix length | FIFO |
 | B1 | Completed | 16 | 48 | 1 | 48 | Fixed bucket padding | FIFO |
 | B2 | Completed | 2, 4, 8 within 16-source windows | 48 | 1, 2, 4 | 48 | Scheduled bucket shapes | FIFO membership; reordered within each step |
+| B3 | Implemented; benchmark pending | 16 packed sources | 48 | Packed under 12,288 joint tokens | 48 | Unpadded FA3 segments in both models | FIFO membership; reordered within each step |
 
 B0 establishes the baseline. B1 combines larger fixed preparation batches
 with reusable attention shapes. B2 reduces NVARC padding, schedules larger
 FLUX microbatches, and overlaps CPU data preparation with GPU work.
 
-The subsequent NVARC diagnostics compare
-[bucket shapes and alignment](nvarc-batch-shapes.md) and
-[packed attention backends](nvarc-packing.md). They select unpadded FA3 Varlen
-for the NVARC component of B3: one packed forward per 16-source window,
-with independent causal attention inside each source. This is a component
-measurement and implementation decision, not a completed B3 training benchmark.
+[B3](#b3-packed-nvarc-and-flux) replaces both bucket catalogs with unpadded
+FA3 execution. NVARC stops after its last required hidden-state layer; FLUX
+packs targets under a joint-token budget and sums modulation gradients in FP32.
+The component reports below retain the measurements that motivated these choices.
+
+Historical B0–B2 recipes and the FLUX diagnostic implementation are archived at
+[2ff4276](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b).
+The NVARC diagnostics are archived at
+[db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f).
+They are no longer executable through the current configuration or runtime;
+their results remain documented here and in the linked reports.
 
 ## Shared benchmark setup
 
@@ -42,7 +49,7 @@ verifies parent membership in the training split and records the selected data.
 
 ### Hardware and training
 
-All variants use one NVIDIA H200 with 139.80 GiB device memory, eight allocated
+The completed B0–B2 benchmarks use one NVIDIA H200 with 139.80 GiB device memory, eight allocated
 CPU cores, and 64 GiB host RAM. The software environment is PyTorch 2.13.0,
 CUDA 13.0, Transformers 4.56.1, Diffusers 0.39.0, and Accelerate 1.12.0.
 
@@ -95,13 +102,13 @@ remaining time inside that range: **total range = activity + gaps**. Activity
 includes padding work and is not a measure of useful FLOPs or SM utilization.
 
 Configs:
-[B0 profiler](../../configs/training/profiling/single_gpu_b0_torch_profile.json),
-[B1 profiler](../../configs/training/profiling/single_gpu_b1_torch_profile.json),
-and [B2 profiler](../../configs/training/profiling/single_gpu_b2_torch_profile.json).
+[B0 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b0_torch_profile.json),
+[B1 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b1_torch_profile.json),
+and [B2 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b2_torch_profile.json).
 
 ### Comparison and reproducibility
 
-All variants keep the dataset, optimizer-batch membership, loss normalization,
+The completed B0–B2 benchmarks keep the dataset, optimizer-batch membership, loss normalization,
 precision, optimizer schedule, software, and hardware allocation fixed.
 Step records were checked for matching source order, target counts, real
 prefix lengths, learning rates, and data hashes. Pooled and per-repetition
@@ -115,7 +122,7 @@ reproducibility limitation.
 
 ## B0 — Exact-length FIFO baseline
 
-The [B0 config](../../configs/training/benchmarks/single_gpu_b0.json) processes
+The [B0 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b0.json) processes
 one NVARC source, one VAE image, and one FLUX target at a time. FLUX uses exact
 text-prefix lengths; the optimizer accumulates 48 targets in FIFO order.
 
@@ -174,14 +181,14 @@ calls in B0:
 - Padding is masked. FIFO order, the 48-target optimizer-batch membership,
   and loss weighting remain unchanged.
 
-The [B1 config](../../configs/training/benchmarks/single_gpu_b1.json) fixes these
+The [B1 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b1.json) fixes these
 batch sizes and boundaries. The [bucket policy](b1-bucket-policy.md) documents
 the seven NVARC and 19 FLUX boundaries, the input-length histogram, and their
 padding/setup-cost trade-off.
 
 ### Preliminary NVARC capacity probe
 
-The [capacity diagnostic](../../scripts/diagnostics/probe_nvarc_batch_capacity.py)
+The [capacity diagnostic](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/scripts/diagnostics/probe_nvarc_batch_capacity.py)
 tested synthetic sources with 8,400 real tokens while all models, initialized
 optimizer state, gradients, and conservative buffer reserves were resident.
 With one repetition per candidate, 29 sources succeeded and 30 ran out of
@@ -319,7 +326,7 @@ the same 48-target optimizer batches:
   preparation phase. The tokenizer accepts the full 9,330-token training
   prompt; the consumed NVARC prefix remains limited to 8,400 tokens.
 
-The [B2 config](../../configs/training/benchmarks/single_gpu_b2.json) combines
+The [B2 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b2.json) combines
 the [NVARC scheduling and prefetch policy](b2-preparation-policy.md) with the
 [measured FLUX shape catalog](flux-batch-shapes.md). Reordering stays within
 each preparation window or optimizer batch; there are no cross-step bucket
@@ -427,3 +434,76 @@ DataLoader retrieval still makes **16 calls per step**, but their combined
 CPU range falls from **0.171 s to 0.009 s** with ordered background prefetch.
 The work moves to workers rather than disappearing. These CPU ranges do not
 measure GPU idle time or independently establish the end-to-end prefetch gain.
+
+## B3 — Packed NVARC and FLUX
+
+**Status: both components are integrated; the combined GPU benchmark and
+profiler comparison are pending.** B3 removes the NVARC and FLUX bucket catalogs
+while retaining 16-source preparation windows, VAE batches of 48, FIFO
+optimizer batches of 48 targets, logical flow-draw assignment, and per-target
+loss weighting.
+
+- **NVARC: one unpadded FA3 forward.** Sources are concatenated end to end with
+  independent causal attention boundaries and reset positions. The encoder
+  calls the original Qwen embeddings, RoPE and blocks 1–27, retaining only the
+  raw outputs of blocks 9, 18 and 27. It skips blocks 28–36, final normalization
+  and the language-model head. The full checkpoint remains loaded; unused
+  parameter tensors have not been removed from GPU memory.
+- **FLUX: pack under 12,288 joint tokens.** Within the selected optimizer batch,
+  best-fit-decreasing groups whole targets by exact prefix length plus 900 image
+  tokens each. Each target has an independent noncausal FA3 segment and its own
+  timestep modulation. The three modulation gathers retain unchanged forward
+  values and sum per-example contributions in FP32 during backward.
+
+The [benchmark config](../../configs/training/benchmarks/single_gpu_b3.json),
+[smoke config](../../configs/training/benchmarks/single_gpu_b3_smoke.json), and
+[profiler config](../../configs/training/profiling/single_gpu_b3_torch_profile.json)
+share schema v8 and the combined runtime. The FA3 build supports BF16 forward
+and backward at head dimension 128 on Hopper; the earlier forward-only NVARC
+image cannot serve the combined training path.
+
+### Supporting component evidence
+
+The relevant NVARC baseline is **B2's padded, scheduled SDPA/cuDNN path**.
+The [component comparison](nvarc-packing.md#comparison-with-the-previous-implementation)
+suggests **44.8–51.0% less isolated NVARC time** with FA3 across three
+16-source windows. This combines the backend change, removed padding and one
+forward instead of three to five. The old-path diagnostic used synthetic token
+contents and the FA3 diagnostic used real inputs at the same lengths, so this
+is indicative rather than a controlled B3 result. Packed cuDNN was only
+0.9–1.7% slower than FA3 and had zero measured hidden-state difference from the
+old cuDNN reference; FA3's relative L2 difference was approximately 0.5%.
+
+Alignment gave no consistent NVARC benefit. All these measurements executed
+36 blocks and the language-model head, so they exclude early exit. Skipping
+nine blocks removes **25% of decoder-block execution**, without establishing a
+25% reduction in NVARC or optimizer-step latency. Tiny-Qwen CPU tests compare
+selected states exactly against a full forward, but do not execute the FA3
+CUDA kernel. See the [encoder guide](../training/nvarc-batch-runner.md).
+
+For FLUX, the [fixed-group comparison](flux-packing-performance.md) measured
+**9–25% shorter assembly plus forward/backward time** with packed FA3 than
+padded cuDNN across six selected B2 groups. FA3 and FA4 differed by at most
+0.52%; these groups are not a dataset-weighted throughput estimate. The
+[FP32 modulation intervention](flux-modulation-backward.md) reduced full-model
+gradient relative L2 versus same-backend singletons from **17.59–17.99% to
+3.14–3.22%**, with unchanged forward outputs and losses. A separate
+[cost comparison](flux-packed-capacity.md) found no meaningful timing penalty
+or memory increase from those FP32 sums at the tested shape.
+
+The [capacity probe](flux-sequence-capacity.md) confirmed 13,312 joint tokens
+and repeated an OOM at 13,568 for one attention segment. This motivates the
+12,288-token starting budget, but does not certify every mixed pack or changing
+allocation history. Replaying four recorded optimizer windows reduces FLUX
+calls from **16/19/23/21 to 10/12/14/15**; these are reconstructed schedules,
+not measured optimizer-step times. The [FLUX training guide](../training/flux-sequence-packing.md)
+explains execution and local validation.
+
+### Remaining measurement boundary
+
+The combined NVARC representation change, FLUX packing, early exit and shared
+memory lifetime have not been measured together on the real checkpoints.
+Component timings cannot be added to predict full-step speed. Combined peak
+memory, loss/gradient agreement, optimizer updates and short-run learning
+behavior remain open; the residual FLUX gradient difference is not declared
+harmless. No B3 GPU run was started as part of this integration.

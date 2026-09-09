@@ -35,13 +35,32 @@ nav:
       - Initial approach: architecture/initial-flow-only-architecture.md
       - FLUX.2 Klein: architecture/flux2-klein-architecture.md
       - NVARC: architecture/nvarc-overview.md
-  - Training: training/README.md
+  - Training:
+      - Overview: training/README.md
+      - NVARC encoder: training/nvarc-batch-runner.md
+      - FLUX sequence packing: training/flux-sequence-packing.md
   - Performance:
       - Benchmark report: performance/README.md
-      - B1 bucket policy: performance/b1-bucket-policy.md
-      - B2 preparation policy: performance/b2-preparation-policy.md
-      - NVARC shapes and alignment: performance/nvarc-batch-shapes.md
-      - NVARC packed attention: performance/nvarc-packing.md
+      - Historical bucket policies:
+          - B1: performance/b1-bucket-policy.md
+          - B2 preparation: performance/b2-preparation-policy.md
+          - FLUX batch shapes: performance/flux-batch-shapes.md
+          - FLUX alignment plan: performance/flux-alignment.md
+      - NVARC:
+          - Shapes and alignment: performance/nvarc-batch-shapes.md
+          - Packed attention: performance/nvarc-packing.md
+      - FLUX:
+          - BFL reference: performance/flux-bfl-reference.md
+          - BFL precision: performance/flux-bfl-precision.md
+          - Backend conditions: performance/flux-backend-conditions.md
+          - Attention diagnostic plan: performance/attention-diagnostic-plan.md
+          - Attention execution: performance/attention-execution.md
+          - Packing correctness: performance/flux-packing.md
+          - Backward layouts: performance/flux-backward-layouts.md
+          - Modulation backward: performance/flux-modulation-backward.md
+          - Packing performance: performance/flux-packing-performance.md
+          - Packed capacity: performance/flux-packed-capacity.md
+          - Single-sequence capacity: performance/flux-sequence-capacity.md
   - Experiments: experiments/README.md
   - Research ideas: research-ideas.md
   - Code reference: api.md

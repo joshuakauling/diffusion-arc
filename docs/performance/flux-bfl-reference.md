@@ -1,5 +1,11 @@
 # Independent BFL transformer reference
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: all ten real Klein 4B forwards completed on H200 on 2026-09-08.
 FP32 passed every declared threshold. BF16 passed final velocity and loss
 thresholds but failed the internal activation screen, with relative L2 errors
@@ -36,7 +42,7 @@ this probe never installs their processors or calls their kernels.
 The BFL reference is pinned to commit
 [`50fe5162777813d869182b139e83b10743caef15`](https://github.com/black-forest-labs/flux2/tree/50fe5162777813d869182b139e83b10743caef15).
 Its transformer and Apache 2.0 license are copied byte for byte under
-[`scripts/diagnostics/_third_party/bfl_flux2`](../../scripts/diagnostics/_third_party/bfl_flux2/UPSTREAM.md).
+[`scripts/diagnostics/_third_party/bfl_flux2`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/_third_party/bfl_flux2/UPSTREAM.md).
 Independent hash constants verify the source and provenance before import.
 Production files under `src/` remain unchanged.
 

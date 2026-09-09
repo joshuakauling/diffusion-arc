@@ -16,9 +16,11 @@ FP32. Neither function executes the FLUX transformer, chooses an optimizer, or
 performs an update.
 
 The training-side `compute_flux_microbatch_loss` operation composes these
-helpers with one prepared `FluxMicrobatch`: it constructs the joint attention
-mask, executes the injected FLUX transformer, and returns the unscaled mean
-loss.
+helpers with one prepared `FluxMicrobatch`: it executes FLUX with the supplied
+flow draws and returns the unscaled mean loss. B3 uses independent packed
+attention segments; the padded reference helper constructs a joint mask.
+Flow draws are assigned in FIFO order before physical grouping, preserving
+each target's timestep and noise.
 
 The implementation lives in
 [`src/diffusion_arc/model/flow_matching.py`](../../src/diffusion_arc/model/flow_matching.py). Its

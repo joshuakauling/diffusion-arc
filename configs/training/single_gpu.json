@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 8,
   "seed": 167,
   "device": "cuda:0",
   "models": {
@@ -14,19 +14,29 @@
     "split_directory": "../../data/splits/overfitting_run_1",
     "view_name": "train",
     "shuffle": true,
-    "num_workers": 0
+    "num_workers": 0,
+    "prefetch_factor": null
   },
   "loop": {
     "max_optimizer_steps": 1,
     "optimizer_batch_size": 1,
     "flux_microbatch_size": 1,
-    "min_context_pairs_before_target": 1
+    "min_context_pairs_before_target": 1,
+    "nvarc_source_batch_size": 1,
+    "vae_microbatch_size": 1
   },
   "optimizer": {
-    "learning_rate": 0.00001,
+    "learning_rate": 1e-05,
     "beta1": 0.9,
     "beta2": 0.999,
-    "epsilon": 1e-8,
+    "epsilon": 1e-08,
     "weight_decay": 0.01
-  }
+  },
+  "padding": {
+    "flux_bucket_boundaries": null
+  },
+  "scheduler": null,
+  "benchmark": null,
+  "flux_scheduling": null,
+  "flux_packing": null
 }

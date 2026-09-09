@@ -1,5 +1,11 @@
 # BFL and Diffusers precision differences
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: source inspection and synthetic CPU controls completed on 2026-09-08.
 Q/K normalization is the first BF16 difference in all three small Double-block
 cases. Using BFL's normalization and RoPE coefficients makes all 25 observed
@@ -61,7 +67,7 @@ requires replacing the transformer architecture.
 
 ## Local intervention results
 
-The [precision probe](../../scripts/diagnostics/probe_flux_bfl_precision.py)
+The [precision probe](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/scripts/diagnostics/probe_flux_bfl_precision.py)
 executes the actual first Double blocks with shared random FP32 weights and
 once-drawn inputs. It retains head dimension 128, with two heads, 17 image
 tokens and 13 text tokens. Learned norm scales are sampled from `[0.5, 1.5)`;

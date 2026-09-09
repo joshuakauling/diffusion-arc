@@ -1,161 +1,91 @@
 # NVARC Batch Runner
 
-For the current end-to-end training path and documentation reading order, see
-the [training system overview](README.md).
+The training encoder uses **FlashAttention-3 Varlen without padding**. One
+forward processes all eligible sources in the current preparation window
+(normally 16). Each source retains independent causal attention and position
+IDs starting at zero. Sources are not sorted or scheduled into length buckets.
 
-## Status and scope
+## Interface and data flow
 
-`NvarcBatchRunner` is the implemented target-blind boundary between packed ARC
-source tokens and frozen NVARC hidden states. It executes complete source
-sequences only. Target indices, target-prefix boundaries, target images, VAE
-state, and FLUX state are deliberately absent from its interface.
-
-The local tests use a deterministic fake NVARC module. They validate packing,
-padding, masking, layer selection, and frozen-module behavior without loading a
-checkpoint. Stable real-checkpoint shapes, dtypes, hidden-state availability,
-and numerical behavior remain a separate required smoke or preflight
-experiment.
-
-The runner lives in
-[`src/diffusion_arc/model/nvarc_encoder.py`](../../src/diffusion_arc/model/nvarc_encoder.py), and
-its public tensor contracts live in
-[`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
-
-## Public interface
-
-The runner is constructed with an already loaded NVARC-compatible PyTorch
-module:
-
-```python
-from diffusion_arc.model import NvarcBatchRunner
-
-
-nvarc_runner = NvarcBatchRunner(nvarc_model)
-nvarc_output = nvarc_runner(
-    input_ids=batch.input_ids,
-    sequence_offsets=batch.sequence_offsets,
-)
-```
-
-Its forward method accepts exactly two trusted tensors produced by the
-collation path:
-
-| Field | Shape and dtype | Meaning |
-| --- | --- | --- |
-| `input_ids` | `[T]`, `torch.int64` | `S` complete source sequences concatenated in source-major order. |
-| `sequence_offsets` | `[S + 1]`, `torch.int64` | End-exclusive source boundaries, starting at zero and ending at `T`. |
-
-It returns:
-
-```python
-NvarcBatchOutput(
-    sequence_hidden_states=(
-        ...,  # [L_0, 7680]
-        ...,  # [L_1, 7680]
-    ),
-)
-```
-
-`sequence_hidden_states` follows input source order and contains one unpadded
-tensor per complete source. Every tensor owns independent storage; it is not a
-view into one larger packed result. Sequence boundaries are therefore resolved
-once inside the runner rather than carried into the target-aware training
-path. Hidden states reside on the NVARC output device.
-
-Independent ownership is intentional. All targets belonging to one ARC source
-can share that source's tensor, while the tensor can be released as soon as its
-last dependent target has entered a physical FLUX microbatch. Releasing one
-source never keeps unrelated sources from the same NVARC batch alive.
-
-## Fixed NVARC contract
-
-The initial architecture fixes the following values:
-
-| Property | Value |
-| --- | ---: |
-| Vocabulary size | 16 |
-| Padding token ID | 13 |
-| Maximum source length | 8400 |
-| Hidden width per selected state | 2560 |
-| Selected hidden-state indices | `(9, 18, 27)` |
-| Concatenated context width | 7680 |
-
-The 8,400-token limit replaces the legacy 8,192-token project limit: five
-30x30 input/output pairs require nine consumed grids (the final output is
-excluded), giving `9 * (900 + 29) + 39 = 8400` tokens including turn markers.
-GPU capacity and safe source batch sizes at 8,400 tokens remain unvalidated.
-
-These values are not runtime tuning parameters. Changing them would alter the
-NVARC-to-FLUX interface and requires a separate checkpoint-contract decision
-and smoke experiment. The normal forward path assumes that this fixed contract
-has already been established for the selected checkpoint and environment.
-
-## Execution layout
-
-For source lengths `(L_0, ..., L_(S-1))`, the runner performs:
+`NvarcBatchRunner` accepts validated CPU tensors: flat `input_ids` of shape
+`[T]` and `sequence_offsets` of shape `[S + 1]`, both int64. Offsets start at
+zero and end at the total token count. The interface contains no target metadata.
 
 ```text
-flat input_ids [T]
-  -> split at sequence_offsets
-  -> right-pad with token ID 13 to [S, max(L_s)]
-  -> build bool attention_mask with true only at real positions
-  -> one frozen NVARC forward with batch size S
-  -> select hidden_states[9], [18], and [27]
-  -> for each source, concatenate its real positions to [L_s, 7680]
-  -> return S independent owning tensors in source order
+flat IDs + source offsets
+  -> [1, total_tokens] IDs and reset position IDs
+  -> int32 GPU cumulative lengths + longest individual source length
+  -> frozen FA3 Varlen blocks 1 through 27; no dense attention mask
+  -> hidden states 9, 18, 27 concatenated per source
+  -> S independently stored [source_length, 7680] tensors in input order
 ```
 
-The NVARC call explicitly requests hidden states, disables the key/value cache,
-and uses dictionary-style output. The model executes under `torch.no_grad()`,
-not `torch.inference_mode()`, so the resulting ordinary tensors can later be
-consumed by the trainable FLUX path.
+The cumulative lengths prevent attention between sources. `causal=True`
+prevents attention to later tokens within a source. Reset positions preserve
+per-source RoPE semantics. There are no padding tokens between sources or at
+the end of the packed stream, and no fixed total-token budget.
 
-The packed token IDs are transferred internally to the device of NVARC's input
-embeddings. Padding and the attention mask are created directly on that device.
-If the module does not expose a tensor-backed input-embedding weight, runner
-execution fails with a clear interface error; it does not guess from another
-parameter or buffer and does not silently fall back to CPU.
+The encoder calls the original Qwen embedding, rotary-position module and first
+27 decoder blocks directly. It retains only the states after blocks 9, 18 and
+27, and skips blocks 28–36, the final normalization and the language-model head.
+The last selected state is the original intermediate output: shortening the
+ordinary Hugging Face forward would instead normalize its last returned state.
+The KV cache is disabled and `torch.no_grad()` keeps the output usable by the
+trainable FLUX transformer. The full checkpoint is still loaded and retained;
+this change skips execution and avoids retaining unused intermediate states,
+but does not remove the unused parameter tensors from GPU memory.
+Construction freezes the model and keeps it in evaluation mode even if
+`train(True)` is called on the runner. Callers must not change the underlying
+model or its backend after construction.
 
-## Frozen-state guarantee
+Each returned source tensor owns compact storage. Targets share an
+`NvarcSequenceState` and their exact prefix ends; after its last prefix is
+copied into a FLUX microbatch, the full source state can be released independently.
+VAE encoding follows the packed forward and spans the window's targets in
+source-major order. FIFO optimizer membership and per-target loss weighting
+are unchanged.
 
-Construction applies `requires_grad_(False)` to the complete NVARC module and
-places both runner and model in evaluation mode. Calling `train(True)` on the
-runner still leaves both in evaluation mode. Callers must not mutate the
-contained model directly between forwards.
+## Runtime contract
 
-The forward hot path trusts both the packed-source contract and the stable
-checkpoint-output contract. It therefore does not repeat complete type, shape,
-dtype, device, gradient, or finite-value scans on every call. Failures that
-make the required layer selection or concatenation impossible still surface
-naturally. Full contract checks belong to the explicit checkpoint smoke or
-preflight experiment described below, while tensor validators remain available
-for diagnostics and tests.
+Model setup explicitly registers `nvarc_fa3` with Transformers and loads only
+local checkpoints. The binding calls the official FA3 Varlen function directly,
+so it does not share Transformers' lazy FlashAttention backend cache with FLUX.
+There is no alternate backend or fallback in the training encoder.
 
-## Target boundary
+The pinned Modal image compiles FA3 during its CPU build. It requires PyTorch
+2.13.0 / CUDA 13.0 and uses revision
+`ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820`. The shared build keeps BF16 forward and backward,
+head dimension 128, GQA and Varlen for Hopper/SM90. NVARC uses only causal
+forward; FLUX also needs noncausal forward and backward. Other dimensions and
+dtypes are omitted. CUDA-device and checkpoint preflights enforce these
+contracts before training. The extension is not installed in the CPU unit-test
+environment. Local CUDA installations need the same extension and build contract.
 
-The runner never receives target identities, prefix boundaries, target images,
-or FLUX state. Target-aware ownership and prefix selection happen later:
+NVARC retains vocabulary size 16, 36 layers, hidden width 2560, and the selected
+states `(9, 18, 27)`. The maximum consumed source is 8,400 tokens; the tokenizer
+allows 9,330 before the final target output is trimmed. No checkpoint pad-token
+setting is needed by the packed forward; tokenizer compatibility is still checked.
 
-```text
-NvarcBatchOutput.sequence_hidden_states[source_index]
-  -> one NvarcSequenceState per source
-  + one relative prefix_end per FluxInput
-  -> exact prefix hidden_states[:prefix_end]
-```
+## Validation and evidence
 
-Keeping this operation separate ensures that NVARC always processes each
-collated complete source once and cannot acquire dependencies on target images
-or FLUX execution policy.
+CPU tests use a tiny real Qwen model and an independent per-sequence SDPA
+reference at the FA3 call boundary. They verify reset positions, causal prefix
+behavior, source isolation, selected layers, compact ownership and freezing.
+Pipeline tests cover source/target order, incomplete windows, the same two
+48-target optimizer batches, loss weights, random draws and parameter updates.
+A tiny 36-block Qwen comparison also requires bitwise-equal selected states
+against the complete forward and checks that later blocks, final normalization
+and the language-model head are never called. These CPU tests verify integration
+semantics, not execution of the CUDA extension.
 
-The fixed source-batch preparation path wraps every returned source tensor in
-its own `NvarcSequenceState`. Each `FluxInput` stores only a reference to its
-source owner and its relative `prefix_end`. `build_flux_microbatch` obtains
-exact prefix views, and the pure `pad_flux_text_prefixes` operation copies them
-into the independent padded FLUX text tensor. Their contracts and remaining
-real-model checks are documented in
-[`flux-text-conditioning.md`](flux-text-conditioning.md).
+The [real-input packing diagnostic](../performance/nvarc-packing.md) measured
+FA3 on short, median and long 16-source windows. It supports the no-alignment
+choice but does not establish end-to-end B3 speed, peak memory or downstream
+FLUX loss/gradient agreement. Those remain to be measured for the combined
+NVARC and FLUX B3 runtime. The older SDPA/bucket paths and their diagnostic scripts
+are recoverable at [db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f).
 
-## Measured real-checkpoint preflight and interpretation
+## Historical SDPA preflight (not a validation of FA3)
 
 Local fake-model tests cannot establish the numerical behavior of the released
 NVARC checkpoint or its CUDA attention backend. The explicit real-checkpoint

@@ -81,13 +81,14 @@ class _SlowFirstDataset(ArcTrainingDataset):
 class _FakeNvarc(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.embedding = nn.Embedding(NVARC_VOCAB_SIZE, NVARC_HIDDEN_SIZE)
+        self.embedding = nn.Embedding(NVARC_VOCAB_SIZE, NVARC_HIDDEN_SIZE, dtype=torch.bfloat16)
         self.config = SimpleNamespace(
             vocab_size=NVARC_VOCAB_SIZE,
             hidden_size=NVARC_HIDDEN_SIZE,
             num_hidden_layers=36,
             max_position_embeddings=262144,
-            _attn_implementation="sdpa",
+            _attn_implementation="nvarc_fa3",
+            head_dim=128, num_attention_heads=32, num_key_value_heads=8, attention_dropout=0.0,
         )
 
     def get_input_embeddings(self) -> nn.Embedding:
@@ -134,7 +135,7 @@ def _config(root: Path, *, shuffle: bool = False) -> SingleGpuTrainingConfig:
         models=SingleGpuModelConfig(
             nvarc_checkpoint=root / "nvarc",
             flux_checkpoint=root / "flux",
-            nvarc_dtype="float32",
+            nvarc_dtype="bfloat16",
             vae_dtype="float32",
             flux_parameter_dtype="float32",
             flux_compute_dtype="bfloat16",
@@ -183,6 +184,10 @@ class SingleGpuSetupTests(unittest.TestCase):
             validate.assert_called_once_with(transformer, torch.bfloat16)
             self.assertIs(models.flux_packing_backend, backend)
             self.assertIs(models.transformer, transformer)
+            self.register_attention.assert_called_once_with()
+            self.assertFalse(any(p.requires_grad for p in models.nvarc_runner.parameters()))
+            self.assertFalse(any(p.requires_grad for p in models.vae_encoder.parameters()))
+            self.assertTrue(all(p.requires_grad for p in transformer.parameters()))
             with (
                 patch("diffusion_arc.model.flux_packing.Flash3Backend", side_effect=RuntimeError("FA3 unavailable")),
                 patch("diffusion_arc.training.single_gpu_setup.AutoTokenizer.from_pretrained") as load,
@@ -190,6 +195,35 @@ class SingleGpuSetupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "FA3 unavailable"):
                     load_single_gpu_models(config, device=torch.device("cpu"))
             load.assert_not_called()
+
+    def setUp(self):
+        binding = patch("diffusion_arc.training.single_gpu_setup.register_nvarc_attention")
+        self.register_attention = binding.start()
+        self.addCleanup(binding.stop)
+        hardware = patch("torch.cuda.get_device_capability", return_value=(9, 0))
+        hardware.start()
+        self.addCleanup(hardware.stop)
+
+    def test_rejects_non_hopper_device_before_loading_models(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("torch.cuda.is_available", return_value=True), \
+                patch("torch.cuda.set_device"), \
+                patch("torch.cuda.current_device", return_value=0), \
+                patch("torch.cuda.is_bf16_supported", return_value=True), \
+                patch("torch.cuda.get_device_capability", return_value=(8, 0)):
+            with self.assertRaisesRegex(RuntimeError, "Hopper"):
+                prepare_single_gpu_device(_config(Path(directory)))
+
+    def test_fa3_checkpoint_preflight_rejects_unsupported_shapes_and_dropout(self):
+        from diffusion_arc.training.single_gpu_setup import _validate_nvarc_checkpoint
+        for field, value in (("head_dim", 64), ("num_attention_heads", 16),
+                             ("num_key_value_heads", 4), ("attention_dropout", 0.1),
+                             ("_attn_implementation", "sdpa")):
+            model = _FakeNvarc()
+            setattr(model.config, field, value)
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                _validate_nvarc_checkpoint(model, _FakeTokenizer(),
+                                           expected_device=torch.device("cpu"), expected_dtype=torch.bfloat16)
 
     def test_spawn_prefetch_matches_serial_samples_and_preserves_flow_rng(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -270,9 +304,7 @@ class SingleGpuSetupTests(unittest.TestCase):
     def test_loads_only_local_checkpoints_and_sets_parameter_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            config = replace(_config(root), padding=SingleGpuPaddingConfig(
-                nvarc_bucket_boundaries=(4096, 8400),
-            ))
+            config = _config(root)
             config.models.nvarc_checkpoint.mkdir()
             config.models.flux_checkpoint.mkdir()
 
@@ -318,9 +350,9 @@ class SingleGpuSetupTests(unittest.TestCase):
             trust_remote_code=False,
             use_safetensors=True,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.float32,
+            torch_dtype=torch.bfloat16,
             device_map={"": torch.device("cpu")},
-            attn_implementation="sdpa",
+            attn_implementation="nvarc_fa3",
         )
         for loader, subfolder in ((load_vae, "vae"), (load_flux, "transformer")):
             loader.assert_called_once_with(
@@ -336,7 +368,6 @@ class SingleGpuSetupTests(unittest.TestCase):
         self.assertIs(models.tokenizer, tokenizer)
         self.assertEqual(models.tokenizer.model_max_length, 9330)
         self.assertIs(models.nvarc_runner.model, nvarc)
-        self.assertEqual(models.nvarc_runner.length_buckets.boundaries, (4096, 8400))
         self.assertIs(models.vae_encoder.vae, vae)
         self.assertIs(models.vae_decoder.vae, vae)
         self.assertIs(models.transformer, transformer)

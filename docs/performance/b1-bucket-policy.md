@@ -1,7 +1,7 @@
 # B1 bucket policy
 
 **Decision: implemented initial boundaries for B1.** The
-[B1 configuration](../../configs/training/benchmarks/single_gpu_b1.json) selects
+[B1 configuration](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b1.json) selects
 the policy below. The [completed B1 benchmark](README.md#b1-benchmark-result)
 measured 11.9% more target throughput than B0; the
 [profiler comparison](README.md#b1-profiler-findings-activity-gaps-and-total-ranges)

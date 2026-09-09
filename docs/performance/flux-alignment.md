@@ -1,9 +1,15 @@
 # FLUX alignment diagnostic
 
+This report preserves the diagnostic state and evidence before B3 integration.
+Its code, configurations and any commands below belong to the
+[archived implementation](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b);
+they are not current entrypoints. Later production choices are summarized in
+[B3](README.md#b3-packed-nvarc-and-flux).
+
 **Status: prepared; H200 measurements pending.** This is the controlled
 alignment mode of the existing [FLUX batch-shape probe](flux-batch-shapes.md).
 It compares the 24 explicit shapes currently configured in
-[`single_gpu_b2.json`](../../configs/training/benchmarks/single_gpu_b2.json).
+[`single_gpu_b2.json`](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/training/benchmarks/single_gpu_b2.json).
 It does not change the training catalog, batch scheduler, or training code.
 
 ## Start

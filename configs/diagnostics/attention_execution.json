@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "packing_fixture": "flux_packing.json",
-  "groups": ["short_b4", "medium_b2", "long_b2"],
-  "capture_blocks": ["double.0", "double.4", "single.0", "single.19"],
-  "backends": ["fp32_math", "bf16_math", "cudnn", "fa2", "fa3", "fa4"],
-  "upstream_seeds": [167, 168, 169],
-  "max_duration_seconds": 750
-}

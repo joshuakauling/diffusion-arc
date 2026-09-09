@@ -27,7 +27,6 @@ from .flux_schedule import (
     FluxPackingPolicy, FluxSchedulingPolicy, FluxTargetBatch,
     schedule_flux_targets, schedule_packed_flux_targets,
 )
-from .nvarc_schedule import NvarcSchedulingPolicy
 
 
 @dataclass(frozen=True)
@@ -227,7 +226,6 @@ def run_single_gpu_training(
     nvarc_source_batch_size: int = 1,
     vae_microbatch_size: int | None = None,
     flux_bucket_boundaries: tuple[int, ...] | None = None,
-    nvarc_scheduling: NvarcSchedulingPolicy | None = None,
     flux_scheduling: FluxSchedulingPolicy | None = None,
     flux_packing: FluxPackingPolicy | None = None,
     flux_packing_backend: object | None = None,
@@ -241,8 +239,8 @@ def run_single_gpu_training(
     """Train from one sample stream until its end or an exact step limit.
 
     ``nvarc_source_batch_size`` limits the number of consecutive raw samples in
-    each preparation window, before eligibility filtering. Optional scheduling
-    subdivides that window into physical NVARC batches; returned targets retain
+    each preparation window, before eligibility filtering. All eligible sources
+    are concatenated for one NVARC call without padding; returned targets retain
     logical source order. Window boundaries do not define optimizer batches:
     the target FIFO carries any surplus into the next update.
 
@@ -321,7 +319,6 @@ def run_single_gpu_training(
                 vae_encoder=vae_encoder,
                 min_context_pairs_before_target=min_context_pairs_before_target,
                 vae_microbatch_size=vae_microbatch_size,
-                nvarc_scheduling=nvarc_scheduling,
                 on_preparation=on_preparation,
             )
         )

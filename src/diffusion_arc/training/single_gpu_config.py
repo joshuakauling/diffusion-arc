@@ -11,12 +11,10 @@ from typing import Any
 
 from diffusion_arc._constants import NVARC_MAX_TOKENS
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
-from .nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
 from .flux_schedule import FluxBatchShape, FluxPackingPolicy, FluxSchedulingPolicy
 
 
-SINGLE_GPU_TRAINING_SCHEMA_VERSION = 7
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, SINGLE_GPU_TRAINING_SCHEMA_VERSION})
+SINGLE_GPU_TRAINING_SCHEMA_VERSION = 8
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -85,9 +83,8 @@ class BenchmarkConfig:
 
 @dataclass(frozen=True)
 class SingleGpuPaddingConfig:
-    """Independent fixed text-length boundaries; None preserves exact padding."""
+    """FLUX text-length boundaries; None preserves exact microbatch padding."""
 
-    nvarc_bucket_boundaries: tuple[int, ...] | None = None
     flux_bucket_boundaries: tuple[int, ...] | None = None
 
 
@@ -104,7 +101,6 @@ class SingleGpuTrainingConfig:
     scheduler: CosineSchedulerConfig | None = None
     benchmark: BenchmarkConfig | None = None
     padding: SingleGpuPaddingConfig = SingleGpuPaddingConfig()
-    nvarc_scheduling: NvarcSchedulingPolicy | None = None
     flux_scheduling: FluxSchedulingPolicy | None = None
     flux_packing: FluxPackingPolicy | None = None
 
@@ -119,19 +115,11 @@ def load_single_gpu_training_config(
         payload = _object(json.load(handle), name="config")
 
     schema_version = _integer(payload.get("schema_version"), name="schema_version")
-    if schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
+    if schema_version != SINGLE_GPU_TRAINING_SCHEMA_VERSION:
         raise ValueError(f"unsupported schema_version: {schema_version!r}")
-    config_fields = {"schema_version", "seed", "device", "models", "data", "loop", "optimizer"}
-    if schema_version >= 3:
-        config_fields.update({"scheduler", "benchmark"})
-    if schema_version >= 4:
-        config_fields.add("padding")
-    if schema_version >= 5:
-        config_fields.add("nvarc_scheduling")
-    if schema_version >= 6:
-        config_fields.add("flux_scheduling")
-    if schema_version >= 7:
-        config_fields.add("flux_packing")
+    config_fields = {"schema_version", "seed", "device", "models", "data", "loop",
+                     "optimizer", "scheduler", "benchmark", "padding",
+                     "flux_scheduling", "flux_packing"}
     _fields(payload, config_fields, name="config")
 
     seed = _integer(payload["seed"], name="seed")
@@ -191,10 +179,12 @@ def load_single_gpu_training_config(
         flux_compute_dtype=flux_compute_dtype,
     )
 
+    if models.nvarc_dtype != "bfloat16":
+        raise ValueError("models.nvarc_dtype must be bfloat16 for the FA3 build")
+
     data_payload = _object(payload["data"], name="data")
     data_fields = {"split_directory", "view_name", "shuffle", "num_workers"}
-    if schema_version >= 5:
-        data_fields.add("prefetch_factor")
+    data_fields.add("prefetch_factor")
     _fields(
         data_payload,
         data_fields,
@@ -204,8 +194,6 @@ def load_single_gpu_training_config(
     if not isinstance(shuffle, bool):
         raise TypeError("data.shuffle must be a boolean")
     num_workers = _integer(data_payload["num_workers"], name="data.num_workers")
-    if schema_version < 5 and num_workers != 0:
-        raise ValueError("initial single-GPU training requires data.num_workers = 0")
     if num_workers < 0:
         raise ValueError("data.num_workers must not be negative")
     prefetch_factor = data_payload.get("prefetch_factor")
@@ -232,13 +220,7 @@ def load_single_gpu_training_config(
         "flux_microbatch_size",
         "min_context_pairs_before_target",
     }
-    if schema_version >= 2:
-        loop_fields.update(
-            {
-                "nvarc_source_batch_size",
-                "vae_microbatch_size",
-            }
-        )
+    loop_fields.update({"nvarc_source_batch_size", "vae_microbatch_size"})
     _fields(loop_payload, loop_fields, name="loop")
     loop_values = {
         field: _positive_integer(loop_payload[field], name=f"loop.{field}")
@@ -246,7 +228,7 @@ def load_single_gpu_training_config(
         if field != "flux_microbatch_size"
     }
     flux_microbatch_size = loop_payload["flux_microbatch_size"]
-    if schema_version < 6 or flux_microbatch_size is not None:
+    if flux_microbatch_size is not None:
         flux_microbatch_size = _positive_integer(flux_microbatch_size, name="loop.flux_microbatch_size")
     loop = SingleGpuLoopConfig(
         max_optimizer_steps=loop_values["max_optimizer_steps"],
@@ -255,8 +237,8 @@ def load_single_gpu_training_config(
         min_context_pairs_before_target=loop_values[
             "min_context_pairs_before_target"
         ],
-        nvarc_source_batch_size=loop_values.get("nvarc_source_batch_size", 1),
-        vae_microbatch_size=loop_values.get("vae_microbatch_size"),
+        nvarc_source_batch_size=loop_values["nvarc_source_batch_size"],
+        vae_microbatch_size=loop_values["vae_microbatch_size"],
     )
 
     optimizer_payload = _object(payload["optimizer"], name="optimizer")
@@ -314,35 +296,11 @@ def load_single_gpu_training_config(
         if benchmark.warmup_steps + benchmark.measured_steps != loop.max_optimizer_steps:
             raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
 
-    padding = SingleGpuPaddingConfig()
-    if schema_version >= 4:
-        section = _object(payload["padding"], name="padding")
-        fields = {"nvarc_bucket_boundaries", "flux_bucket_boundaries"}
-        _fields(section, fields, name="padding")
-        padding = SingleGpuPaddingConfig(**{
-            field: _bucket_boundaries(section[field], name=f"padding.{field}")
-            for field in fields
-        })
-
-    nvarc_scheduling = None
-    if payload.get("nvarc_scheduling") is not None:
-        section = _object(payload["nvarc_scheduling"], name="nvarc_scheduling")
-        _fields(section, {"shapes", "call_overhead_tokens"}, name="nvarc_scheduling")
-        if not isinstance(section["shapes"], list):
-            raise TypeError("nvarc_scheduling.shapes must be an array")
-        shapes = []
-        for value in section["shapes"]:
-            shape = _object(value, name="NVARC shape")
-            _fields(shape, {"batch_size", "max_tokens"}, name="NVARC shape")
-            shapes.append(NvarcBatchShape(**shape))
-        nvarc_scheduling = NvarcSchedulingPolicy(
-            shapes=tuple(shapes),
-            call_overhead_tokens=section["call_overhead_tokens"],
-        )
-        if NvarcBatchShape(2, NVARC_MAX_TOKENS) not in nvarc_scheduling.shapes:
-            raise ValueError(f"nvarc_scheduling must cover {NVARC_MAX_TOKENS} tokens")
-        if padding.nvarc_bucket_boundaries is not None:
-            raise ValueError("nvarc_scheduling and padding.nvarc_bucket_boundaries are mutually exclusive")
+    section = _object(payload["padding"], name="padding")
+    _fields(section, {"flux_bucket_boundaries"}, name="padding")
+    padding = SingleGpuPaddingConfig(flux_bucket_boundaries=_bucket_boundaries(
+        section["flux_bucket_boundaries"], name="padding.flux_bucket_boundaries",
+    ))
 
     flux_packing = None
     if payload.get("flux_packing") is not None:
@@ -388,7 +346,6 @@ def load_single_gpu_training_config(
         scheduler=scheduler,
         benchmark=benchmark,
         padding=padding,
-        nvarc_scheduling=nvarc_scheduling,
         flux_scheduling=flux_scheduling,
         flux_packing=flux_packing,
     )
