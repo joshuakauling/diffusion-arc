@@ -109,7 +109,7 @@ class _StepRecorder:
         self.rows: list[dict] = []
         self.pending_targets: deque[tuple[int, bool]] = deque()
         self.sources: list[dict] = []
-        self.padded_tokens = 0
+        self.nvarc_tokens = 0
         self.nvarc_batches: list[dict] = []
         self.flux_batches: tuple[FluxTargetBatch, ...] | None = None
 
@@ -135,13 +135,12 @@ class _StepRecorder:
                 (length, index == len(source.prefix_ends) - 1)
                 for index, length in enumerate(source.prefix_ends)
             )
-        for batch in metrics.nvarc_batches:
-            self.padded_tokens += batch.padded_length * len(batch.source_indices)
-            self.nvarc_batches.append({
-                "batch_size": len(batch.source_indices),
-                "padded_length": batch.padded_length,
-                "source_indices": [source_offset + index for index in batch.source_indices],
-            })
+        self.nvarc_tokens += sum(metrics.source_lengths)
+        self.nvarc_batches.append({
+            "source_lengths": list(metrics.source_lengths),
+            "total_tokens": sum(metrics.source_lengths),
+            "source_indices": list(range(source_offset, len(self.sources))),
+        })
 
     def start(self):
         torch.cuda.synchronize(self.device)
@@ -182,7 +181,7 @@ class _StepRecorder:
             "completed_sources": sum(last for _, last in consumed),
             "prepared_sources": self.sources,
             "nvarc_unpadded_tokens": sum(source["tokens"] for source in self.sources),
-            "nvarc_padded_tokens": self.padded_tokens,
+            "nvarc_processed_tokens": self.nvarc_tokens,
             "nvarc_calls": len(self.nvarc_batches),
             "nvarc_batches": self.nvarc_batches,
             "target_prefix_tokens": [length for length, _ in consumed],
@@ -192,7 +191,7 @@ class _StepRecorder:
         })
         if target_count != self.config.loop.optimizer_batch_size:
             raise RuntimeError("Benchmark exhausted its data with an incomplete optimizer batch")
-        self.sources, self.padded_tokens = [], 0
+        self.sources, self.nvarc_tokens = [], 0
         self.nvarc_batches = []
         self.flux_batches = None
         torch.cuda.reset_peak_memory_stats(self.device)
@@ -261,7 +260,6 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             flux_compute_dtype=models.flux_compute_dtype,
             **asdict(config.loop),
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
-            nvarc_scheduling=config.nvarc_scheduling,
             flux_scheduling=config.flux_scheduling,
             on_preparation=recorder.preparation,
             on_flux_schedule=recorder.flux_schedule,

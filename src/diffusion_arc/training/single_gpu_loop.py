@@ -24,7 +24,6 @@ from .flux_input import FluxInput, PreparationMetrics, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
 from .flux_schedule import FluxSchedulingPolicy, FluxTargetBatch, schedule_flux_targets
-from .nvarc_schedule import NvarcSchedulingPolicy
 
 
 @dataclass(frozen=True)
@@ -215,7 +214,6 @@ def run_single_gpu_training(
     nvarc_source_batch_size: int = 1,
     vae_microbatch_size: int | None = None,
     flux_bucket_boundaries: tuple[int, ...] | None = None,
-    nvarc_scheduling: NvarcSchedulingPolicy | None = None,
     flux_scheduling: FluxSchedulingPolicy | None = None,
     on_preparation: Callable[[PreparationMetrics], None] | None = None,
     on_flux_schedule: Callable[[tuple[FluxTargetBatch, ...]], None] | None = None,
@@ -296,7 +294,6 @@ def run_single_gpu_training(
                 vae_encoder=vae_encoder,
                 min_context_pairs_before_target=min_context_pairs_before_target,
                 vae_microbatch_size=vae_microbatch_size,
-                nvarc_scheduling=nvarc_scheduling,
                 on_preparation=on_preparation,
             )
         )

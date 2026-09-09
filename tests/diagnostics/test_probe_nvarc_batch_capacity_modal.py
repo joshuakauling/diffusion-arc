@@ -18,6 +18,11 @@ class _Image:
     def __init__(self):
         self.directories = []
 
+    def __getattr__(self, name):
+        if name in {"entrypoint", "apt_install", "pip_install", "env", "run_commands"}:
+            return lambda *args, **kwargs: self
+        raise AttributeError(name)
+
     def pip_install_from_pyproject(self, *_args):
         return self
 
@@ -53,7 +58,7 @@ class CapacityModalTests(unittest.TestCase):
         fake_modal = SimpleNamespace(
             App=_App, is_local=lambda: True, __version__="test-modal",
             Volume=SimpleNamespace(from_name=Mock(return_value=self.volume)),
-            Image=SimpleNamespace(debian_slim=Mock(return_value=self.image)),
+            Image=SimpleNamespace(from_registry=Mock(return_value=self.image)),
         )
         spec = importlib.util.spec_from_file_location(
             "_capacity_modal_test_module",
@@ -73,7 +78,7 @@ class CapacityModalTests(unittest.TestCase):
         volume = root / "volume"
         for name in ("nvarc-qwen3-4b-grids15-sft139", "flux2-klein-base-4b"):
             (volume / name).mkdir(parents=True)
-        relative = "configs/training/benchmarks/single_gpu_b0.json"
+        relative = "configs/training/benchmarks/single_gpu_b3_nvarc.json"
         config_path = repository / relative
         config_path.parent.mkdir(parents=True)
         config_path.write_text((probe.REPOSITORY_ROOT / relative).read_text())
@@ -92,15 +97,15 @@ class CapacityModalTests(unittest.TestCase):
 
     def test_local_entrypoint_forwards_options_and_local_provenance(self):
         metadata = {"git_commit": "local-head", "git_status": " M work", "source_sha256": {}}
-        config_path = probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b0.json"
+        config_path = probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b3_nvarc.json"
         # Local checkpoint files are unnecessary: they live on the remote Volume.
         with patch.object(probe, "_source_metadata", return_value=metadata):
             self.launcher.main(
-                "configs/training/benchmarks/single_gpu_b0.json",
+                "configs/training/benchmarks/single_gpu_b3_nvarc.json",
                 sequence_length=8400, max_batch_size=7, repetitions=2,
             )
         call = self.launcher.probe_nvarc_batch_capacity.remote.call_args.args
-        self.assertEqual(call[:4], ("configs/training/benchmarks/single_gpu_b0.json", 8400, 7, 2))
+        self.assertEqual(call[:4], ("configs/training/benchmarks/single_gpu_b3_nvarc.json", 8400, 7, 2))
         self.assertEqual(call[4]["git_commit"], "local-head")
         self.assertEqual(call[4]["git_status"], " M work")
         self.assertEqual(call[4]["modal_version"], "test-modal")
@@ -110,7 +115,7 @@ class CapacityModalTests(unittest.TestCase):
     def test_local_preflight_needs_neither_checkpoint_files_nor_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            relative = "configs/training/benchmarks/single_gpu_b0.json"
+            relative = "configs/training/benchmarks/single_gpu_b3_nvarc.json"
             config_path = root / relative
             config_path.parent.mkdir(parents=True)
             config_path.write_text((probe.REPOSITORY_ROOT / relative).read_text())
@@ -128,7 +133,7 @@ class CapacityModalTests(unittest.TestCase):
             {"sequence_length": 8192}, {"max_batch_size": 0}, {"repetitions": -1},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
-                self.launcher.main("configs/training/benchmarks/single_gpu_b0.json", **options)
+                self.launcher.main("configs/training/benchmarks/single_gpu_b3_nvarc.json", **options)
         with self.assertRaises(ValueError):
             self.launcher.main("../outside.json")
         with self.assertRaises(FileNotFoundError):

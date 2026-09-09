@@ -115,7 +115,7 @@ includes resident FP32 gradients, AdamW moments, and the preparation reserve.
 | 2749, 2990, 3325, 3714, 4210, 4837 | 2 |
 | 6100, 8400 | 1 |
 
-The [B2 benchmark config](../../configs/training/benchmarks/single_gpu_b2.json)
+The [B2 benchmark config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b2.json)
 uses these **24 explicit shapes**, with the probe's median whole-call
 forward/backward milliseconds stored as `forward_backward_ms` for each shape:
 

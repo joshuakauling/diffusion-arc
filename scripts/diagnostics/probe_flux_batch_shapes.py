@@ -95,7 +95,7 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
         or training.loop.vae_microbatch_size != 48
         or training.loop.min_context_pairs_before_target != 2
     ):
-        raise ValueError("FLUX shape probe requires the 16-source, 48-target B2 preparation layout")
+        raise ValueError("FLUX shape probe requires the 16-source, 48-target preparation layout")
     if (
         training.models.nvarc_dtype != "bfloat16" or training.models.vae_dtype != "float32"
         or training.models.flux_parameter_dtype != "float32"

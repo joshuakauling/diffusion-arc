@@ -9,45 +9,32 @@ milestones, evaluation, and non-goals.
 
 ## Overall workflow
 
-![Diffusion-ARC training workflow from source selection through one optimizer update](diagrams/training-workflow.svg)
-
 **Encode each source once. Train its eligible targets from the shared state.**
 
-NVARC and FLUX have different batching needs, so they are scheduled separately.
-NVARC encodes each source sequence once. Every eligible target becomes a
-`FluxInput` that references the shared sequence state and selects only the
-prefix it needs. The buffer lets FLUX form optimizer batches and
-length-compatible microbatches without running NVARC again.
+The ordered CPU loader can prefetch tokenized samples in worker processes. The
+training loop takes a fixed window of consecutive sources (16 in the current
+benchmark), selects eligible targets, and trims each source before its final
+target output. NVARC encodes the entire window in one unpadded FA3 Varlen call.
+Sources have separate causal attention boundaries and reset position IDs.
 
-The optimizer-batch planner chooses which targets contribute to the next
-update. Its selection policy is part of the experiment because it can change
-the training schedule. The microbatch planner only decides how those fixed
-targets are executed; it does not change optimizer-batch membership.
+The VAE then encodes the targets in configured chunks (48 in the benchmark).
+Each `FluxInput` selects an exact prefix from its shared NVARC sequence state.
+Prepared targets enter a FIFO buffer; the next 48 define one optimizer update.
+The FLUX scheduler groups only those selected targets into physical microbatches
+using measured shape costs. It may reorder execution within that fixed batch,
+while noise/timesteps remain assigned in logical order and losses are weighted
+by target count.
 
-The diagram shows the target scheduler. The current FIFO baseline is summarized
-below. Frozen VAE target encoding is omitted from the diagram for clarity.
+There is no NVARC shape catalog, length padding, scheduling or cross-window
+lookahead. The logical source window still bounds preparation and retained
+hidden states. FLUX batching remains independent and retains its own padding
+and scheduling policy.
 
-## Current baseline and target scheduler
-
-| Area | Current single-GPU baseline | Target scheduler shown above |
-| --- | --- | --- |
-| Source scheduling | Read an ordered `DataLoader` stream in fixed consecutive source batches. | Keep a bounded lookahead of source sequences. |
-| NVARC batching | Run up to the configured number of consecutive sources per padded NVARC forward. | Group similar-length sources into one NVARC batch. |
-| Target buffering | Append prepared targets to a private FIFO queue. | Keep a bounded pool of ready targets from several encoded sources. |
-| Optimizer batch | Take the next targets in FIFO order. | Select ready targets with a configured deterministic policy. |
-| FLUX microbatches | Split the optimizer batch into contiguous chunks. | Group targets with similar prefix lengths inside the fixed optimizer batch. |
-
-Both paths accumulate gradients across all physical microbatches and perform
-exactly one AdamW update for each optimizer batch.
-
-The current entrypoint is
-[`scripts/train_single_gpu.py`](../../scripts/train_single_gpu.py). Its
-`DataLoader` uses `batch_size=None`, so the runner receives one
-`ArcTokenizedTrainingSample` at a time. The training loop groups consecutive
-items according to `nvarc_source_batch_size`; this does not invoke
-`TrainingCollator` or construct `PackedTrainingBatch` objects. Eligible target
-images from that group are encoded in chunks bounded by
-`vae_microbatch_size`.
+The entrypoint is [`scripts/train_single_gpu.py`](../../scripts/train_single_gpu.py).
+Its `DataLoader` uses `batch_size=None`; workers perform loading/tokenization
+in advance, while the consumer groups consecutive items into each source window.
+The auxiliary `TrainingCollator` remains available to diagnostics but is not
+part of this entrypoint.
 
 ## Model boundaries
 
@@ -67,11 +54,9 @@ is reduced in FP32.
 | Object | Meaning |
 | --- | --- |
 | `ArcTokenizedTrainingSample` | One complete tokenized ARC source sequence with its recorded target positions and grids. |
-| `NvarcInputBuffer` | Source sequences waiting for length-aware NVARC selection. |
-| `NvarcBatch` | The source sequences selected for one frozen NVARC forward. |
 | `NvarcSequenceState` | One source's NVARC hidden states, shared by all of its eligible target inputs. |
 | `FluxInput` | One target, its exact prefix boundary, its clean latent, and a reference to the shared sequence state. |
-| `FluxInputBuffer` | Prepared target inputs waiting for optimizer-batch selection. |
+| Private FIFO queue | Prepared target inputs waiting for optimizer-batch selection. |
 | `OptimizerBatch` | All targets that contribute to one parameter update. |
 | `FluxMicrobatch` | A physical subset of the optimizer batch processed in one FLUX forward and backward pass. |
 
@@ -95,7 +80,7 @@ loss normalization are documented in the
 | [`flux_input.py`](../../src/diffusion_arc/training/flux_input.py) | Create target-level inputs from frozen NVARC and VAE outputs. |
 | [`flux_microbatch.py`](../../src/diffusion_arc/training/flux_microbatch.py) | Copy exact prefixes and build physical FLUX microbatches. |
 | [`flux_loss.py`](../../src/diffusion_arc/training/flux_loss.py) | Sample flow states, run FLUX, and compute the velocity loss. |
-| [`single_gpu_loop.py`](../../src/diffusion_arc/training/single_gpu_loop.py) | Run the FIFO baseline, accumulate gradients, and update FLUX. |
+| [`single_gpu_loop.py`](../../src/diffusion_arc/training/single_gpu_loop.py) | Keep FIFO membership, execute scheduled FLUX batches, and update FLUX. |
 | [`flow_probes.py`](../../src/diffusion_arc/training/flow_probes.py) | Measure comparable fixed-noise flow losses. |
 | [`__init__.py`](../../src/diffusion_arc/training/__init__.py) | Define the public training-package exports. |
 
@@ -127,11 +112,9 @@ remain explicit smoke or preflight tests.
 ## Current boundaries
 
 - Training is single-process and single-GPU; DDP and FSDP2 are not implemented.
-- The length-aware two-buffer scheduler shown above is not implemented; fixed
-  consecutive source batching remains part of the FIFO baseline.
-- Training configuration schema v2 adds explicit NVARC source and VAE physical
-  batch sizes. Schema v1 remains supported as the original single-source
-  compatibility mode.
-- Durable telemetry, checkpoint writing, and resume support remain future work.
-- The packed `TrainingCollator` path is not used by the current training
-  entrypoint.
+- Schema v7 is the current configuration contract. Historical schemas and
+  NVARC scheduler/bucket options are rejected rather than silently translated.
+- `single_gpu_b3_nvarc.json` and its profiler companion isolate the NVARC
+  change with B2's FLUX policy. They are not measured final B3 configurations.
+- The current Modal image requires Hopper/SM90 and BF16 for NVARC.
+- End-to-end B3 numerical and performance validation remains outstanding.

@@ -27,9 +27,11 @@ def _ignore_data(path: Path) -> bool:
 
 app = modal.App("diffusion-arc-benchmark")
 model_volume = modal.Volume.from_name("diffusion-arc-models", create_if_missing=False)
+sys.path.insert(0, str(LOCAL_REPOSITORY_ROOT))
+from scripts.cloud._training_image import training_image, FA3_REVISION
+
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_pyproject(str(LOCAL_REPOSITORY_ROOT / "pyproject.toml"))
+    training_image(LOCAL_REPOSITORY_ROOT)
     .workdir(REMOTE_REPOSITORY_ROOT)
 )
 for directory in ("src", "scripts", "configs"):
@@ -74,7 +76,7 @@ def benchmark_single_gpu(config: str, metadata: dict) -> str:
     try:
         run_repetitions(
             remote_config, destination,
-            metadata={**metadata, "modal_resources": RESOURCES},
+            metadata={**metadata, "modal_resources": RESOURCES, "nvarc_fa3_revision": FA3_REVISION},
             on_repetition_end=model_volume.commit,
         )
     finally:

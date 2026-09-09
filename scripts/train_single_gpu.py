@@ -137,7 +137,6 @@ def train_from_config(config_path: str | Path) -> None:
             nvarc_source_batch_size=config.loop.nvarc_source_batch_size,
             vae_microbatch_size=config.loop.vae_microbatch_size,
             flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
-            nvarc_scheduling=config.nvarc_scheduling,
             flux_scheduling=config.flux_scheduling,
             generator=flow_generator,
             on_optimizer_step=on_optimizer_step,

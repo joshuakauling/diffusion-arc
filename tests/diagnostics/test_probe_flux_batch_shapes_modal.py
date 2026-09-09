@@ -14,7 +14,7 @@ from tests.diagnostics.test_probe_nvarc_batch_capacity_modal import _App, _Image
 
 
 CONFIG = "configs/diagnostics/flux_batch_shapes.json"
-TRAINING_CONFIG = "configs/training/benchmarks/single_gpu_b2_preparation.json"
+TRAINING_CONFIG = "configs/training/benchmarks/single_gpu_b3_nvarc.json"
 
 
 class _ProbeImage(_Image):
@@ -34,7 +34,7 @@ class FluxProbeModalTests(unittest.TestCase):
         fake_modal = SimpleNamespace(
             App=_App, is_local=lambda: True, __version__="test-modal",
             Volume=SimpleNamespace(from_name=Mock(return_value=self.volume)),
-            Image=SimpleNamespace(debian_slim=Mock(return_value=self.image)),
+            Image=SimpleNamespace(from_registry=Mock(return_value=self.image)),
         )
         spec = importlib.util.spec_from_file_location(
             "_flux_shape_modal_test", probe.REPOSITORY_ROOT / "scripts/cloud/probe_flux_batch_shapes_modal.py",

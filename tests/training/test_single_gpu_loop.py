@@ -23,8 +23,6 @@ from diffusion_arc.model import (
     TARGET_LATENT_TOKEN_COUNT,
 )
 from diffusion_arc.training import run_single_gpu_training
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
-from diffusion_arc.training.nvarc_schedule import NvarcBatchShape, NvarcSchedulingPolicy
 from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxSchedulingPolicy
 from diffusion_arc.training.flux_loss import compute_flux_microbatch_loss
 from diffusion_arc.model.flow_matching import sample_flow_matching_batch
@@ -215,7 +213,6 @@ class SingleGpuTrainingTests(unittest.TestCase):
                     flux_compute_dtype=torch.bfloat16, max_optimizer_steps=max_steps,
                     optimizer_batch_size=48, flux_microbatch_size=None if scheduling else 1,
                     min_context_pairs_before_target=2, nvarc_source_batch_size=16, vae_microbatch_size=48,
-                    nvarc_scheduling=NvarcSchedulingPolicy((NvarcBatchShape(2, 12), NvarcBatchShape(4, 12)), 1),
                     flux_scheduling=scheduling, on_flux_schedule=plans.append, generator=generator,
                     on_optimizer_step=step,
                 )
@@ -243,11 +240,10 @@ class SingleGpuTrainingTests(unittest.TestCase):
         self.assertEqual(len(stopped[0]), 1)
         self.assertEqual(sorted(stopped[2]), list(range(1, 49)))
 
-    def test_b2_odd_windows_preserve_fifo_membership_and_partial_tail_loss(self) -> None:
+    def test_packed_odd_windows_preserve_fifo_membership_and_partial_tail_loss(self) -> None:
         samples = tuple(_sample(count) for count in (2, 3, 1, 2, 2))
-        policy = NvarcSchedulingPolicy((NvarcBatchShape(2, 4), NvarcBatchShape(2, 8)), 0)
 
-        def run(window, scheduling):
+        def run(window):
             model, recording_loss, updates, reports = ScalarTransformer(), RecordingLoss(), [], []
             with (
                 patch("diffusion_arc.training.flux_input._render_valid_grid_canvas",
@@ -261,21 +257,20 @@ class SingleGpuTrainingTests(unittest.TestCase):
                     flux_compute_dtype=torch.bfloat16, max_optimizer_steps=3,
                     optimizer_batch_size=3, min_context_pairs_before_target=2,
                     nvarc_source_batch_size=window, vae_microbatch_size=48,
-                    nvarc_scheduling=scheduling, on_preparation=reports.append,
+                    on_preparation=reports.append,
                     on_optimizer_step=lambda loss, count, calls: updates.append((float(loss), count, calls)),
                 )
             return recording_loss.target_values, updates, model.weight.detach(), reports
 
-        reference, scheduled = run(1, None), run(4, policy)
+        reference, scheduled = run(1), run(4)
         self.assertEqual(scheduled[:2], reference[:2])
         self.assertEqual([row[1:] for row in scheduled[1]], [(3, 3), (2, 2)])
         torch.testing.assert_close(scheduled[2], reference[2])
         torch.testing.assert_close(scheduled[2], torch.tensor(0.35))
         self.assertEqual([len(report.sources) for report in scheduled[3]], [3, 1])
-        self.assertEqual([sum(len(batch.source_indices) == 1 for batch in report.nvarc_batches)
-                          for report in scheduled[3]], [1, 1])
+        self.assertEqual([len(report.source_lengths) for report in scheduled[3]], [3, 1])
 
-    def test_b1_and_b2_preserve_two_optimizer_batches_and_per_target_loss_weights(self) -> None:
+    def test_packed_windows_preserve_two_optimizer_batches_and_per_target_loss_weights(self) -> None:
         samples = []
         for index in range(32):
             sample = _sample(4)
@@ -288,14 +283,14 @@ class SingleGpuTrainingTests(unittest.TestCase):
                 target_grids=tuple(((index // 10, index % 10, target),) for target in range(4)),
             ))
 
-        def run(source_batch, vae_batch, nvarc_bounds, flux_bounds, scheduling=None):
+        def run(source_batch, vae_batch, flux_bounds):
             events, targets, prefixes, padded_lengths, weights, steps = [], [], [], [], [], []
             random_draws, hidden_values, preparations = [], [], []
 
             class Nvarc(FakeNvarc):
-                def forward(self, **kwargs):
-                    events.append(("nvarc", kwargs["input_ids"].shape[0]))
-                    return super().forward(**kwargs)
+                def record_attention(self, **kwargs):
+                    events.append(("nvarc", len(kwargs["cu_seq_lens_q"]) - 1))
+                    super().record_attention(**kwargs)
 
             class Vae(nn.Module):
                 def forward(self, images):
@@ -333,7 +328,7 @@ class SingleGpuTrainingTests(unittest.TestCase):
             ):
                 run_single_gpu_training(
                     samples,
-                    nvarc_runner=NvarcBatchRunner(Nvarc(), length_buckets=SequenceLengthBuckets(nvarc_bounds)),
+                    nvarc_runner=NvarcBatchRunner(Nvarc()),
                     vae_encoder=Vae(), transformer=model,
                     optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
                     flux_compute_dtype=torch.bfloat16, max_optimizer_steps=2,
@@ -341,28 +336,19 @@ class SingleGpuTrainingTests(unittest.TestCase):
                     min_context_pairs_before_target=2,
                     nvarc_source_batch_size=source_batch, vae_microbatch_size=vae_batch,
                     flux_bucket_boundaries=flux_bounds, on_optimizer_step=on_step,
-                    nvarc_scheduling=scheduling, on_preparation=preparations.append,
+                    on_preparation=preparations.append,
                     generator=torch.Generator().manual_seed(17),
                 )
             return (events, targets, prefixes, padded_lengths, weights, steps, model.weight.detach(),
                     random_draws, hidden_values, preparations)
 
-        b0 = run(1, 1, None, None)
-        b1 = run(16, 48, (16,), (8, 16))
-        b2 = run(16, 48, None, (8, 16), NvarcSchedulingPolicy(
-            (NvarcBatchShape(2, 8), NvarcBatchShape(2, 10), NvarcBatchShape(4, 10)), 1,
-        ))
-        self.assertEqual(b2[1:6], b1[1:6])
-        torch.testing.assert_close(b2[6], b1[6])
-        self.assertEqual(b2[7:9], b1[7:9])
-        self.assertEqual(b2[7:9], b0[7:9])
-        self.assertEqual([source.key for report in b2[9] for source in report.sources],
+        b0 = run(1, 1, None)
+        b1 = run(16, 48, (8, 16))
+        self.assertEqual(b1[7:9], b0[7:9])
+        self.assertEqual([source.key for report in b1[9] for source in report.sources],
                          [str(sample.key) for sample in samples])
-        self.assertEqual([event for event in b2[0] if event[0] != "nvarc"],
-                         [event for event in b1[0] if event[0] != "nvarc"])
-        for report in b2[9]:
-            self.assertGreater(len(report.nvarc_batches), 1)
-            self.assertEqual(sorted(i for batch in report.nvarc_batches for i in batch.source_indices), list(range(16)))
+        for report in b1[9]:
+            self.assertEqual(len(report.source_lengths), 16)
         self.assertEqual(b1[1], list(range(1, 97)))
         self.assertEqual(b1[1:3], b0[1:3])
         self.assertEqual(b1[3], [8 if length <= 8 else 16 for length in b1[2]])

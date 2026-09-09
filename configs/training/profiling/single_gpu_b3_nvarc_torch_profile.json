@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "seed": 167,
   "device": "cuda:0",
   "models": {
@@ -26,33 +26,7 @@
     "vae_microbatch_size": 48
   },
   "padding": {
-    "nvarc_bucket_boundaries": null,
     "flux_bucket_boundaries": null
-  },
-  "nvarc_scheduling": {
-    "shapes": [
-      {"batch_size": 2, "max_tokens": 864},
-      {"batch_size": 2, "max_tokens": 3022},
-      {"batch_size": 2, "max_tokens": 4250},
-      {"batch_size": 2, "max_tokens": 6010},
-      {"batch_size": 2, "max_tokens": 6870},
-      {"batch_size": 2, "max_tokens": 8400},
-      {"batch_size": 4, "max_tokens": 1083},
-      {"batch_size": 4, "max_tokens": 1431},
-      {"batch_size": 4, "max_tokens": 1718},
-      {"batch_size": 4, "max_tokens": 2190},
-      {"batch_size": 4, "max_tokens": 2824},
-      {"batch_size": 4, "max_tokens": 3122},
-      {"batch_size": 4, "max_tokens": 3372},
-      {"batch_size": 4, "max_tokens": 3780},
-      {"batch_size": 4, "max_tokens": 4204},
-      {"batch_size": 4, "max_tokens": 4507},
-      {"batch_size": 4, "max_tokens": 4836},
-      {"batch_size": 4, "max_tokens": 5380},
-      {"batch_size": 8, "max_tokens": 2528},
-      {"batch_size": 8, "max_tokens": 2702}
-    ],
-    "call_overhead_tokens": 2560
   },
   "flux_scheduling": {
     "shapes": [

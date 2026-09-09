@@ -1,7 +1,8 @@
 # Performance Benchmarks
 
 This report compares the completed single-GPU training variants and explains
-their measured performance and remaining costs.
+their measured performance and remaining costs. B3 records the next implemented
+NVARC changes; its full-pipeline benchmark is pending.
 
 ## Benchmark variants
 
@@ -10,17 +11,16 @@ their measured performance and remaining costs.
 | B0 | Completed | 1 | 1 | 1 | 48 | Exact prefix length | FIFO |
 | B1 | Completed | 16 | 48 | 1 | 48 | Fixed bucket padding | FIFO |
 | B2 | Completed | 2, 4, 8 within 16-source windows | 48 | 1, 2, 4 | 48 | Scheduled bucket shapes | FIFO membership; reordered within each step |
+| B3 (NVARC component) | Implemented; benchmark pending | 16 packed sources | 48 | 1, 2, 4 (B2 policy) | 48 | Unpadded NVARC; FLUX bucket shapes | Same optimizer-batch membership |
 
 B0 establishes the baseline. B1 combines larger fixed preparation batches
 with reusable attention shapes. B2 reduces NVARC padding, schedules larger
 FLUX microbatches, and overlaps CPU data preparation with GPU work.
 
-The subsequent NVARC diagnostics compare
-[bucket shapes and alignment](nvarc-batch-shapes.md) and
-[packed attention backends](nvarc-packing.md). They select unpadded FA3 Varlen
-for the NVARC component of B3: one packed forward per 16-source window,
-with independent causal attention inside each source. This is a component
-measurement and implementation decision, not a completed B3 training benchmark.
+[B3](#b3-nvarc-packing-and-early-exit) replaces NVARC bucket scheduling with
+one unpadded FA3 forward and stops after the last required hidden-state layer.
+The [bucket and alignment](nvarc-batch-shapes.md) and
+[packed attention](nvarc-packing.md) diagnostics document the supporting evidence.
 
 ## Shared benchmark setup
 
@@ -42,7 +42,7 @@ verifies parent membership in the training split and records the selected data.
 
 ### Hardware and training
 
-All variants use one NVIDIA H200 with 139.80 GiB device memory, eight allocated
+The completed B0–B2 benchmarks use one NVIDIA H200 with 139.80 GiB device memory, eight allocated
 CPU cores, and 64 GiB host RAM. The software environment is PyTorch 2.13.0,
 CUDA 13.0, Transformers 4.56.1, Diffusers 0.39.0, and Accelerate 1.12.0.
 
@@ -95,13 +95,13 @@ remaining time inside that range: **total range = activity + gaps**. Activity
 includes padding work and is not a measure of useful FLOPs or SM utilization.
 
 Configs:
-[B0 profiler](../../configs/training/profiling/single_gpu_b0_torch_profile.json),
-[B1 profiler](../../configs/training/profiling/single_gpu_b1_torch_profile.json),
-and [B2 profiler](../../configs/training/profiling/single_gpu_b2_torch_profile.json).
+[B0 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b0_torch_profile.json),
+[B1 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b1_torch_profile.json),
+and [B2 profiler](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/profiling/single_gpu_b2_torch_profile.json).
 
 ### Comparison and reproducibility
 
-All variants keep the dataset, optimizer-batch membership, loss normalization,
+The completed B0–B2 benchmarks keep the dataset, optimizer-batch membership, loss normalization,
 precision, optimizer schedule, software, and hardware allocation fixed.
 Step records were checked for matching source order, target counts, real
 prefix lengths, learning rates, and data hashes. Pooled and per-repetition
@@ -115,7 +115,7 @@ reproducibility limitation.
 
 ## B0 — Exact-length FIFO baseline
 
-The [B0 config](../../configs/training/benchmarks/single_gpu_b0.json) processes
+The [B0 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b0.json) processes
 one NVARC source, one VAE image, and one FLUX target at a time. FLUX uses exact
 text-prefix lengths; the optimizer accumulates 48 targets in FIFO order.
 
@@ -174,7 +174,7 @@ calls in B0:
 - Padding is masked. FIFO order, the 48-target optimizer-batch membership,
   and loss weighting remain unchanged.
 
-The [B1 config](../../configs/training/benchmarks/single_gpu_b1.json) fixes these
+The [B1 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b1.json) fixes these
 batch sizes and boundaries. The [bucket policy](b1-bucket-policy.md) documents
 the seven NVARC and 19 FLUX boundaries, the input-length histogram, and their
 padding/setup-cost trade-off.
@@ -319,7 +319,7 @@ the same 48-target optimizer batches:
   preparation phase. The tokenizer accepts the full 9,330-token training
   prompt; the consumed NVARC prefix remains limited to 8,400 tokens.
 
-The [B2 config](../../configs/training/benchmarks/single_gpu_b2.json) combines
+The [B2 config](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/training/benchmarks/single_gpu_b2.json) combines
 the [NVARC scheduling and prefetch policy](b2-preparation-policy.md) with the
 [measured FLUX shape catalog](flux-batch-shapes.md). Reordering stays within
 each preparation window or optimizer batch; there are no cross-step bucket
@@ -421,3 +421,45 @@ DataLoader retrieval still makes **16 calls per step**, but their combined
 CPU range falls from **0.171 s to 0.009 s** with ordered background prefetch.
 The work moves to workers rather than disappearing. These CPU ranges do not
 measure GPU idle time or independently establish the end-to-end prefetch gain.
+
+## B3 — NVARC packing and early exit
+
+**Status: the NVARC changes are implemented; the complete B3 benchmark and
+profiler comparison are pending.** Two changes reduce frozen preparation work:
+
+- **FA3 Varlen without padding.** The 16 sources in a preparation window are
+  concatenated end to end and encoded in one call. Cumulative source boundaries
+  isolate causal attention, and position IDs restart for each source. This
+  removes NVARC length buckets, scheduling and padding, including alignment.
+- **Stop after block 27.** The encoder calls the original Qwen embeddings,
+  RoPE and first 27 decoder blocks directly, retaining only the outputs of
+  blocks 9, 18 and 27. Blocks 28–36, final normalization and the language-model
+  head are skipped. Bypassing the outer Hugging Face forward preserves block
+  27's original intermediate state instead of normalizing it as a final output.
+
+The [current integration config](../../configs/training/benchmarks/single_gpu_b3_nvarc.json)
+keeps B2's FLUX scheduling while the separate FLUX work is evaluated. VAE
+batch size 48, CPU prefetch, optimizer-batch membership and per-target loss
+weighting remain unchanged. The full NVARC checkpoint remains loaded; unused
+parameter tensors have not been removed from GPU memory.
+
+The relevant baseline is **B2's padded, scheduled NVARC path using PyTorch
+SDPA with cuDNN**. The [component comparison](nvarc-packing.md#comparison-with-the-previous-implementation)
+suggests **44.8–51.0% less isolated NVARC time** with unpadded FA3 across three
+16-source windows. This combines the backend change, removed padding and one
+forward instead of three to five. The old-path diagnostic used synthetic token
+contents and the FA3 diagnostic used real inputs at the same source lengths,
+so this is an indicative comparison, not a controlled full-pipeline B3 result.
+
+Alignment gave no consistent benefit. All of those component measurements
+executed 36 blocks and the language-model head, so they do not include the
+early exit. Skipping nine blocks removes **25% of decoder-block execution**,
+without establishing a 25% reduction in total NVARC or optimizer-step time.
+
+Local tiny-Qwen tests produce bitwise-equal selected states against a complete
+forward using the same reference attention and verify that later blocks,
+final normalization and the output head are not called. These CPU tests do
+not execute the FA3 CUDA kernel. Combined GPU latency, peak memory and
+full-pipeline loss/gradient agreement remain to be measured. See the
+[encoder documentation](../training/nvarc-batch-runner.md) for implementation
+and validation details.

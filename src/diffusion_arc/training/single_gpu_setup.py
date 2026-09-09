@@ -30,7 +30,7 @@ from diffusion_arc.model.contracts import (
 from diffusion_arc.model.flux_vae import FluxVaeDecoder, FluxVaeEncoder
 from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from diffusion_arc.model.nvarc_attention import NVARC_ATTENTION_IMPLEMENTATION, register_nvarc_attention
 
 from .dataset import ArcTrainingDataset
 from .single_gpu_config import SingleGpuTrainingConfig
@@ -74,6 +74,8 @@ def prepare_single_gpu_device(config: SingleGpuTrainingConfig) -> torch.device:
         and not torch.cuda.is_bf16_supported()
     ):
         raise RuntimeError("the configured CUDA device does not support bfloat16")
+    if torch.cuda.get_device_capability(device) != (9, 0):
+        raise RuntimeError("the NVARC FA3 build requires a Hopper (SM90) CUDA device")
     return device
 
 
@@ -131,6 +133,7 @@ def load_single_gpu_models(
         local_files_only=True,
         trust_remote_code=False,
     )
+    register_nvarc_attention()
     nvarc_model = AutoModelForCausalLM.from_pretrained(
         config.models.nvarc_checkpoint,
         local_files_only=True,
@@ -139,7 +142,7 @@ def load_single_gpu_models(
         low_cpu_mem_usage=True,
         torch_dtype=nvarc_dtype,
         device_map=device_map,
-        attn_implementation="sdpa",
+        attn_implementation=NVARC_ATTENTION_IMPLEMENTATION,
     )
     _validate_nvarc_checkpoint(
         nvarc_model,
@@ -148,10 +151,7 @@ def load_single_gpu_models(
         expected_dtype=nvarc_dtype,
     )
     tokenizer.model_max_length = NVARC_TOKENIZER_MAX_TOKENS
-    nvarc_runner = NvarcBatchRunner(
-        nvarc_model,
-        length_buckets=SequenceLengthBuckets(config.padding.nvarc_bucket_boundaries),
-    )
+    nvarc_runner = NvarcBatchRunner(nvarc_model)
 
     vae = AutoencoderKLFlux2.from_pretrained(
         config.models.flux_checkpoint,
@@ -300,10 +300,16 @@ def _validate_nvarc_checkpoint(
     expected_device: torch.device,
     expected_dtype: torch.dtype,
 ) -> None:
+    if expected_dtype != torch.bfloat16:
+        raise RuntimeError("the NVARC FA3 build requires bfloat16")
     config = getattr(model, "config", None)
     expected_config = {
         "vocab_size": NVARC_VOCAB_SIZE,
         "hidden_size": NVARC_HIDDEN_SIZE,
+        "head_dim": 128,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "attention_dropout": 0.0,
     }
     for field, expected in expected_config.items():
         actual = getattr(config, field, None)
@@ -312,9 +318,9 @@ def _validate_nvarc_checkpoint(
                 f"NVARC config {field} must be {expected}, received {actual!r}"
             )
     attention_backend = getattr(config, "_attn_implementation", None)
-    if attention_backend != "sdpa":
+    if attention_backend != NVARC_ATTENTION_IMPLEMENTATION:
         raise RuntimeError(
-            "NVARC attention implementation must resolve to 'sdpa', "
+            "NVARC attention implementation must resolve to 'nvarc_fa3', "
             f"received {attention_backend!r}"
         )
 

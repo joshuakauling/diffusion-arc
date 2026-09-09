@@ -21,9 +21,11 @@ RESOURCES = {"gpu": "H200", "cpu": 8.0, "memory": 64 * 1024, "timeout": 30 * 60}
 
 app = modal.App("diffusion-arc-nvarc-capacity")
 model_volume = modal.Volume.from_name("diffusion-arc-models", create_if_missing=False)
+sys.path.insert(0, str(LOCAL_REPOSITORY_ROOT))
+from scripts.cloud._training_image import training_image, FA3_REVISION
+
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_pyproject(str(LOCAL_REPOSITORY_ROOT / "pyproject.toml"))
+    training_image(LOCAL_REPOSITORY_ROOT)
     .workdir(REMOTE_REPOSITORY_ROOT)
 )
 for directory in ("src", "scripts", "configs"):
@@ -80,7 +82,7 @@ def probe_nvarc_batch_capacity(
     )
     try:
         summary = run_search(
-            args, metadata={**metadata, "modal_resources": RESOURCES},
+            args, metadata={**metadata, "modal_resources": RESOURCES, "nvarc_fa3_revision": FA3_REVISION},
             on_candidate_end=model_volume.commit,
         )
         if summary["status"] != "complete":

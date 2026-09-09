@@ -2,242 +2,213 @@
 
 from __future__ import annotations
 
-import inspect
 import types
+import weakref
 import unittest
 
 import torch
 from torch import Tensor, nn
 
 from diffusion_arc.model import (
-    NVARC_CONTEXT_WIDTH,
     NVARC_HIDDEN_SIZE,
     NVARC_HIDDEN_STATE_INDICES,
-    NVARC_PAD_TOKEN_ID,
     NvarcBatchOutput,
     NvarcBatchRunner,
 )
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
+from unittest.mock import patch
+from contextlib import ExitStack
+from diffusion_arc.model.nvarc_attention import register_nvarc_attention, NVARC_ATTENTION_IMPLEMENTATION
+
+
+class FakeEmbedding(nn.Embedding):
+    def __init__(self, owner):
+        super().__init__(16, 1)
+        self.owner = weakref.ref(owner)
+
+    def forward(self, input_ids):
+        model = self.owner()
+        model.forward_calls += 1
+        model.seen_training_modes.append(model.training)
+        model.seen_grad_modes.append(torch.is_grad_enabled())
+        model.last_input_ids = input_ids.detach().cpu().clone()
+        return input_ids.float().unsqueeze(-1).expand(-1, -1, NVARC_HIDDEN_SIZE)
+
+
+class FakeBlock(nn.Module):
+    def __init__(self, owner, index):
+        super().__init__()
+        self.owner = weakref.ref(owner)
+        self.index = index
+
+    def forward(self, hidden_states, **kwargs):
+        if self.index == 1:
+            self.owner().record_attention(**kwargs)
+        return hidden_states + 1
+
+
+class FakeRotary(nn.Module):
+    def forward(self, hidden_states, position_ids):
+        return None, None
 
 
 class FakeNvarc(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.input_embeddings = nn.Embedding(16, 1)
+        self.config = types.SimpleNamespace(_attn_implementation=NVARC_ATTENTION_IMPLEMENTATION)
+        self.embed_tokens = FakeEmbedding(self)
+        self.rotary_emb = FakeRotary()
+        self.layers = nn.ModuleList(FakeBlock(self, index) for index in range(1, 37))
         self.forward_calls = 0
         self.seen_training_modes: list[bool] = []
         self.seen_grad_modes: list[bool] = []
         self.last_input_ids: Tensor | None = None
         self.last_attention_mask: Tensor | None = None
-        self.last_output_hidden_states: bool | None = None
         self.last_use_cache: bool | None = None
-        self.last_return_dict: bool | None = None
+
+    @property
+    def base_model(self):
+        return self
 
     def get_input_embeddings(self) -> nn.Embedding:
-        return self.input_embeddings
+        return self.embed_tokens
 
-    def forward(
-        self,
-        *,
-        input_ids: Tensor,
-        attention_mask: Tensor,
-        output_hidden_states: bool,
-        use_cache: bool,
-        return_dict: bool,
-    ) -> types.SimpleNamespace:
-        self.forward_calls += 1
-        self.seen_training_modes.append(self.training)
-        self.seen_grad_modes.append(torch.is_grad_enabled())
-        self.last_input_ids = input_ids.detach().cpu().clone()
-        self.last_attention_mask = attention_mask.detach().cpu().clone()
-        self.last_output_hidden_states = output_hidden_states
-        self.last_use_cache = use_cache
-        self.last_return_dict = return_dict
+    def record_attention(self, **kwargs):
+        self.last_attention_mask = kwargs["attention_mask"]
+        self.last_use_cache = kwargs["use_cache"]
+        self.metadata = kwargs
 
-        batch_size, sequence_length = input_ids.shape
-        token_values = input_ids.to(torch.float32).unsqueeze(-1)
-        hidden_states = tuple(
-            (token_values + float(index)).expand(
-                batch_size,
-                sequence_length,
-                NVARC_HIDDEN_SIZE,
-            )
-            for index in range(max(NVARC_HIDDEN_STATE_INDICES) + 1)
+    def forward(self, **kwargs):
+        raise AssertionError("the encoder must call only the required decoder blocks")
+
+
+def reference_varlen(q, k, v, *, cu_seqlens_q, cu_seqlens_k,
+                     max_seqlen_q, max_seqlen_k, softmax_scale, causal):
+    """CPU reference for the kernel interface, with independent causal sources."""
+    assert cu_seqlens_q.dtype == torch.int32
+    torch.testing.assert_close(cu_seqlens_q, cu_seqlens_k)
+    outputs = []
+    offsets = cu_seqlens_q.tolist()
+    assert max_seqlen_q == max_seqlen_k == max(b - a for a, b in zip(offsets, offsets[1:]))
+    for start, end in zip(offsets, offsets[1:]):
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q[start:end].transpose(0, 1), k[start:end].transpose(0, 1),
+            v[start:end].transpose(0, 1), is_causal=causal,
+            scale=softmax_scale, enable_gqa=True,
         )
-        return types.SimpleNamespace(hidden_states=hidden_states)
-
-
-class MissingInputEmbeddingsNvarc(nn.Module):
-    pass
+        outputs.append(output.transpose(0, 1))
+    return torch.cat(outputs)
 
 
 class NvarcBatchRunnerTests(unittest.TestCase):
-    def test_bucket_padding_keeps_masks_and_compact_source_outputs(self) -> None:
+    def test_packed_positions_boundaries_layers_and_compact_frozen_outputs(self):
         model = FakeNvarc()
-        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8, 16)))
+        runner = NvarcBatchRunner(model)
+        runner.train(True)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
-        offsets = torch.tensor([0, 2, 6])
-        result = runner(ids, offsets)
-        self.assertEqual(tuple(model.last_input_ids.shape), (2, 8))
-        torch.testing.assert_close(model.last_attention_mask, torch.tensor([
-            [True, True, False, False, False, False, False, False],
-            [True, True, True, True, False, False, False, False],
-        ]))
-        self.assertTrue(torch.all(model.last_input_ids[~model.last_attention_mask] == NVARC_PAD_TOKEN_ID))
-        reference = NvarcBatchRunner(FakeNvarc())(ids, offsets)
-        for actual, expected in zip(result.sequence_hidden_states, reference.sequence_hidden_states):
-            torch.testing.assert_close(actual, expected)
-            self.assertEqual(actual.untyped_storage().nbytes(), actual.numel() * actual.element_size())
-            self.assertFalse(actual.requires_grad)
-        self.assertNotEqual(result.sequence_hidden_states[0].data_ptr(),
-                            result.sequence_hidden_states[1].data_ptr())
+        output = runner(ids, torch.tensor([0, 2, 6]))
+        self.assertEqual(model.last_input_ids.tolist(), [[1, 2, 3, 4, 5, 6]])
+        self.assertIsNone(model.last_attention_mask)
+        self.assertEqual(model.metadata["position_ids"].tolist(), [[0, 1, 0, 1, 2, 3]])
+        self.assertEqual(model.metadata["cu_seq_lens_q"].tolist(), [0, 2, 6])
+        self.assertEqual(model.metadata["cu_seq_lens_q"].dtype, torch.int32)
+        self.assertEqual(model.metadata["max_length_q"], 4)
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(model.seen_training_modes, [False])
+        self.assertEqual(model.seen_grad_modes, [False])
+        self.assertFalse(model.last_use_cache)
+        self.assertTrue(all(not p.requires_grad for p in runner.parameters()))
+        for states, tokens in zip(output.sequence_hidden_states, (ids[:2], ids[2:])):
+            expected = torch.cat(tuple((tokens[:, None] + i).expand(-1, NVARC_HIDDEN_SIZE)
+                                       for i in NVARC_HIDDEN_STATE_INDICES), -1).float()
+            torch.testing.assert_close(states, expected)
+            self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
+            self.assertFalse(states.requires_grad)
 
-    def test_bucketed_qwen_matches_separate_exact_length_encodings(self) -> None:
+    def test_real_qwen_packed_equals_separate_and_isolates_sources(self):
         from transformers import Qwen3Config, Qwen3Model
-
+        with patch("diffusion_arc.model.nvarc_attention.import_module",
+                   return_value=types.SimpleNamespace(flash_attn_varlen_func=reference_varlen)):
+            register_nvarc_attention()
         torch.manual_seed(11)
         config = Qwen3Config(vocab_size=16, hidden_size=8, intermediate_size=16,
                             num_hidden_layers=28, num_attention_heads=2,
                             num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
-        config._attn_implementation = "sdpa"
+        config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         model = Qwen3Model(config)
-        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8,)))
+        runner = NvarcBatchRunner(model)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
-        padded = runner(ids, torch.tensor([0, 2, 6]))
-        explicit = runner(ids, torch.tensor([0, 2, 6]), padded_length=11)
-        exact_runner = NvarcBatchRunner(model)
+        actual = runner(ids, torch.tensor([0, 2, 6]))
+        # Ordinary SDPA on independent sequences is the reference, including RoPE.
+        model.config._attn_implementation = "sdpa"
         for index, tokens in enumerate((ids[:2], ids[2:])):
-            exact = exact_runner(tokens, torch.tensor([0, len(tokens)]))
-            torch.testing.assert_close(padded.sequence_hidden_states[index],
-                                       exact.sequence_hidden_states[0], atol=3e-6, rtol=3e-6)
-            torch.testing.assert_close(explicit.sequence_hidden_states[index],
-                                       exact.sequence_hidden_states[0], atol=3e-6, rtol=3e-6)
+            with torch.no_grad():
+                reference = model(tokens[None], output_hidden_states=True, use_cache=False)
+            states = torch.cat(tuple(reference.hidden_states[i][0] for i in NVARC_HIDDEN_STATE_INDICES), -1)
+            torch.testing.assert_close(actual.sequence_hidden_states[index], states, atol=3e-6, rtol=3e-6)
+        model.config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
+        changed = runner(torch.tensor([7, 8, 3, 4, 5, 6]), torch.tensor([0, 2, 6]))
+        torch.testing.assert_close(changed.sequence_hidden_states[1], actual.sequence_hidden_states[1], rtol=0, atol=0)
+        tail = runner(torch.tensor([1, 2, 3, 4, 5, 9]), torch.tensor([0, 2, 6]))
+        torch.testing.assert_close(tail.sequence_hidden_states[1][:-1], actual.sequence_hidden_states[1][:-1], rtol=0, atol=0)
 
-    def test_explicit_padding_overrides_fixed_policy_without_mutating_it(self) -> None:
-        model = FakeNvarc()
-        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((8,)))
-        ids, offsets = torch.tensor([1, 2, 3, 4, 5, 6]), torch.tensor([0, 2, 6])
-        result = runner(ids, offsets, padded_length=6)
-        self.assertEqual(tuple(model.last_input_ids.shape), (2, 6))
-        self.assertEqual(model.last_attention_mask.tolist(),
-                         [[True, True, False, False, False, False],
-                          [True, True, True, True, False, False]])
-        self.assertTrue(torch.all(model.last_input_ids[~model.last_attention_mask] == NVARC_PAD_TOKEN_ID))
-        for states, length in zip(result.sequence_hidden_states, (2, 4)):
-            self.assertEqual(states.shape[0], length)
-            self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
-            self.assertFalse(states.requires_grad)
-        runner(ids, offsets)
-        self.assertEqual(tuple(model.last_input_ids.shape), (2, 8))
-        self.assertEqual(model.forward_calls, 2)
-
-    def test_bucket_overflow_fails_before_model_execution(self) -> None:
-        model = FakeNvarc()
-        runner = NvarcBatchRunner(model, length_buckets=SequenceLengthBuckets((4,)))
-        with self.assertRaisesRegex(ValueError, "exceeds the largest bucket"):
-            runner(torch.ones(5, dtype=torch.int64), torch.tensor([0, 5]))
-        self.assertEqual(model.forward_calls, 0)
-
-    def test_forward_interface_is_target_blind(self) -> None:
-        parameter_names = tuple(inspect.signature(NvarcBatchRunner.forward).parameters)
-
-        self.assertEqual(
-            parameter_names,
-            ("self", "input_ids", "sequence_offsets", "padded_length"),
-        )
-
-    def test_batches_variable_lengths_and_returns_independent_sequence_states(
-        self,
-    ) -> None:
-        model = FakeNvarc()
+    def test_early_exit_matches_full_qwen_and_skips_unused_modules(self):
+        from transformers import Qwen3Config, Qwen3ForCausalLM
+        with patch("diffusion_arc.model.nvarc_attention.import_module",
+                   return_value=types.SimpleNamespace(flash_attn_varlen_func=reference_varlen)):
+            register_nvarc_attention()
+        torch.manual_seed(23)
+        config = Qwen3Config(vocab_size=16, hidden_size=8, intermediate_size=16,
+                            num_hidden_layers=36, num_attention_heads=2,
+                            num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
+        config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
+        model = Qwen3ForCausalLM(config)
         runner = NvarcBatchRunner(model)
-        input_ids = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int64)
-        sequence_offsets = torch.tensor([0, 2, 6], dtype=torch.int64)
+        # Make accidental final normalization easy to detect.
+        with torch.no_grad():
+            model.model.norm.weight.fill_(2)
+        for lengths in ((2, 4), (1, 3, 2), (5,)):
+            with self.subTest(lengths=lengths):
+                offsets = torch.tensor([0, *torch.tensor(lengths).cumsum(0).tolist()])
+                ids = torch.arange(sum(lengths)) % 16
+                positions = torch.cat(tuple(torch.arange(n) for n in lengths))[None]
+                cumulative = offsets.to(torch.int32)
+                with torch.no_grad():
+                    full = model(
+                        ids[None], position_ids=positions, attention_mask=None,
+                        cu_seq_lens_q=cumulative, cu_seq_lens_k=cumulative,
+                        max_length_q=max(lengths), max_length_k=max(lengths),
+                        output_hidden_states=True, use_cache=False, return_dict=True,
+                    )
+                with ExitStack() as stack:
+                    calls = [stack.enter_context(patch.object(block, "forward", wraps=block.forward))
+                             for block in model.model.layers]
+                    norm = stack.enter_context(patch.object(model.model.norm, "forward",
+                        side_effect=AssertionError("final normalization must not run")))
+                    head = stack.enter_context(patch.object(model.lm_head, "forward",
+                        side_effect=AssertionError("LM head must not run")))
+                    actual = runner(ids, offsets)
+                    self.assertEqual([call.call_count for call in calls], [1] * 27 + [0] * 9)
+                    norm.assert_not_called()
+                    head.assert_not_called()
+                for states, start, end in zip(actual.sequence_hidden_states, offsets[:-1], offsets[1:]):
+                    expected = torch.cat(tuple(full.hidden_states[i][0, start:end]
+                                               for i in NVARC_HIDDEN_STATE_INDICES), -1)
+                    torch.testing.assert_close(states, expected, rtol=0, atol=0)
+                    self.assertFalse(states.requires_grad)
+                    self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
+                # This demonstrates why using HF's normalized final state would be wrong.
+                raw_last = full.hidden_states[27]
+                self.assertFalse(torch.equal(raw_last, model.model.norm(raw_last)))
+        self.assertEqual(model.config.num_hidden_layers, 36)
+        self.assertEqual(len(model.model.layers), 36)
 
-        result = runner(input_ids, sequence_offsets)
+    def test_refuses_unregistered_or_dense_backend(self):
+        model = FakeNvarc()
+        model.config._attn_implementation = "sdpa"
+        with self.assertRaisesRegex(ValueError, "nvarc_fa3"):
+            NvarcBatchRunner(model)
 
-        self.assertIsInstance(result, NvarcBatchOutput)
-        self.assertEqual(len(result.sequence_hidden_states), 2)
-        self.assertEqual(
-            [tuple(states.shape) for states in result.sequence_hidden_states],
-            [(2, NVARC_CONTEXT_WIDTH), (4, NVARC_CONTEXT_WIDTH)],
-        )
-        self.assertNotEqual(
-            result.sequence_hidden_states[0].untyped_storage().data_ptr(),
-            result.sequence_hidden_states[1].untyped_storage().data_ptr(),
-        )
-        self.assertEqual(model.forward_calls, 1)
-        torch.testing.assert_close(
-            model.last_input_ids,
-            torch.tensor(
-                [
-                    [1, 2, NVARC_PAD_TOKEN_ID, NVARC_PAD_TOKEN_ID],
-                    [3, 4, 5, 6],
-                ],
-                dtype=torch.int64,
-            ),
-        )
-        torch.testing.assert_close(
-            model.last_attention_mask,
-            torch.tensor(
-                [
-                    [True, True, False, False],
-                    [True, True, True, True],
-                ]
-            ),
-        )
-        self.assertTrue(model.last_output_hidden_states)
-        self.assertFalse(model.last_use_cache)
-        self.assertTrue(model.last_return_dict)
-
-        expected_sources = (input_ids[:2], input_ids[2:])
-        for sequence_states, expected_tokens in zip(
-            result.sequence_hidden_states,
-            expected_sources,
-            strict=True,
-        ):
-            for chunk_index, hidden_state_index in enumerate(
-                NVARC_HIDDEN_STATE_INDICES
-            ):
-                chunk_start = chunk_index * NVARC_HIDDEN_SIZE
-                torch.testing.assert_close(
-                    sequence_states[:, chunk_start],
-                    expected_tokens.to(torch.float32) + float(hidden_state_index),
-                )
-
-    def test_freezes_model_and_keeps_eval_mode(self) -> None:
-        model = FakeNvarc().train()
-        runner = NvarcBatchRunner(model)
-
-        self.assertFalse(runner.training)
-        self.assertFalse(model.training)
-        self.assertFalse(any(parameter.requires_grad for parameter in model.parameters()))
-
-        runner.train(True)
-        self.assertFalse(runner.training)
-        self.assertFalse(model.training)
-
-        result = runner(
-            torch.tensor([1, 2], dtype=torch.int64),
-            torch.tensor([0, 2], dtype=torch.int64),
-        )
-
-        self.assertEqual(model.seen_training_modes, [False])
-        self.assertEqual(model.seen_grad_modes, [False])
-        self.assertTrue(
-            all(
-                not hidden_states.requires_grad and hidden_states.grad_fn is None
-                for hidden_states in result.sequence_hidden_states
-            )
-        )
-
-    def test_fails_clearly_without_input_embedding_interface(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "input embeddings"):
-            NvarcBatchRunner(MissingInputEmbeddingsNvarc())(
-                torch.tensor([1, 2], dtype=torch.int64),
-                torch.tensor([0, 2], dtype=torch.int64),
-            )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_missing_fa3_fails_without_fallback(self):
+        with patch("diffusion_arc.model.nvarc_attention.import_module", side_effect=ImportError("FA3 missing")):
+            with self.assertRaisesRegex(ImportError, "FA3 missing"):
+                register_nvarc_attention()

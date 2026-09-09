@@ -43,7 +43,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(policy.microbatch_sizes, (1, 2, 4, 8))
         self.assertEqual((policy.warmup_calls, policy.measured_calls, policy.max_duration_seconds), (2, 5, 1200))
         self.assertEqual(training.loop.optimizer_batch_size, 48)
-        self.assertIsNotNone(training.nvarc_scheduling)
+        self.assertFalse(hasattr(training, "nvarc_scheduling"))
 
     def test_bad_user_values_fail_before_checkpoint_access(self):
         for field, value in (

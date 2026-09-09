@@ -1,5 +1,7 @@
 # NVARC bucket shape and alignment results
 
+The diagnostic scripts and original configs are preserved at [revision db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f). Commands below apply to that revision; the current runtime has retired the compared NVARC paths.
+
 **Status: measured; all 72 cases completed.** The B2 bucket diagnostic found
 shape-specific alignment gains, but no universal rounding policy. Its later
 replacement is [FA3 Varlen packing without padding](nvarc-packing.md). The
@@ -115,9 +117,9 @@ for choosing the next NVARC implementation.
 
 ## Reproduction and provenance
 
-The [configuration](../../configs/diagnostics/nvarc_batch_shapes.json),
-[diagnostic](../../scripts/diagnostics/probe_nvarc_batch_shapes.py) and
-[Modal launcher](../../scripts/cloud/probe_nvarc_batch_shapes_modal.py) capture
+The [configuration](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/configs/diagnostics/nvarc_batch_shapes.json),
+[diagnostic](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/scripts/diagnostics/probe_nvarc_batch_shapes.py) and
+[Modal launcher](https://github.com/joshuakauling/diffusion-arc/blob/db6d49f/scripts/cloud/probe_nvarc_batch_shapes_modal.py) capture
 the original protocol. Raw results remain in
 `results/nvarc-batch-shapes/20260907T174749742239Z/` in the `diffusion-arc-models`
 Volume, environment `diffusion-arc`; traces and raw results are not committed.
