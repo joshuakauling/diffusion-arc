@@ -20,6 +20,7 @@ from diffusion_arc.model.flux_vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc_encoder import NvarcBatchRunner
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
+from .profiling import training_range
 from .flux_input import FluxInput, PreparationMetrics, prepare_flux_inputs_batch
 from .flux_loss import compute_flux_microbatch_loss
 from .flux_microbatch import build_flux_microbatch
@@ -137,7 +138,8 @@ def _train_optimizer_batch(
         else:
             reported_loss = reported_loss + loss_contribution
 
-        (loss * weight).backward()
+        with training_range("train/flux_backward"):
+            (loss * weight).backward()
         microbatch_count += 1
         # Release this call's copies before allocating the next physical batch.
         del microbatch, loss, loss_contribution, flow_kwargs
@@ -161,7 +163,8 @@ def _train_optimizer_batch(
         gradient_clipped = bool(
             max_grad_norm is not None and gradient_norm > max_grad_norm
         )
-    optimizer.step()
+    with training_range("train/adamw"):
+        optimizer.step()
     # Optional step metrics: finish timing after the optimizer update.
     if on_optimizer_step_metrics is not None:
         _synchronize_transformer_device(transformer)
@@ -312,16 +315,17 @@ def run_single_gpu_training(
         if not source_batch:
             stream_exhausted = True
             break
-        flux_input_buffer.extend(
-            prepare_flux_inputs_batch(
-                source_batch,
-                nvarc_runner=nvarc_runner,
-                vae_encoder=vae_encoder,
-                min_context_pairs_before_target=min_context_pairs_before_target,
-                vae_microbatch_size=vae_microbatch_size,
-                on_preparation=on_preparation,
+        with training_range("prepare/sources"):
+            flux_input_buffer.extend(
+                prepare_flux_inputs_batch(
+                    source_batch,
+                    nvarc_runner=nvarc_runner,
+                    vae_encoder=vae_encoder,
+                    min_context_pairs_before_target=min_context_pairs_before_target,
+                    vae_microbatch_size=vae_microbatch_size,
+                    on_preparation=on_preparation,
+                )
             )
-        )
 
         while (
             len(flux_input_buffer) >= optimizer_batch_size

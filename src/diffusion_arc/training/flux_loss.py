@@ -12,6 +12,7 @@ from diffusion_arc.model.flow_matching import (
 from diffusion_arc.model.contracts import FlowMatchingBatch
 from diffusion_arc.model.flux_velocity import predict_flux_velocity
 
+from .profiling import training_range
 from .flux_microbatch import FluxMicrobatch, PackedFluxMicrobatch
 
 
@@ -36,7 +37,7 @@ def compute_flux_microbatch_loss(
 
         if packing_backend is None:
             raise ValueError("packed FLUX loss requires the preflighted FA3 backend")
-        with torch.profiler.record_function("train/flux_forward"):
+        with training_range("train/flux_forward", torch_range=True):
             predicted_velocity = predict_packed_flux_velocity(
                 transformer, flow_batch.noisy_latents, microbatch.text, microbatch.image_position_ids,
                 flow_batch.timesteps, microbatch.layout, compute_dtype=compute_dtype, backend=packing_backend,

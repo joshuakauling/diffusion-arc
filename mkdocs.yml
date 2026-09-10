@@ -39,6 +39,7 @@ nav:
       - Overview: training/README.md
       - NVARC encoder: training/nvarc-batch-runner.md
       - FLUX sequence packing: training/flux-sequence-packing.md
+      - Profiling: training/profiling.md
   - Performance:
       - Benchmark overview: performance/README.md
       - B0 — First training run: performance/b0.md
