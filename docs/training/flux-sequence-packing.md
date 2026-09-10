@@ -76,7 +76,7 @@ The shared Modal image builds pinned FA3 revision
 `ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820` with BF16 forward and backward,
 head dimension 128 and Hopper/SM90 support. NVARC and FLUX use separate adapters
 to the same extension, with causal and noncausal segments respectively.
-The budget starts below the [single-sequence execution boundary](../performance/flux-sequence-capacity.md),
+The budget starts below the [single-sequence execution boundary](https://github.com/joshuakauling/diffusion-arc/blob/271be103ded3599eafe268606f26357391a8bf78/docs/performance/flux-sequence-capacity.md),
 which confirmed 13,312 joint tokens and OOM at 13,568. A single-sequence limit
 does not certify every mixed-shape training allocation history.
 

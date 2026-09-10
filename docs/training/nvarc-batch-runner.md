@@ -78,7 +78,7 @@ against the complete forward and checks that later blocks, final normalization
 and the language-model head are never called. These CPU tests verify integration
 semantics, not execution of the CUDA extension.
 
-The [real-input packing diagnostic](../performance/nvarc-packing.md) measured
+The [real-input packing diagnostic](https://github.com/joshuakauling/diffusion-arc/blob/271be103ded3599eafe268606f26357391a8bf78/docs/performance/nvarc-packing.md) measured
 FA3 on short, median and long 16-source windows. It supports the no-alignment
 choice but does not establish end-to-end B3 speed, peak memory or downstream
 FLUX loss/gradient agreement. Those remain to be measured for the combined

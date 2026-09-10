@@ -40,27 +40,13 @@ nav:
       - NVARC encoder: training/nvarc-batch-runner.md
       - FLUX sequence packing: training/flux-sequence-packing.md
   - Performance:
-      - Benchmark report: performance/README.md
-      - Historical bucket policies:
-          - B1: performance/b1-bucket-policy.md
-          - B2 preparation: performance/b2-preparation-policy.md
-          - FLUX batch shapes: performance/flux-batch-shapes.md
-          - FLUX alignment plan: performance/flux-alignment.md
-      - NVARC:
-          - Shapes and alignment: performance/nvarc-batch-shapes.md
-          - Packed attention: performance/nvarc-packing.md
-      - FLUX:
-          - BFL reference: performance/flux-bfl-reference.md
-          - BFL precision: performance/flux-bfl-precision.md
-          - Backend conditions: performance/flux-backend-conditions.md
-          - Attention diagnostic plan: performance/attention-diagnostic-plan.md
-          - Attention execution: performance/attention-execution.md
-          - Packing correctness: performance/flux-packing.md
-          - Backward layouts: performance/flux-backward-layouts.md
-          - Modulation backward: performance/flux-modulation-backward.md
-          - Packing performance: performance/flux-packing-performance.md
-          - Packed capacity: performance/flux-packed-capacity.md
-          - Single-sequence capacity: performance/flux-sequence-capacity.md
+      - Benchmark overview: performance/README.md
+      - B0 — First training run: performance/b0.md
+      - B1 — Fixed buckets: performance/b1.md
+      - B2 — Scheduled batches: performance/b2.md
+      - B3 — FA3 packing: performance/b3.md
+      - B3 NVARC analysis: performance/b3-nvarc.md
+      - B3 FLUX analysis: performance/b3-flux.md
   - Experiments: experiments/README.md
   - Research ideas: research-ideas.md
   - Code reference: api.md
