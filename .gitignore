@@ -15,6 +15,7 @@ __pycache__/
 *.safetensors
 /checkpoints/
 /visualization_ui/
+/traces/
 
 # Local executed copies of the clean VAE experiment notebooks.
 /experiments/vae/conditioning_ladder_roundtrip_diagnosis_colab.ipynb
