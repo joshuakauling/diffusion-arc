@@ -78,12 +78,12 @@ against the complete forward and checks that later blocks, final normalization
 and the language-model head are never called. These CPU tests verify integration
 semantics, not execution of the CUDA extension.
 
-The [real-input packing diagnostic](https://github.com/joshuakauling/diffusion-arc/blob/271be103ded3599eafe268606f26357391a8bf78/docs/performance/nvarc-packing.md) measured
-FA3 on short, median and long 16-source windows. It supports the no-alignment
-choice but does not establish end-to-end B3 speed, peak memory or downstream
-FLUX loss/gradient agreement. Those remain to be measured for the combined
-NVARC and FLUX B3 runtime. The older SDPA/bucket paths and their diagnostic scripts
-are recoverable at [db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f).
+The [NVARC report](../performance/b3-nvarc.md) summarizes the real-input backend
+and packing comparisons. The [combined B3 benchmark](../performance/b3.md#benchmark-result)
+measures throughput, peak memory, and step-loss differences from B2; it does
+not isolate NVARC's contribution or establish gradient/update equivalence.
+The older SDPA/bucket paths and their diagnostics are recoverable at
+[db6d49f](https://github.com/joshuakauling/diffusion-arc/tree/db6d49f).
 
 ## Historical SDPA preflight (not a validation of FA3)
 

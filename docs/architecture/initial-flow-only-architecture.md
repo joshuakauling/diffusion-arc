@@ -6,6 +6,10 @@ This document specifies the flow-only architecture used by the nine core
 project milestones. The project scope and milestone order are defined in the
 root [`README.md`](../../README.md).
 
+The [B3 report](../performance/b3.md) describes the implemented single-GPU
+execution with FA3 packing and NVARC early exit. The shapes below describe
+logical examples; physical packing preserves those example boundaries.
+
 ## Core hypothesis
 
 The smallest useful test of the project hypothesis is:

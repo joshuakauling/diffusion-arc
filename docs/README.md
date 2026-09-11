@@ -41,7 +41,7 @@ and are not bundled into the website.
 
 - [Training system overview](training/README.md)
 - [FA3 sequence-packing training](training/flux-sequence-packing.md)
-- [Batching and efficiency roadmap](training/batching-and-efficiency-roadmap.md)
+- [Historical batching design](training/batching-and-efficiency-roadmap.md)
 - [NVARC batch runner](training/nvarc-batch-runner.md)
 - [FLUX text conditioning](training/flux-text-conditioning.md)
 - [FLUX target-image encoding](training/flux-image-encoding.md)

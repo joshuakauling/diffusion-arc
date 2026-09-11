@@ -11,6 +11,8 @@ milestones, evaluation, and non-goals.
 
 **Encode each source once. Train its eligible targets from the shared state.**
 
+The flow below describes the [B3 single-GPU baseline](../performance/b3.md).
+
 The ordered CPU loader can prefetch tokenized samples in worker processes. The
 training loop takes a fixed window of consecutive sources (16 in the current
 benchmark), selects eligible targets, and trims each source before its final
@@ -64,7 +66,7 @@ is reduced in FP32.
 | `FluxInput` | One target, its exact prefix boundary, its clean latent, and a reference to the shared sequence state. |
 | Private FIFO queue | Prepared target inputs waiting for optimizer-batch selection. |
 | `OptimizerBatch` | All targets that contribute to one parameter update. |
-| `FluxMicrobatch` | A physical subset of the optimizer batch processed in one FLUX forward and backward pass. |
+| `PackedFluxMicrobatch` | Exact text prefixes, attention-segment boundaries, and image inputs for one B3 forward/backward call. |
 
 The shared hidden-state tensor is released after its last target prefix has been
 copied into a physical microbatch. Python later collects the small
@@ -72,9 +74,8 @@ copied into a physical microbatch. Python later collects the small
 
 Microbatch losses are weighted by target count, so changing the physical
 grouping preserves the mathematical objective; finite-precision gradients can
-still differ. The detailed batching rules and
-loss normalization are documented in the
-[`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md).
+still differ. The [FLUX packing guide](flux-sequence-packing.md) documents
+physical grouping and loss normalization, including a smaller final batch.
 
 ## Training module map
 
@@ -102,7 +103,7 @@ loss normalization are documented in the
 | [`flux-text-conditioning.md`](flux-text-conditioning.md) | Exact-prefix and ownership contracts, including the padded reference interface. |
 | [`flux-image-encoding.md`](flux-image-encoding.md) | Frozen VAE target encoding, latent packing, and normalization. |
 | [`flow-matching.md`](flow-matching.md) | Flow sampling, velocity supervision, loss computation, and validation. |
-| [`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md) | Historical batching design and the retained FIFO/loss invariants. |
+| [`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md) | Superseded design note for the padded pipeline and proposed lookahead schedulers. |
 | [`flux-sequence-packing.md`](flux-sequence-packing.md) | Production FA3 packing, FP32 modulation sums, token budgeting, and validation limits. |
 
 ## Validation
@@ -123,12 +124,15 @@ remain explicit smoke or preflight tests.
 - Training is single-process and single-GPU; DDP and FSDP2 are not implemented.
 - Schema v8 is the combined configuration contract. Historical schemas and
   NVARC scheduler/bucket options are rejected rather than silently translated.
+- B3 enables FLUX packing explicitly. Other recipes, including
+  [single_gpu.json](../../configs/training/single_gpu.json), retain the padded
+  FLUX reference path; schema v8 alone does not enable packing.
 - The [B3 benchmark](../../configs/training/benchmarks/single_gpu_b3.json),
   [three-step smoke](../../configs/training/benchmarks/single_gpu_b3_smoke.json),
   and [profiler](../../configs/training/profiling/single_gpu_b3_torch_profile.json)
   all combine NVARC and FLUX packing.
 - The shared Modal image requires Hopper/SM90 and BF16 FA3, with head dimension
   128 and both forward and backward support.
-- Combined B3 numerical and performance validation on real GPU checkpoints
-  remains outstanding. Separate component diagnoses do not establish full-step
-  capacity, throughput, or learning equivalence.
+- The [B3 benchmark](../performance/b3.md#benchmark-result) measures combined
+  throughput, peak memory, and step-loss differences from B2 on H200.
+  Gradient/update equivalence and long-term learning quality remain open.

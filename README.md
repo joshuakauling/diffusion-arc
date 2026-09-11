@@ -89,9 +89,9 @@ The main change to the original FLUX input path is the context length. FLUX's
 reference text preparation is capped at 512 tokens, while five-pair ARC training
 sources may require up to 8,400 tokens. The initial ARC setup uses no visual
 reference images, so the longer text context is combined only with the 900
-target image tokens rather than additional reference-image tokens. The resulting sequence
-length and its memory and runtime costs must be verified during implementation
-and distributed profiling.
+target image tokens rather than additional reference-image tokens.
+The [B3 benchmark](docs/performance/b3.md) measures single-GPU execution with
+these lengths; distributed memory and runtime behavior remain to be measured.
 
 The complete initial architecture, training objective, and decoding procedure
 are documented in
@@ -99,19 +99,18 @@ are documented in
 
 ## Distributed Training
 
-The engineering work starts from a verified single-GPU training step and
-extends it to DDP and FSDP2 without changing the underlying experiment. NVARC
+The next engineering stage extends the B3 single-GPU baseline to DDP and
+FSDP2 without changing the underlying experiment. NVARC
 and the FLUX VAE remain frozen, while the complete FLUX transformer is trained
 using BF16 mixed precision.
 
-The training system includes distributed data loading, activation
-checkpointing, gradient clipping and non-finite detection, distributed
-checkpoint save and resume, and profiling with `torch.profiler` and Nsight
-Systems.
+The single-GPU runner supports gradient clipping, non-finite diagnostics,
+and profiling. Distributed data loading, activation checkpointing, and
+distributed checkpoint save/resume are planned extensions.
 
-Single-GPU, DDP, and FSDP2 execution are compared using the same global batch
+Single-GPU, DDP, and FSDP2 execution will be compared using the same global batch
 size and random seeds. Benchmarks on 1, 2, 4, and 8 GPUs, where the available
-single-node hardware permits, report throughput, median and p95 step time, peak
+single-node hardware permits, will report throughput, median and p95 step time, peak
 GPU memory, scaling efficiency, communication overhead, and numerical
 agreement.
 

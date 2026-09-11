@@ -19,7 +19,7 @@ compute a loss.
 
 ## Fixed input representation
 
-The collator produces one target canvas for every target exposure:
+Target preparation renders one canvas for every target exposure:
 
 ```text
 [K, 3, 480, 480], torch.float32, values in [-1, 1]

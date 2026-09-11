@@ -15,12 +15,12 @@ overview](../training/README.md) for that end-to-end runtime path.
 
 The project scope and milestones in the root [`README.md`](../../README.md) remain
 authoritative. The upstream loading, augmentation, prompt, and tokenization
-rules are documented in [`data-pipeline.md`](data-pipeline.md). Batching design
-and future efficiency work are documented separately in
-[`batching-and-efficiency-roadmap.md`](../training/batching-and-efficiency-roadmap.md).
+rules are documented in [`data-pipeline.md`](data-pipeline.md). Current physical
+grouping and loss weighting are documented in the
+[FLUX packing guide](../training/flux-sequence-packing.md).
 The target-blind execution of packed sources through frozen NVARC is documented
 in [`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
-Exact-prefix FLUX text padding and training-side ownership are documented in
+Exact-prefix FLUX conditioning and training-side ownership are documented in
 [`flux-text-conditioning.md`](../training/flux-text-conditioning.md).
 Frozen target-image encoding is documented in
 [`flux-image-encoding.md`](../training/flux-image-encoding.md).
@@ -56,14 +56,6 @@ contract lives in
 | `ArcTrainingDataset` | Selecting a configured view, validating split, key, and task boundaries, loading the referenced task for each item, applying stored augmentations, rendering prompts, tokenizing complete samples | Task caching, shuffling, batching, target budgeting, canvas rendering, model execution |
 | PyTorch `DataLoader` | Selecting dataset indices, shuffle/sampler policy, and workers; optionally forming source-level batches and invoking a collator | ARC semantics, target selection, packed tensor meaning |
 | `TrainingCollator` | Assembling trusted tokenized samples by selecting suffix targets, truncating sources, rendering target canvases, and building the packed tensor contract and metadata sidecar | Validating alternate sample producers, sampling dataset items, padding, attention masks, device transfer, noise, timesteps, model execution |
-| `NvarcBatchRunner` | Executing trusted packed sources by right-padding, constructing the attention mask, running one frozen batch forward, and returning one independent unpadded hidden-state tensor per source | Revalidating stable checkpoint contracts, targets, target-prefix derivation, target images, VAE or FLUX execution |
-| `prepare_flux_inputs_batch` | Selecting eligible targets for consecutive source samples, packing one NVARC source batch, chunking target images into bounded VAE batches, and creating source-major shared-state `FluxInput` objects | Lookahead selection, length bucketing, buffer selection, FLUX execution, flow sampling, loss normalization |
-| `prepare_flux_inputs` | Preserving the original one-source, one-VAE-call preparation interface through the batched implementation | Source scheduling, VAE chunk configuration, FLUX execution |
-| `NvarcSequenceState` | Owning one source hidden-state tensor and tracking the exact prefix ends that still require it | Prefix padding, target tensors, FLUX execution |
-| `pad_flux_text_prefixes` | Right-padding an ordered sequence of already selected exact NVARC prefixes and constructing FLUX text position IDs and the text key mask | Prefix selection, ownership, target images, VAE encoding, FLUX execution |
-| `build_flux_microbatch` | Copying exact prefixes into padded text inputs, stacking clean latents, generating fixed image position IDs, and committing prefix consumption only after successful construction | Flow sampling, joint-mask construction, FLUX execution, loss normalization |
-| `FluxVaeEncoder` | Moving trusted target canvases to the VAE, deterministic posterior-mode encoding, 2×2 latent packing, frozen BatchNorm normalization, and flattening | Palette selection, position IDs, flow noise, timesteps, FLUX execution, or loss normalization |
-| Flow-matching helpers | Drawing independent per-target Gaussian noise and uniform timesteps, constructing `z_t` and `epsilon - z_0`, and computing the unweighted FP32 velocity MSE | FLUX execution, alternate timestep densities, loss weighting, or optimizer steps |
 
 ## `ArcTrainingDataset`
 
@@ -341,47 +333,16 @@ diagnostics, tests, and alternate batch producers. Such producers must invoke
 it at their own ingestion or preflight boundary instead of relying on the
 collator to validate arbitrary objects.
 
-On the auxiliary packed path, `NvarcBatchRunner` likewise trusts packed sources
-produced through this path.
-It right-pads them to their batch maximum, supplies a boolean attention mask,
-executes frozen NVARC once, and returns one independent owning `[L_s, 7680]`
-tensor for each source after discarding every padded position. The input
-`sequence_offsets` are resolved inside the runner and do not remain part of its
-output contract. Attention must never cross those input boundaries. Stable
-checkpoint shapes, dtypes, hidden-state availability, and padding behavior
-belong to a separate explicit smoke or preflight experiment, not to every
-forward call. The runner's exact contract and measured real-checkpoint evidence
-are documented in
-[`nvarc-batch-runner.md`](../training/nvarc-batch-runner.md).
+Model execution is a separate boundary. The current
+[NVARC runner](../training/nvarc-batch-runner.md) consumes flat token IDs and
+source offsets using unpadded causal FA3 attention, stops after block 27, and
+returns one owning `[L_s, 7680]` tensor per source.
 
-The current single-GPU scheduling path is separate from that packed-collation
-contract. It groups consecutive `ArcTokenizedTrainingSample` items and passes
-them to `prepare_flux_inputs_batch`. Eligibility is determined before model
-execution, retained complete sources run through one padded NVARC batch, and
-eligible target images run through bounded VAE batches. The function creates
-one `FluxInput` per target in source-major order. Inputs from the same source
-share one `NvarcSequenceState`; each stores only its relative `prefix_end` and
-clean latent alongside the shared state reference.
-
-`build_flux_microbatch` retrieves each exact `hidden_states[:prefix_end]` view
-and passes the ordered views to the pure `pad_flux_text_prefixes` operation. It
-also stacks clean latents and generates fixed image position IDs. Only after the
-entire physical batch has been allocated successfully does it mark the involved
-prefix ends as consumed. The last prefix clears the owner's tensor reference,
-while a failed build leaves every prefix pending. The full text and ownership contract is
-documented in
-[`flux-text-conditioning.md`](../training/flux-text-conditioning.md).
-
-`FluxVaeEncoder` independently consumes `target_images` in their canonical
-target-exposure order. It uses the frozen VAE posterior mode and returns clean
-normalized packed latents. The full contract is documented in
-[`flux-image-encoding.md`](../training/flux-image-encoding.md).
-
-`sample_flow_matching_batch` independently draws one Gaussian noise tensor and
-one uniform normalized timestep for every encoded target. It constructs the
-noisy transformer input and straight-path velocity target. The matching FP32
-MSE helper and complete contract are documented in
-[`flow-matching.md`](../training/flow-matching.md).
+B3 training creates these inputs directly from consecutive samples, without
+the collator. Target prefixes share source storage until copied into
+[FLUX packed microbatches](../training/flux-sequence-packing.md).
+The [training overview](../training/README.md) describes preparation, ownership,
+FIFO selection, and model execution together.
 
 ## Where noise enters
 
@@ -423,14 +384,12 @@ The implemented dataset and collator intentionally do not own:
 - a validation or inference dataset;
 - a custom length-aware or cost-aware sampler;
 - accelerator transfer or automatic pinned-memory traversal;
-- a true variable-length NVARC attention path or length-bucket scheduler;
+- accelerator attention backends or model-level batch selection;
 - alternate flow-timestep densities or timestep-dependent loss weighting;
 - FLUX input buffering, optimizer-batch scheduling, or model execution;
 - distributed sampling or optimizer-batch accounting.
 
-These responsibilities remain separate from the stable host contract. The
-current training-side path already provides frozen-model preparation, FLUX
-microbatch assembly, flow loss computation, the step-limited single-GPU FIFO
-loop, and optional update callbacks. Length-aware scheduling, durable run
-telemetry, profiling, checkpoint/resume, and distributed sampling remain future
-measured stages.
+These responsibilities remain separate from the host contract. B3 already
+provides packed model execution, a single-GPU FIFO training loop, benchmark
+records, and profiling. Distributed sampling and checkpoint/resume remain
+separate implementation work.

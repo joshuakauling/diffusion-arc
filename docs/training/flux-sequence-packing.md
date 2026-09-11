@@ -80,11 +80,10 @@ The budget starts below the [single-sequence execution boundary](https://github.
 which confirmed 13,312 joint tokens and OOM at 13,568. A single-sequence limit
 does not certify every mixed-shape training allocation history.
 
-## Validation and prepared GPU check
+## Validation
 
-The combined B3 tree passes 282 local tests, including the NVARC encoder,
-FLUX model, scheduling, construction, loop, configuration, setup and entrypoints.
-These CPU and mocked-runtime checks include:
+Local CPU and mocked-runtime tests cover the NVARC encoder, FLUX model,
+packing, construction, loop, configuration, setup and entrypoints, including:
 
 - Independent original FLUX singletons versus packed ABC/CBA and split packs:
   outputs, weighted loss, all parameter/input gradients and an SGD update in FP32.
@@ -96,16 +95,16 @@ These CPU and mocked-runtime checks include:
 - Explicit backend failure, strict config rejection and actual packed benchmark
   metadata through both training entrypoints.
 
-The [three-step smoke recipe](../../configs/training/benchmarks/single_gpu_b3_smoke.json)
-uses the existing B0 dataset, 48 targets per update and three real AdamW updates
-(one warmup, two measured), with one repetition. The bounded
-[cloud launcher](../../scripts/cloud/benchmark_flux_packing_modal.py) retains
-the already compatible cached FA3 forward/backward image and its 480-second
-H200 lifecycle limit. The regular benchmark and profiler launchers use the
-shared image definition. The combined smoke is **prepared but not run**; this
-integration did not build an image or launch a GPU worker.
-An integrated H200 pass with changing packs and initialized optimizer state is
-the remaining validation before claiming production GPU capacity or throughput.
+The [combined B3 benchmark](../performance/b3.md#benchmark-result) completed
+three H200 repetitions with changing packs and real optimizer updates.
+It records full-step throughput, peak memory, and a step-loss comparison with B2.
+The [FLUX report](../performance/b3-flux.md) summarizes the component tests and
+remaining gradient differences; long-term learning equivalence is still open.
+
+For a shorter execution check, the
+[three-step smoke recipe](../../configs/training/benchmarks/single_gpu_b3_smoke.json)
+and [cloud launcher](../../scripts/cloud/benchmark_flux_packing_modal.py) use
+the same packed path with 48 targets per update.
 
 Relevant implementation:
 [scheduler](../../src/diffusion_arc/training/flux_schedule.py),

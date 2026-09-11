@@ -1,5 +1,7 @@
 # Single-GPU Overfitting Pilot v2
 
+This historical protocol is retained with the [findings and archived source](../README.md).
+
 ## Status and question
 
 This document preregisters the second eight-task single-GPU overfitting pilot.

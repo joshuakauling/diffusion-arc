@@ -5,11 +5,10 @@ the [training system overview](README.md).
 
 ## Status and scope
 
-This page describes the padded reference interface. B3 training instead copies
-exact prefixes into unpadded segments; see the
-[FLUX packing guide](flux-sequence-packing.md). Prefix boundaries, per-source
-ownership and transactional consumption remain the same, while dense padding
-masks are replaced by cumulative attention-segment boundaries in that path.
+This page describes exact-prefix selection and shared-state ownership, followed
+by the retained padded reference interface. B3 copies exact prefixes into
+unpadded segments; see the [FLUX packing guide](flux-sequence-packing.md).
+Prefix boundaries and consumption rules are shared by both paths.
 
 `pad_flux_text_prefixes` is the implemented pure tensor boundary between exact
 frozen-NVARC prefix tensors and the padded text portion of a physical FLUX
@@ -95,13 +94,13 @@ hidden states.
 
 Prefix ends are strictly increasing within one source, so the owner uses its
 pending `prefix_end` values directly for lifetime bookkeeping.
-`build_flux_microbatch(flux_inputs)` performs the complete deterministic
-physical assembly:
+`build_flux_microbatch` performs the complete deterministic physical assembly.
+B3 supplies `max_joint_tokens=12288`; omitting it selects the padded reference:
 
 1. validate that every prefix is unique within its source and still pending;
 2. obtain each exact `hidden_states[:prefix_end]` view;
-3. call `pad_flux_text_prefixes` to copy those prefixes into an independent
-   padded `FluxTextInputs` tensor;
+3. copy the prefixes into one unpadded tensor with segment boundaries for B3,
+   or call `pad_flux_text_prefixes` for the padded reference;
 4. stack the clean target latents and generate the fixed image position IDs;
    and
 5. only after all construction succeeds, commit all consumed prefix ends
@@ -109,14 +108,14 @@ physical assembly:
 
 A failed build leaves every source state pending and available for diagnosis or
 retry. After the final dependent prefix is committed, the owner replaces its
-hidden-state reference with `None`. The completed `FluxMicrobatch` retains only
-its independently allocated padded text tensor and stacked image tensors, so it
+hidden-state reference with `None`. The resulting `PackedFluxMicrobatch` or
+reference `FluxMicrobatch` retains independent text and image tensors, so it
 does not keep the source owner or its original hidden-state storage alive.
 
 ## Joint FLUX attention mask
 
 FLUX attention operates on the combined text and image sequence. The text-only
-mask is therefore not passed directly to the transformer. The helper
+mask in the padded reference is not passed directly to the transformer. The helper
 `build_flux_joint_attention_mask` appends one valid key for every image token:
 
 ```python
@@ -179,12 +178,13 @@ partial and final owner release, automatic owner collection after references
 disappear, rejection of duplicate or stale prefixes, and no consumption when
 tensor construction fails.
 
-## Remaining real-model validation
+## Padded-reference validation
 
-The local test establishes the mask semantics only for the native CPU FP32
-attention route in `diffusers==0.39.0`. Before the path is used for a learning
-experiment, an explicit Colab smoke or preflight must compare masked batched and
-unpadded single-target execution with:
+The local test establishes mask semantics for the native CPU FP32 route in
+`diffusers==0.39.0`. The historical [B1](../performance/b1.md) and
+[B2](../performance/b2.md) reports cover the measured CUDA training path.
+A different reference configuration needs a matching preflight comparing
+masked batched and unpadded single-target execution with:
 
 - the pinned FLUX.2-klein-base-4B checkpoint revision;
 - BF16 on the selected CUDA device;

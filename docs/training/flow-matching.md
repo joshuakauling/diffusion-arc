@@ -16,7 +16,7 @@ FP32. Neither function executes the FLUX transformer, chooses an optimizer, or
 performs an update.
 
 The training-side `compute_flux_microbatch_loss` operation composes these
-helpers with one prepared `FluxMicrobatch`: it executes FLUX with the supplied
+helpers with one prepared microbatch: it executes FLUX with the supplied
 flow draws and returns the unscaled mean loss. B3 uses independent packed
 attention segments; the padded reference helper constructs a joint mask.
 Flow draws are assigned in FIFO order before physical grouping, preserving
@@ -106,21 +106,20 @@ per-target weighting in this baseline.
 
 ## Complete microbatch computation
 
-`compute_flux_microbatch_loss(transformer, microbatch, compute_dtype=..., generator=...)`
-performs:
+`compute_flux_microbatch_loss` accepts either a B3 `PackedFluxMicrobatch` or
+a padded reference `FluxMicrobatch`. B3 passes a preflighted `packing_backend`
+and a `flow_batch` containing draws assigned before physical grouping:
 
 ```text
-FluxMicrobatch.clean_latents
-    -> flow noise, timesteps, noisy latents, and target velocity
-    -> joint text-and-image attention mask
-    -> FLUX velocity prediction
+FIFO targets -> per-target flow draws -> select draws for this packed microbatch
+    -> FLUX velocity prediction with separate FA3 attention segments
     -> unweighted FP32 mean squared error
 ```
 
-The transformer receives the noisy latents, padded NVARC conditioning, flow
-timesteps, text and image position IDs, and the joint key mask already carried
-or derivable from the microbatch. Only the transformer forward runs inside an
-autocast region using the supplied compute dtype. Persistent transformer
+If no `flow_batch` is supplied, the helper samples one from the clean latents
+using the optional generator. The padded reference path still constructs a
+joint key mask. Only the transformer forward runs inside an autocast region
+using the supplied compute dtype. Persistent transformer
 parameters retain their loader-established FP32 dtype, while the loss is
 computed after leaving autocast and explicitly uses FP32 inputs. The function
 returns one scalar loss. It does not scale that loss for an optimizer batch or
@@ -133,8 +132,9 @@ broadcasting or dtype errors: fixed latent shape, non-empty target count,
 floating latent dtype, FP32 persistent FLUX parameter storage, matching
 prediction and target shapes, and matching loss devices. It does not scan
 complete tensors for finite values on every training step. Explicit preflights
-and the future training runner remain responsible for finite-value diagnostics
-and recorded RNG seeds.
+and the training runner provide finite-value diagnostics and recorded RNG seeds.
+The runner rejects non-finite losses before backward and checks gradients when
+gradient metrics or clipping are enabled.
 
 Unit tests establish:
 

@@ -1,10 +1,13 @@
-# NVARC and FLUX Batching Roadmap
+# Historical NVARC and FLUX Batching Roadmap
 
 This is the historical design note for the initial padded pipeline and planned
 length-aware schedulers. References below to "current" or "planned" describe
 that stage, not the B3 implementation. B3 retains the FIFO selection, ownership,
 flow objective and loss-weighting invariants, but replaces both bucket catalogs
-with unpadded FA3 segments. Cross-window lookahead remains unimplemented.
+with unpadded FA3 segments. The lookahead schedulers below are superseded
+proposals, not the next implementation step; that is distributed training.
+The original schema-v1/v2 descriptions are also historical; current configs
+require schema v8.
 For the current path, see the [training overview](README.md),
 [NVARC encoder](nvarc-batch-runner.md) and
 [FLUX packing guide](flux-sequence-packing.md).
@@ -140,9 +143,9 @@ membership is fixed. The `MicrobatchPlanner` may then reorder and group only
 those targets to reduce prefix padding; it cannot pull replacements from the
 buffer.
 
-The overview diagram in [`README.md`](README.md) visualizes this target design
-and marks its planned components. The next section remains the implemented
-reference against which it must be compared.
+The [historical diagram](diagrams/training-workflow.svg) visualizes this target
+design and its proposed components. The next section describes its original
+implemented reference.
 
 ## Initial single-GPU scheduling policy
 
