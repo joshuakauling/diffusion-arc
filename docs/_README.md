@@ -10,17 +10,17 @@ details.
 From the repository root, create a separate documentation environment:
 
 ```bash
-python3 -m venv .venv-docs
-.venv-docs/bin/python -m pip install -r requirements-docs.txt
-.venv-docs/bin/mkdocs serve
+python3 -m venv _venv-docs
+_venv-docs/bin/python -m pip install -r requirements-docs.txt
+_venv-docs/bin/mkdocs serve
 ```
 
 Open <http://127.0.0.1:8000>. Markdown and source docstring changes reload
-automatically. The [Python API reference](api.md) is generated from the source;
+automatically. The [Python API reference](_api.md) is generated from the source;
 it does not require the training dependencies or model downloads.
 
-To build a static website, run `.venv-docs/bin/mkdocs build`. Generated files go
-into the ignored `site/` directory. This command does not publish the website.
+To build a static website, run `_venv-docs/bin/mkdocs build`. Generated files go
+into the ignored `_site/` directory. This command does not publish the website.
 
 Links to repository files outside `docs/` are intended for browsing the repository
 and are not bundled into the website.

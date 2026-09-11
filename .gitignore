@@ -3,8 +3,10 @@
 /data/evaluation_runs/
 /data/nvarc_data/
 .venv/
-.venv-docs/
-/site/
+_venv-docs/
+/_site/
+/docs/_api.md
+/docs/_stylesheets/
 .cache/
 /artifacts/
 __pycache__/
