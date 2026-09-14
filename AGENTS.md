@@ -58,6 +58,11 @@ For substantial implementations, architectural changes, or unclear scope:
 
 ## Documentation and evidence
 
+- Create new documentation files or reports only when explicitly requested by
+  the user. Do not routinely ask whether to create them or offer to do so.
+  Summarize routine work in the response; update existing documentation only
+  when needed and keep changes proportional to the task. The guidance below
+  does not authorize creating new documentation files.
 - Write compact, self-contained explanations in plain language for readers
   unfamiliar with the conversation. Explain methods, results, and limitations;
   avoid repeated commands and incidental environment details in reports.
