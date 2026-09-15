@@ -25,15 +25,15 @@ from diffusion_arc.arc_data import (
     tokenize_nvarc_training_sample,
     validate_augmentation_for_task,
 )
-from diffusion_arc.arc_data._split_io import (
+from diffusion_arc.arc_data.splits.io import (
     load_string_array,
     load_task_splits,
     resolve_inside,
     validate_task_split_boundary,
 )
-from diffusion_arc.arc_data._split_layout import resolve_split_layout
+from diffusion_arc.arc_data.splits.layout import resolve_split_layout
 from diffusion_arc.arc_data.augmentation import ArcAugmentationKey
-from diffusion_arc.arc_data.canvas import _render_valid_grid_canvas
+from diffusion_arc.arc_data.image.canvas import _render_valid_grid_canvas
 from diffusion_arc.model.contracts import (
     TARGET_IMAGE_CHANNELS,
     TARGET_IMAGE_HEIGHT,

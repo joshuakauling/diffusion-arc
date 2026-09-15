@@ -7,10 +7,10 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from ._grid import ARC_GRID_SIZE, validate_arc_grid
+from .._grid import ARC_GRID_SIZE, validate_arc_grid
 from .palette import PAD_CLASS, TARGET_PALETTE_RGB
-from .prompt import ArcRenderedTrainingSample
-from .types import Grid
+from ..text.prompt import ArcRenderedTrainingSample
+from ..types import Grid
 
 
 CANVAS_SIZE = ARC_GRID_SIZE

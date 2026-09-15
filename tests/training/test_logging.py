@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
-from diffusion_arc.arc_data.palette import TARGET_PALETTE_RGB
+from diffusion_arc.arc_data.image.palette import TARGET_PALETTE_RGB
 from diffusion_arc.training.run import logging
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.runner import RunProgress

@@ -55,8 +55,8 @@ class ModelContractTests(unittest.TestCase):
             output.sequence_hidden_states = ()  # type: ignore[misc]
 
     def test_contract_constants_match_arc_data(self) -> None:
-        from diffusion_arc.arc_data.canvas import CANVAS_SIZE, CELL_SIZE
-        from diffusion_arc.arc_data.tokenization import (
+        from diffusion_arc.arc_data.image.canvas import CANVAS_SIZE, CELL_SIZE
+        from diffusion_arc.arc_data.text.tokenization import (
             NVARC_MAX_TOKENS as ARC_DATA_NVARC_MAX_TOKENS,
         )
 

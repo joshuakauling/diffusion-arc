@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from diffusion_arc.arc_data.palette import PAD_CLASS, TARGET_PALETTE_RGB
+from diffusion_arc.arc_data.image.palette import PAD_CLASS, TARGET_PALETTE_RGB
 
 from ..config import TrainingConfig
 from ..trainer import TrainStepResult

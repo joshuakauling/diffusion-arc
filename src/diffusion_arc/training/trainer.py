@@ -13,8 +13,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS
-from diffusion_arc.arc_data.canvas import CANVAS_SIZE
-from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
+from diffusion_arc.arc_data.image.canvas import CANVAS_SIZE
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.contracts import TARGET_LATENT_TOKEN_COUNT
 from diffusion_arc.model.flux.velocity import flux_transformer_device
 

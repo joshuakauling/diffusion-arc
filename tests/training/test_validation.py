@@ -13,9 +13,9 @@ from torch import nn
 import torch
 
 from diffusion_arc.arc_data import CANVAS_SIZE
-from diffusion_arc.arc_data.canvas import decode_arc_grids, render_grid_canvas
-from diffusion_arc.arc_data.palette import PAD_CLASS
-from diffusion_arc.arc_data.tokenization import ArcTokenizedEvaluationSample
+from diffusion_arc.arc_data.image.canvas import decode_arc_grids, render_grid_canvas
+from diffusion_arc.arc_data.image.palette import PAD_CLASS
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedEvaluationSample
 from diffusion_arc.inference import generation
 from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
 from diffusion_arc.training.run import validation

@@ -12,7 +12,7 @@ import torch
 from torch import Tensor, nn
 
 from diffusion_arc.arc_data.augmentation import ArcAugmentationKey, ArcAugmentationSpec, ArcGeometry
-from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model import NvarcBatchOutput, TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.step.flow_sampling import EndpointFlowPolicy, EndpointFlowSampler, UniformFlowSampler, build_flow_sampler

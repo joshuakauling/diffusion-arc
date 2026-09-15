@@ -24,8 +24,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from diffusion_arc.arc_data import load_arc_split_config
-from diffusion_arc.arc_data._split_io import resolve_inside
-from diffusion_arc.arc_data._split_layout import resolve_split_layout
+from diffusion_arc.arc_data.splits.io import resolve_inside
+from diffusion_arc.arc_data.splits.layout import resolve_split_layout
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.trainer import Trainer, TrainStepResult
 from diffusion_arc.training.step.flow_sampling import build_flow_generator, build_flow_sampler

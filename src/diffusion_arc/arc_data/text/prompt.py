@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .augmentation import ArcAugmentationKey, ArcAugmentedTrainingSample
-from .types import ArcEvaluationTask, Grid
+from ..augmentation import ArcAugmentationKey, ArcAugmentedTrainingSample
+from ..types import ArcEvaluationTask, Grid
 
 
 _IM_START = "<|im_start|>"

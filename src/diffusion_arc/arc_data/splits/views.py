@@ -11,7 +11,7 @@ from pathlib import Path
 from random import Random
 from typing import Any
 
-from ._split_io import (
+from .io import (
     load_json,
     load_task_splits,
     require_path_component,
@@ -19,15 +19,15 @@ from ._split_io import (
     resolve_inside,
     validate_task_split_boundary,
 )
-from ._split_layout import resolve_split_layout
-from .augmentation import (
+from .layout import resolve_split_layout
+from ..augmentation import (
     make_augmentation_key,
     make_identity_training_augmentation,
     sample_training_augmentation,
 )
-from .palette import TARGET_PALETTE_ID
-from .task_loading import load_training_task
-from .types import ArcTrainingTask
+from ..image.palette import TARGET_PALETTE_ID
+from ..task_loading import load_training_task
+from ..types import ArcTrainingTask
 
 
 ARC_SPLIT_SCHEMA_VERSION = 1

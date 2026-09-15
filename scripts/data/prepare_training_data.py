@@ -36,7 +36,7 @@ def prepare_training_data(config: TrainingConfig, *, config_path: Path) -> dict:
     code_paths = (
         Path(__file__),
         REPOSITORY_ROOT / "src/diffusion_arc/arc_data/augmentation.py",
-        REPOSITORY_ROOT / "src/diffusion_arc/arc_data/splits.py",
+        REPOSITORY_ROOT / "src/diffusion_arc/arc_data/splits/views.py",
         REPOSITORY_ROOT / "src/diffusion_arc/training/config.py",
     )
     return prepare_nvarc_bundle(

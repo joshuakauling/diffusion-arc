@@ -29,8 +29,8 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 from diffusion_arc.arc_data.augmentation import (
     ArcAugmentationKey, ArcAugmentationSpec, ArcAugmentedTrainingSample, ArcGeometry,
 )
-from diffusion_arc.arc_data.prompt import render_training_prompt
-from diffusion_arc.arc_data.tokenization import tokenize_nvarc_training_sample
+from diffusion_arc.arc_data.text.prompt import render_training_prompt
+from diffusion_arc.arc_data.text.tokenization import tokenize_nvarc_training_sample
 from diffusion_arc.arc_data.types import ArcPair
 from diffusion_arc.model.contracts import (
     NVARC_CONTEXT_WIDTH, NVARC_MAX_TOKENS, TARGET_LATENT_CHANNELS,

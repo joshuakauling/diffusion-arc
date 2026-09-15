@@ -8,9 +8,9 @@ from transformers import PreTrainedTokenizerBase
 
 from diffusion_arc._constants import NVARC_MAX_TOKENS
 
-from .augmentation import ArcAugmentationKey
+from ..augmentation import ArcAugmentationKey
 from .prompt import ArcRenderedEvaluationSample, ArcRenderedTrainingSample
-from .types import Grid
+from ..types import Grid
 
 
 @dataclass(frozen=True)

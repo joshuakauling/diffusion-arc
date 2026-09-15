@@ -26,7 +26,7 @@ Target preparation renders one canvas for every target exposure:
 ```
 
 ARC IDs use the fixed `greedy_rgb_maximin_v1` mapping defined in
-[`arc_data/palette.py`](../../src/diffusion_arc/arc_data/palette.py), with class
+[`arc_data/image/palette.py`](../../src/diffusion_arc/arc_data/image/palette.py), with class
 `10` reserved for RGB-white PAD. Palette selection is established before this
 model boundary; the VAE encoder consumes trusted rendered tensors and does not
 reclassify their pixels.

@@ -22,8 +22,8 @@ from diffusion_arc.arc_data import (
     render_evaluation_prompts, render_grid_canvas, tokenize_nvarc_evaluation_sample,
 )
 from diffusion_arc.arc_data._grid import validate_arc_grid
-from diffusion_arc.arc_data.tokenization import ArcTokenizedEvaluationSample
-from diffusion_arc.arc_data.canvas import ArcGridPrediction
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedEvaluationSample
+from diffusion_arc.arc_data.image.canvas import ArcGridPrediction
 from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.inference.conditioning import (
     PackedGenerationInput,

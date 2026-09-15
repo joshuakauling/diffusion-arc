@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from diffusion_arc.arc_data.canvas import (
+from diffusion_arc.arc_data.image.canvas import (
     ArcGridPrediction,
     classify_arc_cells,
     decode_arc_grids,

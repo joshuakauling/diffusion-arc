@@ -17,8 +17,8 @@ from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerFast
 
 from diffusion_arc.arc_data.augmentation import ArcAugmentationKey, ArcAugmentationSpec, ArcGeometry
-from diffusion_arc.arc_data.canvas import render_grid_canvas
-from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
+from diffusion_arc.arc_data.image.canvas import render_grid_canvas
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.contracts import NVARC_MAX_TOKENS, NVARC_VOCAB_SIZE, TARGET_IMAGE_SHAPE
 from diffusion_arc.training.config import DataConfig, load_training_config
 from diffusion_arc.training.data import (

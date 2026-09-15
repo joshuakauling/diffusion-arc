@@ -9,8 +9,8 @@ from torch import Tensor
 import torch
 
 from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS, NVARC_MAX_TOKENS
-from diffusion_arc.arc_data.canvas import _render_valid_grid_canvas
-from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
+from diffusion_arc.arc_data.image.canvas import _render_valid_grid_canvas
+from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.model.vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc.encoder import NvarcEncoder
