@@ -160,6 +160,25 @@ class ArcSplitGenerationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported palette"):
                 load_arc_split_config(config_path)
 
+    def test_geometry_sampling_is_explicit_and_rejects_invalid_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "config.json"
+            payload = split_config()
+            for policy in ("biased", True, None, []):
+                payload["views"]["train"]["geometry_sampling"] = policy
+                write_json(config_path, payload)
+                with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "geometry_sampling"):
+                    load_arc_split_config(config_path)
+            payload["views"]["train"]["geometry_sampling"] = "uniform"
+            write_json(config_path, payload)
+            config = load_arc_split_config(config_path)
+            self.assertEqual(config.views[0].geometry_sampling, "uniform")
+            self.assertEqual(config.views[-1].geometry_sampling, "cycle")
+            payload["views"]["train_original"]["geometry_sampling"] = "uniform"
+            write_json(config_path, payload)
+            with self.assertRaisesRegex(ValueError, "fields differ"):
+                load_arc_split_config(config_path)
+
 
 if __name__ == "__main__":
     unittest.main()

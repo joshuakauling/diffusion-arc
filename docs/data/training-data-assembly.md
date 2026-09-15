@@ -9,7 +9,7 @@ current `scripts/train_single_gpu.py` entrypoint.
 
 The current trainer instead configures `DataLoader(batch_size=None)` and groups
 consecutive `ArcTokenizedTrainingSample` items inside the training loop. It
-passes each fixed source batch to `prepare_flux_inputs_batch`; the auxiliary
+passes each fixed source batch to `encode_training_batch`; the auxiliary
 collator still does not participate. See the [training system
 overview](../training/README.md) for that end-to-end runtime path.
 
@@ -44,10 +44,9 @@ This is a host transport contract. It prepares aligned CPU tensors but does
 not define how NVARC or FLUX execute them on an accelerator. The current
 single-GPU runner follows the separate fixed-source-batch path described above.
 
-The implemented dataset and collator live in
-[`src/diffusion_arc/training`](../../src/diffusion_arc/training). Their tensor
-contract lives in
-[`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
+The dataset, collator, DataLoader construction, and `PackedTrainingBatch` tensor
+contract live in
+[`training/data.py`](../../src/diffusion_arc/training/data.py).
 
 ## Responsibility boundaries
 
@@ -67,7 +66,7 @@ view name, and an already loaded tokenizer:
 ```python
 from pathlib import Path
 
-from diffusion_arc.training import ArcTrainingDataset
+from diffusion_arc.training.data import ArcTrainingDataset
 
 
 dataset = ArcTrainingDataset(
@@ -166,7 +165,7 @@ sequence to the collator:
 ```python
 from torch.utils.data import DataLoader
 
-from diffusion_arc.training import TrainingCollator
+from diffusion_arc.training.data import TrainingCollator
 
 
 loader = DataLoader(
@@ -187,7 +186,7 @@ sampling remain explicit loader or runner decisions.
 The current single-GPU entrypoint deliberately uses `batch_size=None` and no
 `collate_fn`, so each loader item remains one `ArcTokenizedTrainingSample`.
 The training loop groups those items into fixed consecutive source batches and
-sends them to `prepare_flux_inputs_batch`; neither `TrainingCollator` nor
+sends them to `encode_training_batch`; neither `TrainingCollator` nor
 `PackedTrainingBatch` participates in the current training loop.
 
 The current returned batch uses custom dataclasses without a `pin_memory()`

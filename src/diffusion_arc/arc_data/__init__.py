@@ -14,7 +14,7 @@ from .augmentation import (
     sample_training_augmentation,
     validate_augmentation_for_task,
 )
-from .canvas import (
+from .image.canvas import (
     ArcGridPrediction,
     CANVAS_SIZE,
     CELL_SIZE,
@@ -32,15 +32,15 @@ from .task_loading import (
     load_evaluation_task,
     load_training_task,
 )
-from .prompt import (
+from .text.prompt import (
     ArcPromptTarget,
     ArcRenderedEvaluationSample,
     ArcRenderedTrainingSample,
     render_evaluation_prompts,
     render_training_prompt,
 )
-from .palette import PAD_CLASS, TARGET_PALETTE_ID, TARGET_PALETTE_RGB
-from .splits import (
+from .image.palette import PAD_CLASS, TARGET_PALETTE_ID, TARGET_PALETTE_RGB
+from .splits.views import (
     ARC_AUGMENTATION_GENERATOR_VERSION,
     ARC_SPLIT_SCHEMA_VERSION,
     ArcSplitConfig,
@@ -49,7 +49,7 @@ from .splits import (
     generate_augmented_key_files,
     load_arc_split_config,
 )
-from .tokenization import (
+from .text.tokenization import (
     NVARC_MAX_TOKENS,
     ArcTokenizedEvaluationSample,
     ArcTokenizedTrainingSample,

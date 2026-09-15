@@ -1,21 +1,20 @@
-"""Inference-time generation and diagnostics for Diffusion-ARC."""
+"""Target-free conditioning and generation for Diffusion-ARC."""
 
-from .conditioning import prepare_evaluation_text_inputs
+from .conditioning import PackedGenerationInput, prepare_evaluation_text_inputs
 from .generation import (
     ArcGenerationBatch,
-    ExactGridDiagnostic,
     continue_arc_batch,
-    diagnose_exact_grids,
     generate_arc_batch,
+    generate_packed_arc_samples,
     linear_timestep_schedule,
 )
 
 __all__ = [
     "ArcGenerationBatch",
-    "ExactGridDiagnostic",
     "continue_arc_batch",
-    "diagnose_exact_grids",
     "generate_arc_batch",
+    "generate_packed_arc_samples",
+    "PackedGenerationInput",
     "linear_timestep_schedule",
     "prepare_evaluation_text_inputs",
 ]

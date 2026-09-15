@@ -37,6 +37,7 @@ nav:
       - NVARC: architecture/nvarc-overview.md
   - Training:
       - Overview: training/README.md
+      - First ARC-AGI-1 epoch: training/arc-agi-1-recipe.md
       - NVARC encoder: training/nvarc-batch-runner.md
       - FLUX sequence packing: training/flux-sequence-packing.md
   - Performance:

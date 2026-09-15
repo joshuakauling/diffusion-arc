@@ -7,7 +7,8 @@ flow objective and loss-weighting invariants, but replaces both bucket catalogs
 with unpadded FA3 segments. The lookahead schedulers below are superseded
 proposals, not the next implementation step; that is distributed training.
 The original schema-v1/v2 descriptions are also historical; current configs
-require schema v8.
+require baseline schema v10 or training-run schema v1. The padded training
+implementation, benchmark variants and their executable notebooks have been removed.
 For the current path, see the [training overview](README.md),
 [NVARC encoder](nvarc-batch-runner.md) and
 [FLUX packing guide](flux-sequence-packing.md).
@@ -73,10 +74,10 @@ one parameter update.
 ```text
 consecutive ArcTokenizedTrainingSample items
     |
-    | prepare_flux_inputs_batch(...)
+    | encode_training_batch(...)
     |
     +-- input_ids + sequence_offsets
-    |       -> NvarcBatchRunner
+    |       -> NvarcEncoder
     |       -> NvarcBatchOutput
     |       -> NvarcSequenceState
     |
@@ -105,7 +106,7 @@ consecutive ArcTokenizedTrainingSample items
 ```
 
 Preparation and FLUX training interleave throughout the run. The fixed-batch FIFO
-queue is in-memory state owned by `run_single_gpu_training`; it is not an
+queue is in-memory state owned by `run_training_loop`; it is not an
 offline cache and does not persist across runs. A separate `NvarcInputBuffer`
 remains deferred until lookahead bucketing is implemented.
 
@@ -167,7 +168,7 @@ inputs:
 ```python
 for source_batch in consecutive_batches(training_samples, size=S):
     flux_input_buffer.extend(
-        prepare_flux_inputs_batch(source_batch, vae_microbatch_size=V)
+        encode_training_batch(source_batch, vae_microbatch_size=V)
     )
 
     while len(flux_input_buffer) >= optimizer_batch_size:
@@ -271,7 +272,7 @@ reference their `prefix_end`. Full-sequence reuse is accepted only if
 it passes a predefined real-checkpoint comparison against the exact-prefix
 oracle under the selected precision and attention backend.
 
-`NvarcBatchRunner` may receive similarly sized complete sequences. It
+`NvarcEncoder` may receive similarly sized complete sequences. It
 right-pads them, creates the NVARC attention mask, runs one frozen forward, and
 removes padded positions. Its `NvarcBatchOutput.sequence_hidden_states` tuple
 contains one independent owning `[L_s, 7680]` tensor per source in input order.
@@ -416,12 +417,12 @@ model work. None of these choices may appear as a silent runtime fallback.
 ## Current implementation boundary
 
 The repository implements independent `NvarcBatchOutput` tensors, fixed
-consecutive source preparation through `prepare_flux_inputs_batch`, bounded VAE
+consecutive source preparation through `encode_training_batch`, bounded VAE
 microbatches, explicit `NvarcSequenceState` ownership, pure
 `pad_flux_text_prefixes`, and transactional `build_flux_microbatch` assembly.
 `compute_flux_microbatch_loss` composes flow sampling, joint-mask
 construction, one trainable FLUX forward, and the unscaled velocity loss. The
-step-limited `run_single_gpu_training` loop consumes an
+step-limited `run_training_loop` loop consumes an
 `ArcTokenizedTrainingSample` stream, maintains its private FIFO queue, forms
 optimizer and FLUX microbatches, scales losses, accumulates gradients, performs
 optimizer updates, flushes only a true stream tail, and exposes an optional

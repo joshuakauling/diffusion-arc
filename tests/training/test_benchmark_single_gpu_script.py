@@ -10,188 +10,97 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from scripts import benchmark_single_gpu as bench
 import torch
 
-from diffusion_arc.training.single_gpu_config import (
-    BenchmarkConfig, SingleGpuPaddingConfig, load_single_gpu_training_config,
+from diffusion_arc.training.config import BenchmarkConfig, load_training_config
+from diffusion_arc.training.step.encoding import PreparationMetrics, PreparedSource
+from diffusion_arc.training.step.flux_batching import (
+    FluxTargetBatch,
 )
-from diffusion_arc.training.flux_input import PreparationMetrics, PreparedSource
-from diffusion_arc.training.flux_schedule import FluxBatchShape, FluxPackingPolicy, FluxSchedulingPolicy, FluxTargetBatch
-from diffusion_arc.sequence_buckets import SequenceLengthBuckets
-from diffusion_arc.model import NvarcBatchRunner
-from scripts import benchmark_single_gpu as bench
-from tests.training.test_dataset import build_layout
-from tests.model.test_nvarc_encoder import FakeNvarc
-from tests.training.test_single_gpu_loop import (
-    _sample, NumberedVaeEncoder, RecordingLoss, ScalarTransformer,
-)
+from diffusion_arc.training.trainer import StepDiagnostics, TargetMetrics, TrainStepResult
+
+from tests.training.test_data import build_layout
 
 
 def _config():
-    config = load_single_gpu_training_config(
+    config = load_training_config(
         Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b3.json"
-    )
+    , expected_type="baseline")
     return replace(
         config,
         loop=replace(config.loop, max_optimizer_steps=3, optimizer_batch_size=3,
-                     nvarc_source_batch_size=1, vae_microbatch_size=1, flux_microbatch_size=1),
-        flux_scheduling=None, flux_packing=None,
+                     vae_microbatch_size=1),
         benchmark=BenchmarkConfig(warmup_steps=1, measured_steps=2, repetitions=3),
     )
 
 
 def _samples(count):
-    return [SimpleNamespace(key=f"source-{i}", prefix_token_ends=(10, 20, 30, 40)) for i in range(count)]
+    return [SimpleNamespace(key=f"source-{i}", prefix_token_ends=(10, 20, 30, 40),
+                            target_grids=(None,) * 4) for i in range(count)]
 
 
-def _preparation(samples):
-    return PreparationMetrics(
-        tuple(PreparedSource(str(sample.key), sample.prefix_token_ends[1:]) for sample in samples),
-        tuple(sample.prefix_token_ends[-1] for sample in samples),
+def _result(samples, *, nvarc_batches=None, flux_batches=None, learning_rates=(1e-5,)):
+    """CPU result fixture; target metadata belongs entirely to this update."""
+    sources = tuple(PreparedSource(str(sample.key), sample.prefix_token_ends[1:]) for sample in samples)
+    lengths = tuple(sample.prefix_token_ends[-1] for sample in samples)
+    prefixes = tuple(length for source in sources for length in source.prefix_ends)
+    if nvarc_batches is None:
+        nvarc_batches = (tuple(range(len(samples))),)
+    if flux_batches is None:
+        flux_batches = tuple(FluxTargetBatch((i,), prefix + 900) for i, prefix in enumerate(prefixes))
+    preparation = PreparationMetrics(sources, lengths, nvarc_batches, vae_calls=1)
+    return TrainStepResult(
+        loss=0.5, learning_rates=learning_rates, gradient_norm=0.25, gradient_clipped=False,
+        step_seconds=1.5, source_count=len(samples), target_count=len(prefixes),
+        diagnostics=StepDiagnostics(preparation, flux_batches, prefixes),
+        targets=tuple(TargetMetrics(loss=0.5, timestep=0.5, context_pair_count=i % 3 + 2,
+                                    has_boundary=True) for i in range(len(prefixes))),
+        nvarc_tokens=sum(lengths), nvarc_calls=len(nvarc_batches), vae_calls=1,
+        flux_text_tokens=sum(prefixes), flux_image_tokens=900 * len(prefixes),
+        flux_joint_tokens=sum(prefixes) + 900 * len(prefixes), flux_forward_calls=len(flux_batches),
     )
 
 
-def _record_fixed_step(recorder, loss, target_count, microbatch_count):
-    """Supply a fixed-plan fixture when testing the recorder without training."""
-
-    size = recorder.config.loop.flux_microbatch_size
-    lengths = [length for length, _ in list(recorder.pending_targets)[:target_count]]
-    buckets = SequenceLengthBuckets(recorder.config.padding.flux_bucket_boundaries)
-    recorder.flux_schedule(tuple(
-        FluxTargetBatch(tuple(range(start, min(start + size, target_count))),
-                        buckets.padded_length(max(lengths[start:start + size])))
-        for start in range(0, target_count, size)
-    ))
-    recorder.step(loss, target_count, microbatch_count)
-
-
 class BenchmarkTests(unittest.TestCase):
-    def test_b2_records_executed_shapes_and_fifo_tails_without_consuming_extra_window(self):
-        config = _config()
-        config = replace(config, loop=replace(config.loop, nvarc_source_batch_size=4,
-                                             vae_microbatch_size=48, flux_microbatch_size=None),
-                         flux_scheduling=FluxSchedulingPolicy((FluxBatchShape(1, 8, 2), FluxBatchShape(2, 8, 3))))
-        source_samples = [_sample(count) for count in (2, 3, 1, 2, 2)]
-        source_samples = [replace(s, key=replace(s.key, task_id=f"{i:08x}"))
-                          for i, s in enumerate(source_samples)]
-        consumed, executed, executed_flux = [], [], []
-
-        def loss(model, batch, **kwargs):
-            executed_flux.append((tuple(batch.clean_latents[:, 0, 0].tolist()),
-                                  batch.text_inputs.encoder_hidden_states.shape[1]))
-            return RecordingLoss()(model, batch, **kwargs)
-
-        class Nvarc(FakeNvarc):
-            def record_attention(self, **kwargs):
-                executed.append(tuple(self.last_input_ids.shape))
-                super().record_attention(**kwargs)
-
-        def samples():
-            for sample in source_samples:
-                consumed.append(sample)
-                yield sample
-
-        transformer = ScalarTransformer()
-        optimizer = torch.optim.SGD(transformer.parameters(), lr=0.01)
-        recorder = bench._StepRecorder(config, "cuda:0", optimizer, None)
-        with ExitStack() as stack:
-            self._mock_cuda(stack)
-            stack.enter_context(patch("diffusion_arc.training.flux_input._render_valid_grid_canvas",
-                                      return_value=torch.zeros(1, 1, 1)))
-            stack.enter_context(patch("diffusion_arc.training.single_gpu_loop.compute_flux_microbatch_loss",
-                                      side_effect=loss))
-            recorder.start()
-            bench.run_single_gpu_training(
-                samples(), nvarc_runner=NvarcBatchRunner(Nvarc()), vae_encoder=NumberedVaeEncoder(),
-                transformer=transformer, optimizer=optimizer, flux_compute_dtype=torch.bfloat16,
-                max_optimizer_steps=1, optimizer_batch_size=3, min_context_pairs_before_target=2,
-                nvarc_source_batch_size=4, vae_microbatch_size=48,
-                on_preparation=recorder.preparation,
-                flux_microbatch_size=None, flux_scheduling=config.flux_scheduling,
-                on_flux_schedule=recorder.flux_schedule,
-                on_optimizer_step=recorder.step,
-            )
-        row, = recorder.rows
-        self.assertEqual(consumed, source_samples[:4])
-        self.assertEqual(row["nvarc_calls"], len(executed))
-        self.assertEqual([(1, b["total_tokens"]) for b in row["nvarc_batches"]], executed)
-        self.assertEqual(row["nvarc_processed_tokens"], sum(size * length for size, length in executed))
-        self.assertEqual(row["nvarc_unpadded_tokens"], 14)
-        self.assertEqual(executed, [(1, 14)])
-        self.assertEqual(row["nvarc_processed_tokens"], 14)
-        self.assertEqual([s["key"] for s in row["prepared_sources"]],
-                         [str(source_samples[i].key) for i in (0, 1, 3)])
-        self.assertEqual(row["target_prefix_tokens"], [4, 4, 6])
-        self.assertEqual(list(recorder.pending_targets), [(4, True)])
-        self.assertEqual(row["flux_microbatches"], 2)
-        self.assertEqual(row["flux_padded_prefix_tokens"], [8, 8, 8])
-        self.assertEqual([i for b in row["flux_batches"] for i in b["target_indices"]], [2, 0, 1])
-        self.assertEqual([(tuple(i + 1 for i in b["target_indices"]), b["padded_length"])
-                          for b in row["flux_batches"]], executed_flux)
-        self.assertIsNone(recorder.flux_batches)
-
-    def test_observed_batches_index_sources_across_multiple_preparation_windows(self):
+    def test_observed_nvarc_batches_use_step_local_source_indices(self):
         config = replace(_config(), loop=replace(_config().loop, optimizer_batch_size=6))
-        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
+        recorder = bench._StepRecorder(config, "cuda:0")
         with ExitStack() as stack:
             self._mock_cuda(stack)
             recorder.start()
-            for sample in _samples(2):
-                recorder.preparation(_preparation([sample]))
-            _record_fixed_step(recorder, torch.tensor(0.5), 6, 6)
-            recorder.preparation(_preparation(_samples(2)))
-            _record_fixed_step(recorder, torch.tensor(0.5), 6, 6)
+            recorder.step(_result(_samples(2), nvarc_batches=((0,), (1,))))
+            recorder.step(_result(_samples(2)))
         self.assertEqual([b["source_indices"] for b in recorder.rows[0]["nvarc_batches"]], [[0], [1]])
         self.assertEqual([b["source_indices"] for b in recorder.rows[1]["nvarc_batches"]], [[0, 1]])
         self.assertEqual([row["nvarc_calls"] for row in recorder.rows], [2, 1])
         self.assertEqual([row["nvarc_processed_tokens"] for row in recorder.rows], [80, 80])
 
-    def test_records_packed_nvarc_and_bucketed_flux_lengths_separately(self):
-        config = load_single_gpu_training_config(
-            Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b3.json"
-        )
-        config = replace(config, flux_scheduling=None, flux_packing=None,
-                         loop=replace(config.loop, flux_microbatch_size=1),
-                         padding=SingleGpuPaddingConfig((256, 512, 768, 8400)))
-        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
-        samples = _samples(16)
-        samples[0].prefix_token_ends = (10, 256, 257, 513)
-        with ExitStack() as stack:
-            self._mock_cuda(stack)
-            recorder.start()
-            recorder.preparation(_preparation(samples))
-            _record_fixed_step(recorder, torch.tensor(0.5), 48, 48)
-        row = recorder.rows[0]
-        self.assertEqual(row["nvarc_unpadded_tokens"], 513 + 15 * 40)
-        self.assertEqual(row["nvarc_processed_tokens"], 513 + 15 * 40)
-        self.assertEqual(row["target_prefix_tokens"], [256, 257, 513] + [20, 30, 40] * 15)
-        self.assertEqual(row["flux_padded_prefix_tokens"], [256, 512, 768] + [256] * 45)
-        self.assertEqual([s["key"] for s in row["prepared_sources"]], [f"source-{i}" for i in range(16)])
-        self.assertEqual(row["completed_sources"], 16)
-
-    def test_bucket_metadata_uses_each_physical_microbatch_maximum(self):
-        config = _config()
-        config = replace(config,
-                         loop=replace(config.loop, optimizer_batch_size=4,
-                                      nvarc_source_batch_size=2, flux_microbatch_size=2),
-                         padding=SingleGpuPaddingConfig((32, 64, 8400)))
-        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
+    def test_records_packed_nvarc_and_flux_token_workload(self):
+        config = replace(_config(), loop=replace(_config().loop, optimizer_batch_size=6))
+        recorder = bench._StepRecorder(config, "cuda:0")
         samples = _samples(2)
-        samples[1].prefix_token_ends = (15, 25, 35, 50)
+        samples[0].prefix_token_ends = (10, 256, 257, 513)
+        batches = (FluxTargetBatch((0, 1, 2), 3726), FluxTargetBatch((3, 4, 5), 2790))
         with ExitStack() as stack:
             self._mock_cuda(stack)
             recorder.start()
-            recorder.preparation(_preparation(samples))
-            _record_fixed_step(recorder, torch.tensor(0.5), 4, 2)
-        self.assertEqual(recorder.rows[0]["nvarc_processed_tokens"], 90)
-        self.assertEqual(recorder.rows[0]["flux_padded_prefix_tokens"], [32, 32, 64, 64])
-        self.assertEqual(list(recorder.pending_targets), [(35, False), (50, True)])
+            recorder.step(_result(samples, flux_batches=batches))
+        row = recorder.rows[0]
+        self.assertEqual(row["nvarc_processed_tokens"], 513 + 40)
+        self.assertEqual(row["target_prefix_tokens"], [256, 257, 513, 20, 30, 40])
+        self.assertEqual([batch["joint_tokens"] for batch in row["flux_batches"]], [3726, 2790])
+        self.assertEqual(row["completed_sources"], 2)
+        self.assertEqual(row["flux_joint_tokens"], 6516)
+        self.assertEqual(row["gradient_norm"], 0.25)
+        self.assertEqual(row["step_seconds"], 1.5)
+        self.assertNotIn("flux_padded_prefix_tokens", row)
 
     def test_file_check_uses_existing_layout_without_loading_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             split, _ = build_layout(Path(directory))
             config = replace(_config(), data=replace(_config().data, split_directory=split))
-            with patch.object(bench, "load_single_gpu_training_config", return_value=config):
+            with patch.object(bench, "load_training_config", return_value=config):
                 resolved, files = bench.check_inputs(Path("unused.json"))
                 self.assertIs(resolved, config)
                 self.assertEqual(len(files), 4)
@@ -206,20 +115,15 @@ class BenchmarkTests(unittest.TestCase):
         stack.enter_context(patch.object(torch.cuda, "max_memory_reserved", return_value=200))
 
     def test_full_pipeline_timing_excludes_warmup_and_bookkeeping(self):
-        optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
-        scheduler = Mock()
-        recorder = bench._StepRecorder(_config(), "cuda:0", optimizer, scheduler)
+        recorder = bench._StepRecorder(_config(), "cuda:0")
         with ExitStack() as stack:
             self._mock_cuda(stack)
             stack.enter_context(patch.object(bench.time, "perf_counter", side_effect=[0, 10, 11, 13, 14, 18, 19]))
             recorder.start()
             for sample in _samples(3):
-                recorder.preparation(_preparation([sample]))
-                _record_fixed_step(recorder, torch.tensor(0.5), 3, 3)
+                recorder.step(_result([sample]))
         self.assertEqual([row["seconds"] for row in recorder.rows], [10, 2, 4])
-        self.assertEqual(scheduler.step.call_count, 3)
         self.assertEqual(recorder.rows[0]["target_prefix_tokens"], [20, 30, 40])
-        self.assertEqual(recorder.rows[0]["flux_padded_prefix_tokens"], [20, 30, 40])
         summary = bench.summarize(recorder.rows)
         self.assertEqual(summary["measured_steps"], 2)
         self.assertEqual(summary["median_step_seconds"], 3)
@@ -228,47 +132,32 @@ class BenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(summary["completed_sources_per_second"], 2 / 6)
         self.assertEqual(summary["peak_allocated_bytes"], 100)
 
-    def test_metadata_tracks_fifo_targets_across_optimizer_boundaries(self):
-        config = _config()
-        config = replace(config, loop=replace(config.loop, optimizer_batch_size=4, nvarc_source_batch_size=2))
-        recorder = bench._StepRecorder(config, "cuda:0", SimpleNamespace(param_groups=[{"lr": 1e-5}]), None)
-        samples = _samples(2)
-        samples[1].prefix_token_ends = (15, 25, 35, 50)
+    def test_incomplete_result_is_retained_for_failure_diagnostics(self):
+        config = replace(_config(), loop=replace(_config().loop, optimizer_batch_size=6))
+        recorder = bench._StepRecorder(config, "cuda:0")
         with ExitStack() as stack:
             self._mock_cuda(stack)
             recorder.start()
-            recorder.preparation(_preparation(samples))
-            _record_fixed_step(recorder, torch.tensor(0.5), 4, 4)
-            self.assertEqual(recorder.rows[0]["nvarc_processed_tokens"], 90)
-            self.assertEqual(recorder.rows[0]["nvarc_unpadded_tokens"], 90)
-            self.assertEqual(recorder.rows[0]["target_prefix_tokens"], [20, 30, 40, 25])
-            self.assertEqual(list(recorder.pending_targets), [(35, False), (50, True)])
             with self.assertRaisesRegex(RuntimeError, "incomplete optimizer batch"):
-                _record_fixed_step(recorder, torch.tensor(0.5), 2, 2)
-            self.assertEqual(recorder.rows[-1]["targets"], 2)
+                recorder.step(_result(_samples(1)))
+        self.assertEqual(recorder.rows[-1]["targets"], 3)
 
-    def test_learning_rate_record_is_the_rate_used_not_the_next_rate(self):
-        config = _config()
-        optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=1e-5)
-        scheduler = bench.build_flux_scheduler(config, optimizer=optimizer)
-        recorder = bench._StepRecorder(config, "cuda:0", optimizer, scheduler)
+    def test_learning_rate_record_comes_from_the_returned_used_rate(self):
+        recorder = bench._StepRecorder(_config(), "cuda:0")
         with ExitStack() as stack:
             self._mock_cuda(stack)
             recorder.start()
-            for sample in _samples(2):
-                recorder.preparation(_preparation([sample]))
-                optimizer.step()
-                _record_fixed_step(recorder, torch.tensor(0.5), 3, 3)
+            recorder.step(_result(_samples(1), learning_rates=(0.0,)))
+            recorder.step(_result(_samples(1), learning_rates=(1e-5 / 213,)))
         self.assertEqual(recorder.rows[0]["learning_rate"], 0)
         self.assertAlmostEqual(recorder.rows[1]["learning_rate"], 1e-5 / 213)
-        self.assertEqual(scheduler.last_epoch, 2)
 
     def test_missing_split_fails_before_gpu_setup(self):
         with tempfile.TemporaryDirectory() as directory:
             config = replace(_config(), data=replace(_config().data, split_directory=Path(directory) / "missing"))
             with (
-                patch.object(bench, "load_single_gpu_training_config", return_value=config),
-                patch.object(bench, "prepare_single_gpu_device") as prepare,
+                patch.object(bench, "load_training_config", return_value=config),
+                patch.object(bench, "prepare_device") as prepare,
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "not prepared"):
                     bench.benchmark_once(Path("config.json"), Path(directory) / "result")
@@ -302,58 +191,51 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             self.assertEqual(json.loads((root / "failed/summary.json").read_text())["status"], "failed")
 
-    def test_shared_loop_wiring_and_incomplete_run_is_not_a_result(self):
-        for completed_steps, packed in ((3, False), (2, False), (3, True), (2, True)):
+    def test_trainer_wiring_and_incomplete_run_is_not_a_result(self):
+        for completed_steps in (3, 2):
             with self.subTest(completed_steps=completed_steps), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config_path = root / "config.json"
                 config_path.write_text("{}")
                 models = SimpleNamespace(
-                    tokenizer=object(), nvarc_runner=object(), vae_encoder=object(),
-                    transformer=object(), flux_compute_dtype=torch.bfloat16,
+                    tokenizer=object(), nvarc_encoder=object(), vae_encoder=object(),
+                    flux_transformer=object(), flux_compute_dtype=torch.bfloat16,
                     flux_packing_backend=SimpleNamespace(binding="flash_attn_3.flash_attn_interface.flash_attn_varlen_func"),
                 )
                 optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
-                config = replace(
-                    _config(), padding=SingleGpuPaddingConfig(flux_bucket_boundaries=(256, 512, 8400)),
-                )
-                if packed:
-                    config = replace(config, flux_packing=FluxPackingPolicy(),
-                                     loop=replace(config.loop, flux_microbatch_size=None),
-                                     padding=SingleGpuPaddingConfig())
-                def run(samples, **kwargs):
-                    self.assertIs(kwargs["flux_packing"], config.flux_packing)
-                    if packed:
-                        self.assertIs(kwargs["flux_packing_backend"], models.flux_packing_backend)
-                    self.assertEqual(kwargs["max_optimizer_steps"], 3)
-                    self.assertEqual(kwargs["vae_microbatch_size"], 1)
-                    self.assertEqual(kwargs["flux_bucket_boundaries"], config.padding.flux_bucket_boundaries)
-                    self.assertNotIn("on_optimizer_step_metrics", kwargs)
-
-                    self.assertIs(kwargs["flux_scheduling"], config.flux_scheduling)
-                    for index, sample in enumerate(samples):
-                        if index == completed_steps:
-                            break
-                        kwargs["on_preparation"](_preparation([sample]))
-                        batches = ((FluxTargetBatch((2, 0, 1), None, 2790),) if packed else
-                                   tuple(FluxTargetBatch((i,), 256) for i in range(3)))
-                        kwargs["on_flux_schedule"](batches)
-                        kwargs["on_optimizer_step"](torch.tensor(0.5), 3, len(batches))
+                scheduler = Mock()
+                config = _config()
+                flow_sampler, loss_function = object(), object()
+                executed = []
+                def make_trainer(**kwargs):
+                    self.assertIs(kwargs["nvarc_encoder"], models.nvarc_encoder)
+                    self.assertIs(kwargs["vae_encoder"], models.vae_encoder)
+                    self.assertIs(kwargs["flux_transformer"], models.flux_transformer)
+                    self.assertIs(kwargs["optimizer"], optimizer)
+                    self.assertIs(kwargs["scheduler"], scheduler)
+                    self.assertIs(kwargs["flow_sampler"], flow_sampler)
+                    self.assertIs(kwargs["loss_function"], loss_function)
+                    self.assertEqual(kwargs["nvarc_max_tokens"], config.nvarc_max_tokens)
+                    self.assertFalse(any(name.startswith("on_") for name in kwargs))
+                    def step(sequences):
+                        executed.append(sequences)
+                        return _result(sequences, flux_batches=(FluxTargetBatch((2, 0, 1), 2790),))
+                    return SimpleNamespace(step=step)
                 with ExitStack() as stack:
                     self._mock_cuda(stack)
                     for name, result in {
-                        "check_inputs": (config, []), "prepare_single_gpu_device": "cuda:0",
-                        "seed_single_gpu_process": None, "load_single_gpu_models": models,
-                        "build_single_sample_loader": _samples(3), "build_flux_optimizer": optimizer,
-                        "build_flux_scheduler": Mock(), "build_flow_generator": object(),
+                        "check_inputs": (config, []), "prepare_device": "cuda:0",
+                        "seed_process": None, "load_models": models,
+                        "build_dataloader": _samples(completed_steps), "build_optimizer": optimizer,
+                        "build_lr_scheduler": scheduler, "build_flow_generator": object(),
+                        "build_flow_sampler": flow_sampler, "build_velocity_loss": loss_function,
                     }.items():
                         stack.enter_context(patch.object(bench, name, return_value=result))
                     stack.enter_context(patch.object(torch.cuda, "get_device_name", return_value="fake GPU"))
                     stack.enter_context(patch.object(torch.cuda, "get_device_properties", return_value=SimpleNamespace(total_memory=1024)))
                     stack.enter_context(patch.object(torch.cuda, "device_count", return_value=1))
-                    stack.enter_context(patch.object(bench, "run_single_gpu_training", side_effect=run))
-                    if packed:
-                        stack.enter_context(patch.object(bench, "version", return_value="test-pinned"))
+                    stack.enter_context(patch.object(bench, "Trainer", side_effect=make_trainer))
+                    stack.enter_context(patch.object(bench, "version", return_value="test-pinned"))
                     profiler = stack.enter_context(patch.object(torch.profiler, "profile", side_effect=AssertionError("no profiler")))
                     if completed_steps == 3:
                         bench.benchmark_once(config_path, root / "result")
@@ -361,16 +243,16 @@ class BenchmarkTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "requires 3 full steps"):
                             bench.benchmark_once(config_path, root / "result")
                     profiler.assert_not_called()
+                    scheduler.step.assert_not_called()
                 manifest = json.loads((root / "result/manifest.json").read_text())
                 self.assertEqual(manifest["status"], "complete" if completed_steps == 3 else "failed")
                 rows = [json.loads(line) for line in (root / "result/steps.jsonl").read_text().splitlines()]
                 self.assertEqual(len(rows), completed_steps)
-                if packed:
-                    self.assertEqual(manifest["execution"]["flux_packed_token_budget"], 12288)
-                    self.assertEqual(manifest["execution"]["modulation_reduction"], "fp32")
-                    self.assertEqual(rows[0]["flux_padded_prefix_tokens"], [20, 30, 40])
-                    self.assertEqual(rows[0]["flux_batches"], [dict(batch_size=3, padded_length=None,
-                        joint_tokens=2790, target_indices=[2, 0, 1])])
+                self.assertEqual(len(executed), completed_steps)
+                self.assertEqual(manifest["execution"]["flux_packed_token_budget"], 12288)
+                self.assertEqual(manifest["execution"]["modulation_reduction"], "fp32")
+                self.assertEqual(rows[0]["flux_batches"], [dict(batch_size=3,
+                    joint_tokens=2790, target_indices=[2, 0, 1])])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import unittest
 import torch
 from diffusers import Flux2Transformer2DModel as UpstreamFlux2Transformer2DModel
 
-from diffusion_arc.model.flux_transformer import (
+from diffusion_arc.model.flux.transformer import (
     Flux2Transformer2DModel as LocalFlux2Transformer2DModel,
 )
 

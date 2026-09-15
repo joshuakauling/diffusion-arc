@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "training_config": "../training/benchmarks/single_gpu_b3.json",
+  "bundle": "../../data/benchmarks/arc_agi_1_validation",
+  "timesteps": [0.1, 0.3, 0.5, 0.7, 0.9, 1.0],
+  "loss_seed": 10167,
+  "sampling_seeds": [20167, 20168],
+  "sampling_steps": 40,
+  "warmup_repetitions": 1,
+  "measured_repetitions": 2,
+  "cache_device": "cpu",
+  "resident_optimizer_state": true
+}

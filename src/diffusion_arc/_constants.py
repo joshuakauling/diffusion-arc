@@ -1,7 +1,11 @@
 """Lightweight constants shared across data and model layers."""
 
+# Pinned ARC-AGI-1 v1.0.2 archive used to freeze validation task identities.
+ARC_AGI_1_ARCHIVE_SHA256 = "159676f5c7c6e3b74e89403edda319ff2be714b630e9594ac64914ba1e788466"
+
 NVARC_VOCAB_SIZE = 16
 NVARC_MAX_TOKENS = 8400
+DEFAULT_NVARC_MAX_TOKENS = NVARC_MAX_TOKENS * 16
 # Full five-pair prompt, including the final output excluded from model input.
 NVARC_TOKENIZER_MAX_TOKENS = 9330
 NVARC_PAD_TOKEN_ID = 13
@@ -11,6 +15,8 @@ NVARC_CONTEXT_WIDTH = len(NVARC_HIDDEN_STATE_INDICES) * NVARC_HIDDEN_SIZE
 
 
 __all__ = [
+    "ARC_AGI_1_ARCHIVE_SHA256",
+    "DEFAULT_NVARC_MAX_TOKENS",
     "NVARC_CONTEXT_WIDTH",
     "NVARC_HIDDEN_SIZE",
     "NVARC_HIDDEN_STATE_INDICES",

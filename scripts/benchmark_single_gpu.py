@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
@@ -25,27 +24,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
 
 from diffusion_arc.arc_data import load_arc_split_config
-from diffusion_arc.arc_data._split_io import resolve_inside
-from diffusion_arc.arc_data._split_layout import resolve_split_layout
-from diffusion_arc.training.flux_input import PreparationMetrics
-from diffusion_arc.training.flux_schedule import FluxTargetBatch
-from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
-from diffusion_arc.training.single_gpu_loop import run_single_gpu_training
-from diffusion_arc.training.single_gpu_setup import (
-    build_flow_generator,
-    build_flux_optimizer,
-    build_flux_scheduler,
-    build_single_sample_loader,
-    load_single_gpu_models,
-    prepare_single_gpu_device,
-    seed_single_gpu_process,
-)
+from diffusion_arc.arc_data.splits.io import resolve_inside
+from diffusion_arc.arc_data.splits.layout import resolve_split_layout
+from diffusion_arc.training.config import load_training_config
+from diffusion_arc.training.trainer import Trainer, TrainStepResult
+from diffusion_arc.training.step.flow_sampling import build_flow_generator, build_flow_sampler
+from diffusion_arc.training.step.loss import build_velocity_loss
+from diffusion_arc.training.setup import build_optimizer, load_models, prepare_device, seed_process
+from diffusion_arc.training.step.lr_schedule import build_lr_scheduler
+from diffusion_arc.training.data import build_dataloader, iter_optimizer_batches
 
 
 def check_inputs(config_path: Path):
     """Check required files, without generating data or tokenizing the dataset."""
 
-    config = load_single_gpu_training_config(config_path)
+    config = load_training_config(config_path, expected_type="baseline")
     if config.benchmark is None:
         raise ValueError("benchmark entrypoint requires config.benchmark")
     split_file = config.data.split_directory / "config.json"
@@ -101,100 +94,64 @@ def summarize(rows: list[dict]) -> dict:
 
 
 class _StepRecorder:
-    """Keep CPU-only workload metadata; time the entire consumer-first pipeline."""
+    """Record returned CPU metrics and time data consumption plus each update."""
 
-    def __init__(self, config, device, optimizer, scheduler):
+    def __init__(self, config, device):
         self.config, self.device = config, device
-        self.optimizer, self.scheduler = optimizer, scheduler
         self.rows: list[dict] = []
-        self.pending_targets: deque[tuple[int, bool]] = deque()
-        self.sources: list[dict] = []
-        self.nvarc_tokens = 0
-        self.nvarc_batches: list[dict] = []
-        self.flux_batches: tuple[FluxTargetBatch, ...] | None = None
-
-    def flux_schedule(self, batches: tuple[FluxTargetBatch, ...]) -> None:
-        """Retain the actual physical plan without recomputing the scheduler."""
-
-        self.flux_batches = batches
-
-    def preparation(self, metrics: PreparationMetrics) -> None:
-        """Charge completed preparation to the next recorded optimizer step.
-
-        Source metadata describes work done since the previous update, while
-        target metadata follows FIFO consumption and can span updates. CPU
-        prefetch alone adds neither prepared sources nor pending targets here.
-        """
-
-        # Batch indices are window-local; stored indices address this step's
-        # prepared_sources, which may contain several preparation windows.
-        source_offset = len(self.sources)
-        for source in metrics.sources:
-            self.sources.append({"key": source.key, "tokens": source.prefix_ends[-1]})
-            self.pending_targets.extend(
-                (length, index == len(source.prefix_ends) - 1)
-                for index, length in enumerate(source.prefix_ends)
-            )
-        self.nvarc_tokens += sum(metrics.source_lengths)
-        self.nvarc_batches.append({
-            "source_lengths": list(metrics.source_lengths),
-            "total_tokens": sum(metrics.source_lengths),
-            "source_indices": list(range(source_offset, len(self.sources))),
-        })
 
     def start(self):
         torch.cuda.synchronize(self.device)
         torch.cuda.reset_peak_memory_stats(self.device)
         self.started = time.perf_counter()
 
-    def step(self, loss, target_count, microbatch_count):
-        # Step callback: retain the LR used, then advance the training schedule.
-        learning_rate = self.optimizer.param_groups[0]["lr"]
-        if self.scheduler is not None:
-            self.scheduler.step()
-        # Benchmark recording: finish timing and record consumed FIFO targets.
+    def step(self, result: TrainStepResult):
         torch.cuda.synchronize(self.device)
         seconds = time.perf_counter() - self.started
-        consumed = [self.pending_targets.popleft() for _ in range(target_count)]
-        batches = self.flux_batches
-        if batches is None:
-            raise RuntimeError("FLUX benchmark requires the executed schedule")
-        if len(batches) != microbatch_count:
+        metrics = result.diagnostics.preparation
+        batches = result.diagnostics.flux_batches
+        if len(batches) != result.flux_forward_calls:
             raise RuntimeError("FLUX schedule and executed microbatch count disagree")
-        padded_prefixes = [0] * target_count
-        for batch in batches:
-            for index in batch.target_indices:
-                padded_prefixes[index] = consumed[index][0] if batch.padded_length is None else batch.padded_length
         self.rows.append({
             "step": len(self.rows) + 1,
             "phase": "warmup" if len(self.rows) < self.config.benchmark.warmup_steps else "measure",
             "seconds": seconds,
-            "loss": float(loss.item()),
-            "learning_rate": learning_rate,
-            "targets": target_count,
-            "flux_microbatches": microbatch_count,
+            "step_seconds": result.step_seconds,
+            "loss": result.loss,
+            "learning_rate": result.learning_rates[0],
+            "gradient_norm": result.gradient_norm,
+            "gradient_clipped": result.gradient_clipped,
+            "targets": result.target_count,
+            "flux_microbatches": result.flux_forward_calls,
             "flux_batches": [
-                {"batch_size": len(batch.target_indices), "padded_length": batch.padded_length,
-                 **({"joint_tokens": batch.joint_tokens} if batch.joint_tokens is not None else {}),
+                {"batch_size": len(batch.target_indices), "joint_tokens": batch.joint_tokens,
                  "target_indices": list(batch.target_indices)}
                 for batch in batches
             ],
-            "completed_sources": sum(last for _, last in consumed),
-            "prepared_sources": self.sources,
-            "nvarc_unpadded_tokens": sum(source["tokens"] for source in self.sources),
-            "nvarc_processed_tokens": self.nvarc_tokens,
-            "nvarc_calls": len(self.nvarc_batches),
-            "nvarc_batches": self.nvarc_batches,
-            "target_prefix_tokens": [length for length, _ in consumed],
-            "flux_padded_prefix_tokens": padded_prefixes,
+            "completed_sources": result.source_count,
+            "prepared_sources": [
+                {"key": source.key, "tokens": length}
+                for source, length in zip(metrics.sources, metrics.source_lengths, strict=True)
+            ],
+            "nvarc_unpadded_tokens": sum(metrics.source_lengths),
+            "nvarc_processed_tokens": result.nvarc_tokens,
+            "nvarc_calls": result.nvarc_calls,
+            "nvarc_batches": [
+                {"source_lengths": [metrics.source_lengths[index] for index in indices],
+                 "total_tokens": sum(metrics.source_lengths[index] for index in indices),
+                 "source_indices": list(indices)}
+                for indices in metrics.nvarc_batches
+            ],
+            "vae_calls": result.vae_calls,
+            "flux_text_tokens": result.flux_text_tokens,
+            "flux_image_tokens": result.flux_image_tokens,
+            "flux_joint_tokens": result.flux_joint_tokens,
+            "target_prefix_tokens": list(result.diagnostics.target_prefix_tokens),
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
             "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
         })
-        if target_count != self.config.loop.optimizer_batch_size:
+        if result.target_count != self.config.loop.optimizer_batch_size:
             raise RuntimeError("Benchmark exhausted its data with an incomplete optimizer batch")
-        self.sources, self.nvarc_tokens = [], 0
-        self.nvarc_batches = []
-        self.flux_batches = None
         torch.cuda.reset_peak_memory_stats(self.device)
         self.started = time.perf_counter()
 
@@ -238,41 +195,42 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
     recorder = None
     _write_json(output_directory / "manifest.json", {**manifest, "status": "running"})
     try:
-        device = prepare_single_gpu_device(config)
+        device = prepare_device(config)
         manifest["gpu"] = {
             "name": torch.cuda.get_device_name(device),
             "total_memory_bytes": torch.cuda.get_device_properties(device).total_memory,
             "visible_count": torch.cuda.device_count(),
         }
-        seed_single_gpu_process(config.seed)
-        models = load_single_gpu_models(config, device=device)
-        if config.flux_packing is not None:
-            manifest["packages"]["flash-attn-3"] = version("flash-attn-3")
-            manifest["execution"].update(flux_backend=models.flux_packing_backend.binding,
-                modulation_reduction="fp32", flux_packed_token_budget=config.flux_packing.max_tokens)
-        samples = build_single_sample_loader(config, tokenizer=models.tokenizer)
-        optimizer = build_flux_optimizer(config, transformer=models.transformer)
-        scheduler = build_flux_scheduler(config, optimizer=optimizer)
+        seed_process(config.seed)
+        models = load_models(config, device=device)
+        manifest["packages"]["flash-attn-3"] = version("flash-attn-3")
+        manifest["execution"].update(flux_backend=models.flux_packing_backend.binding,
+            modulation_reduction="fp32", flux_packed_token_budget=config.flux_packing.max_tokens)
+        samples = build_dataloader(config, tokenizer=models.tokenizer)
+        optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
+        scheduler = build_lr_scheduler(config, optimizer=optimizer)
         generator = build_flow_generator(config, device=device)
-        recorder = _StepRecorder(config, device, optimizer, scheduler)
-        recorder.start()
-        run_single_gpu_training(
-            samples,
-            nvarc_runner=models.nvarc_runner,
-            vae_encoder=models.vae_encoder,
-            transformer=models.transformer,
-            optimizer=optimizer,
+        recorder = _StepRecorder(config, device)
+        trainer = Trainer(
+            nvarc_encoder=models.nvarc_encoder, vae_encoder=models.vae_encoder,
+            flux_transformer=models.flux_transformer, optimizer=optimizer, scheduler=scheduler,
+            flow_sampler=build_flow_sampler(config, generator=generator),
+            loss_function=build_velocity_loss(config),
             flux_compute_dtype=models.flux_compute_dtype,
-            **asdict(config.loop),
-            flux_bucket_boundaries=config.padding.flux_bucket_boundaries,
-            flux_scheduling=config.flux_scheduling,
-            flux_packing=config.flux_packing,
-            **({"flux_packing_backend": models.flux_packing_backend} if config.flux_packing is not None else {}),
-            on_preparation=recorder.preparation,
-            on_flux_schedule=recorder.flux_schedule,
-            generator=generator,
-            on_optimizer_step=recorder.step,
+            flux_packing_backend=models.flux_packing_backend,
+            nvarc_max_tokens=config.nvarc_max_tokens,
+            vae_microbatch_size=config.loop.vae_microbatch_size,
+            flux_max_joint_tokens=config.flux_packing.max_tokens,
+            min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
+            max_grad_norm=config.optimizer.max_grad_norm,
         )
+        recorder.start()
+        for sequences in iter_optimizer_batches(
+            samples, optimizer_batch_size=config.loop.optimizer_batch_size,
+            min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
+            max_optimizer_steps=config.loop.max_optimizer_steps,
+        ):
+            recorder.step(trainer.step(sequences))
         if len(recorder.rows) != config.loop.max_optimizer_steps:
             raise RuntimeError(
                 f"Benchmark requires {config.loop.max_optimizer_steps} full steps; "

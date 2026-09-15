@@ -1,4 +1,4 @@
-"""Host-side tensor contracts at the boundary between ARC data and model code.
+"""Tensor contracts shared by model execution during training and inference.
 
 The validators inspect tensor values and are intended to run on CPU before a
 batch is transferred to an accelerator. Running them on accelerator tensors can
@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
 from torch import Tensor
+import torch
 
 from diffusion_arc._constants import (
     NVARC_CONTEXT_WIDTH,
@@ -87,24 +87,6 @@ DEFAULT_FLUX_SPATIAL_SHAPE = FluxSpatialShape(
 
 
 @dataclass(frozen=True)
-class PackedTrainingBatch:
-    """Packed source sequences and their aligned training target exposures.
-
-    ``sequence_offsets`` delimits ``S`` unpadded source sequences inside the
-    flat token tensor. Each of the ``K`` target exposures refers to one source
-    and stores an end-exclusive prefix boundary relative to that source. The
-    final prefix may equal its source length when the unused terminal target
-    output has been omitted.
-    """
-
-    input_ids: Tensor
-    sequence_offsets: Tensor
-    target_sequence_indices: Tensor
-    target_prefix_ends: Tensor
-    target_images: Tensor
-
-
-@dataclass(frozen=True)
 class NvarcBatchOutput:
     """Independent unpadded hidden-state tensors for one NVARC batch.
 
@@ -115,20 +97,6 @@ class NvarcBatchOutput:
     """
 
     sequence_hidden_states: tuple[Tensor, ...]
-
-
-@dataclass(frozen=True)
-class FlowMatchingBatch:
-    """One independently sampled straight-path state per target exposure.
-
-    ``noisy_latents`` contains the interpolated transformer input ``z_t``.
-    ``timesteps`` contains one normalized flow time per target exposure.
-    ``target_velocity`` is the straight-path supervision ``epsilon - z_0``.
-    """
-
-    noisy_latents: Tensor
-    timesteps: Tensor
-    target_velocity: Tensor
 
 
 @dataclass(frozen=True)
@@ -145,66 +113,6 @@ class FluxTextInputs:
     encoder_hidden_states: Tensor
     text_position_ids: Tensor
     text_attention_mask: Tensor
-
-
-def validate_packed_training_batch(batch: PackedTrainingBatch) -> None:
-    """Raise when a packed training batch violates the public tensor contract."""
-
-    source_lengths = validate_packed_source_sequences(
-        input_ids=batch.input_ids,
-        sequence_offsets=batch.sequence_offsets,
-    )
-    target_count = _validate_target_images(batch.target_images)
-
-    _validate_index_tensor(
-        batch.target_sequence_indices,
-        name="target_sequence_indices",
-        expected_length=target_count,
-    )
-    _validate_index_tensor(
-        batch.target_prefix_ends,
-        name="target_prefix_ends",
-        expected_length=target_count,
-    )
-
-    target_sequence_indices = batch.target_sequence_indices.tolist()
-    target_prefix_ends = batch.target_prefix_ends.tolist()
-    source_count = len(source_lengths)
-
-    previous_source_index = -1
-    previous_prefix_end = 0
-    seen_source_indices: set[int] = set()
-
-    for target_index, (source_index, prefix_end) in enumerate(
-        zip(target_sequence_indices, target_prefix_ends, strict=True)
-    ):
-        if not 0 <= source_index < source_count:
-            raise ValueError(
-                "target_sequence_indices contains an out-of-range source index "
-                f"at target {target_index}"
-            )
-        if source_index < previous_source_index:
-            raise ValueError("target_sequence_indices must be ordered by source")
-
-        if source_index != previous_source_index:
-            previous_prefix_end = 0
-
-        if prefix_end <= previous_prefix_end:
-            raise ValueError(
-                "target_prefix_ends must be positive and strictly increasing "
-                "within each source"
-            )
-        if prefix_end > source_lengths[source_index]:
-            raise ValueError(
-                "target_prefix_ends must not lie beyond their source sequence"
-            )
-
-        seen_source_indices.add(source_index)
-        previous_source_index = source_index
-        previous_prefix_end = prefix_end
-
-    if seen_source_indices != set(range(source_count)):
-        raise ValueError("every source sequence must have at least one target exposure")
 
 
 def validate_packed_source_sequences(
@@ -240,26 +148,6 @@ def validate_packed_source_sequences(
     return source_lengths
 
 
-def _validate_target_images(target_images: Tensor) -> int:
-    _require_tensor(target_images, name="target_images")
-    if target_images.dtype != torch.float32:
-        raise TypeError("target_images must have dtype torch.float32")
-    if target_images.ndim != 4 or tuple(target_images.shape[1:]) != TARGET_IMAGE_SHAPE:
-        raise ValueError(
-            "target_images must have shape "
-            f"[K, {TARGET_IMAGE_CHANNELS}, {TARGET_IMAGE_HEIGHT}, {TARGET_IMAGE_WIDTH}]"
-        )
-
-    target_count = target_images.shape[0]
-    if target_count == 0:
-        raise ValueError("a training batch must contain at least one target exposure")
-    if not torch.isfinite(target_images).all().item():
-        raise ValueError("target_images must contain only finite values")
-    if torch.any((target_images < -1.0) | (target_images > 1.0)).item():
-        raise ValueError("target_images values must lie in [-1, 1]")
-    return target_count
-
-
 def _validate_index_tensor(
     value: Tensor,
     *,
@@ -280,7 +168,25 @@ def _require_tensor(value: object, *, name: str) -> None:
         raise TypeError(f"{name} must be a torch.Tensor")
 
 
+def validate_target_latents(latents: Tensor, *, name: str) -> None:
+    """Validate the narrow transformer-facing target-latent interface."""
+
+    if not isinstance(latents, Tensor):
+        raise TypeError(f"{name} must be a torch.Tensor")
+    if latents.ndim != 3 or latents.shape[2] != TARGET_LATENT_CHANNELS:
+        raise ValueError(
+            f"{name} must have shape [K, T, {TARGET_LATENT_CHANNELS}]"
+        )
+    if latents.shape[0] == 0:
+        raise ValueError(f"{name} must contain at least one target exposure")
+    if latents.shape[1] == 0:
+        raise ValueError(f"{name} must contain at least one image token")
+    if not latents.dtype.is_floating_point:
+        raise TypeError(f"{name} must use a floating-point dtype")
+
+
 __all__ = [
+    "validate_target_latents",
     "NVARC_CONTEXT_WIDTH",
     "NVARC_HIDDEN_SIZE",
     "NVARC_HIDDEN_STATE_INDICES",
@@ -297,11 +203,8 @@ __all__ = [
     "TARGET_LATENT_TOKEN_COUNT",
     "TARGET_LATENT_WIDTH",
     "DEFAULT_FLUX_SPATIAL_SHAPE",
-    "FlowMatchingBatch",
     "FluxSpatialShape",
     "FluxTextInputs",
     "NvarcBatchOutput",
-    "PackedTrainingBatch",
     "validate_packed_source_sequences",
-    "validate_packed_training_batch",
 ]

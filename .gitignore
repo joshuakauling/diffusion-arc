@@ -2,6 +2,7 @@
 /data/raw/
 /data/evaluation_runs/
 /data/nvarc_data/
+/data/training/
 .venv/
 _venv-docs/
 /_site/

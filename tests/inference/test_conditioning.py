@@ -8,7 +8,9 @@ import torch
 from torch import nn
 
 from diffusion_arc.arc_data import ArcTokenizedEvaluationSample
-from diffusion_arc.inference import prepare_evaluation_text_inputs
+from diffusion_arc.inference import PackedGenerationInput, prepare_evaluation_text_inputs
+from diffusion_arc.inference.conditioning import sample_conditioning_noise
+from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
 from diffusion_arc.model import NvarcBatchOutput
 
 
@@ -57,7 +59,7 @@ class EvaluationConditioningTests(unittest.TestCase):
 
         result = prepare_evaluation_text_inputs(
             samples,
-            nvarc_runner=runner,  # type: ignore[arg-type]
+            nvarc_encoder=runner,  # type: ignore[arg-type]
         )
 
         self.assertEqual(len(runner.calls), 1)
@@ -82,15 +84,33 @@ class EvaluationConditioningTests(unittest.TestCase):
     def test_rejects_empty_invalid_and_mismatched_batches(self) -> None:
         runner = RecordingEvaluationRunner()
         with self.assertRaisesRegex(ValueError, "must not be empty"):
-            prepare_evaluation_text_inputs((), nvarc_runner=runner)  # type: ignore[arg-type]
+            prepare_evaluation_text_inputs((), nvarc_encoder=runner)  # type: ignore[arg-type]
         with self.assertRaisesRegex(TypeError, "ArcTokenizedEvaluationSample"):
-            prepare_evaluation_text_inputs((object(),), nvarc_runner=runner)  # type: ignore[arg-type]
+            prepare_evaluation_text_inputs((object(),), nvarc_encoder=runner)  # type: ignore[arg-type]
 
         with self.assertRaisesRegex(RuntimeError, "output count"):
             prepare_evaluation_text_inputs(
                 (_sample("task-a", 0, (1, 2)),),
-                nvarc_runner=RecordingEvaluationRunner(output_count_delta=-1),  # type: ignore[arg-type]
+                nvarc_encoder=RecordingEvaluationRunner(output_count_delta=-1),  # type: ignore[arg-type]
             )
+
+
+    def test_query_noise_preserves_legacy_seed_assignment(self) -> None:
+        query = PackedGenerationInput("task-0", 0, torch.zeros((2, 7680)))
+        # Golden derived seeds from the original packed validation implementation.
+        cases = (
+            (50, ("generation", 0), 6863582346321245173),
+            (51, ("generation", 1), 7407952957187489372),
+            (167, ("loss", 0.1), 3735880390092699040),
+        )
+        for seed, purpose, expected_seed in cases:
+            with self.subTest(seed=seed, purpose=purpose):
+                expected = torch.randn(
+                    TARGET_LATENT_SHAPE,
+                    generator=torch.Generator().manual_seed(expected_seed),
+                )
+                actual = sample_conditioning_noise(query, seed, purpose, "cpu")
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

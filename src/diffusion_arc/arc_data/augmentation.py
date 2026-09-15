@@ -184,12 +184,15 @@ def sample_training_augmentation(
     max_pairs: int,
     max_cells: int,
     rng: Random,
+    geometry_sampling: str = "cycle",
 ) -> ArcAugmentationSpec:
     """Sample one bounded, reproducible augmentation of a training task."""
 
     _validate_training_sampling_limits(task, max_pairs=max_pairs, max_cells=max_cells)
     if augmentation_index < 0:
         raise ValueError("augmentation_index must be non-negative")
+    if geometry_sampling not in ("cycle", "uniform"):
+        raise ValueError("geometry_sampling must be 'cycle' or 'uniform'")
 
     candidate_indices = list(range(len(task.pairs)))
     rng.shuffle(candidate_indices)
@@ -203,9 +206,16 @@ def sample_training_augmentation(
     color_mapping = list(range(10))
     rng.shuffle(color_mapping)
     geometries = tuple(ArcGeometry)
+    # Drawing after the existing pair/color choices preserves historical keys
+    # and keeps those choices identical when only the geometry policy changes.
+    geometry = (
+        rng.choice(geometries)
+        if geometry_sampling == "uniform"
+        else geometries[augmentation_index % len(geometries)]
+    )
 
     return ArcAugmentationSpec(
-        geometry=geometries[augmentation_index % len(geometries)],
+        geometry=geometry,
         color_mapping=tuple(color_mapping),
         pair_indices=tuple(selected_indices),
     )

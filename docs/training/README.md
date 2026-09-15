@@ -7,42 +7,66 @@ relevant code and detailed documentation. The root
 [`README.md`](../../README.md) remains authoritative for project scope,
 milestones, evaluation, and non-goals.
 
+The [first ARC-AGI-1 training recipe](arc-agi-1-recipe.md) records the agreed
+dataset, augmentation, objective, optimizer and validation setup for the next
+full-epoch run, including logging and checkpoint continuation.
+
 ## Overall workflow
 
 **Encode each source once. Train its eligible targets from the shared state.**
 
 The flow below describes the [B3 single-GPU baseline](../performance/b3.md).
 
-The ordered CPU loader can prefetch tokenized samples in worker processes. The
-training loop takes a fixed window of consecutive sources (16 in the current
-benchmark), selects eligible targets, and trims each source before its final
-target output. NVARC encodes the entire window in one unpadded FA3 Varlen call.
-Sources have separate causal attention boundaries and reset position IDs.
+The ordered CPU loader prefetches tokenized samples. An outer loop groups whole
+sequences by their eligible target count using `iter_optimizer_batches`. In the
+current recipe, 16 five-pair sequences provide 48 targets; the final ten sources
+provide 30. Each group is passed to `Trainer.step(sequences)` for one update.
+No prepared targets are carried between steps.
 
-The VAE then encodes the targets in configured chunks (48 in the benchmark).
-Each `FluxInput` selects an exact prefix from its shared NVARC sequence state.
-Prepared targets enter a FIFO buffer; the next 48 define one optimizer update.
-The FLUX scheduler groups only those selected targets into physical microbatches
-under a 12,288-token budget, counting each target's exact text prefix and 900
-image tokens. It may reorder execution within that fixed batch, while
-noise/timesteps remain assigned in logical order and losses are weighted by
-target count.
+The step trims each source before its final target output and calls frozen
+NVARC under a **134,400-token budget** (8,400 × 16). Smaller budgets split whole
+sources into consecutive packs while preserving logical order. Each source has
+separate causal attention and reset position IDs. NVARC stops after block 27,
+retaining raw states after blocks 9, 18 and 27. The VAE then encodes target
+canvases in independent image batches (48 in the current recipe).
 
-The [FA3 sequence-packing recipe](flux-sequence-packing.md) gives each FLUX
-target a separate noncausal attention segment and preserves its own timestep
-modulation. Backward sums modulation contributions in FP32. NVARC uses causal
-segments and stops after block 27, retaining the raw states after 9, 18 and 27.
+Flow noise/times are assigned in logical target order. FLUX packs those targets
+under its separate **12,288 joint-token budget**, counting each prefix plus 900
+image tokens. Backward weights each pack by its share of the actual target
+count. One optimizer update and one scheduler advance follow all packs.
+Gradients are cleared with `set_to_none=True` before the step returns, leaving
+memory available for validation or sampling. Construction clears gradients once
+before the first step and sets FLUX to training mode; NVARC/VAE remain frozen.
 
-Neither component uses length buckets or alignment padding. NVARC has no
-scheduler or cross-window lookahead: the logical source window bounds
-preparation and retained hidden states. FLUX groups only the already selected
-optimizer batch; it does not change membership across steps.
+`TrainStepResult` contains total loss, gradient/LR metrics, total step time
+including encoding and workload counters. Its `targets` tuple holds CPU-only
+measurements in source order, then eligible target order: loss, sampled time,
+demonstration count, boundary presence, regional MSEs and weighted contributions.
+The tuple index also identifies the target in the packing diagnostics. Regional
+measurements are `None` when the objective does not provide them; a 30×30 target
+has `has_boundary=False`, no boundary MSE and zero regional boundary contribution.
+Detailed preparation and packing metadata live separately under `diagnostics`.
+No tensors or autograd graphs leave the step.
 
-The entrypoint is [`scripts/train_single_gpu.py`](../../scripts/train_single_gpu.py).
-Its `DataLoader` uses `batch_size=None`; workers perform loading/tokenization
-in advance, while the consumer groups consecutive items into each source window.
-The auxiliary `TrainingCollator` remains available to diagnostics but is not
-part of this entrypoint.
+The outer loop owns global progress, logging and event timing. Logging derives
+endpoint/uniform and demonstration groups from individual target measurements,
+including their counts and combinations across steps. The
+[training entrypoint](../../scripts/train_single_gpu.py) loads a validated
+`TrainingConfig` and passes it to
+[`run_training`](../../src/diffusion_arc/training/runner.py). The runner builds
+the components, consumes one complete epoch and checks its progress totals.
+[`logging.py`](../../src/diffusion_arc/training/run/logging.py) derives the configured
+training scalars, reads selected hardware counters and sends one combined W&B
+record per update. Validation prepares fixed CPU caches once and evaluates them
+at the configured steps, including the initial model. Its losses and workload
+counters join the same update record. Fixed-seed sampling reuses a subset of
+that cache, calls the existing inference pipeline and adds scores plus a W&B
+comparison table. Full-state checkpoints follow sampling at the configured
+steps. A resume restores the optimizer, scheduler, RNGs and committed data cursor,
+then continues the same W&B run without replaying existing history records.
+The separate [profiling entrypoint](../../scripts/profile_single_gpu.py) retains
+the B3 Torch/Nsight workflow. The auxiliary `TrainingCollator` serves diagnostics
+and is not part of the production step.
 
 ## Model boundaries
 
@@ -64,9 +88,11 @@ is reduced in FP32.
 | `ArcTokenizedTrainingSample` | One complete tokenized ARC source sequence with its recorded target positions and grids. |
 | `NvarcSequenceState` | One source's NVARC hidden states, shared by all of its eligible target inputs. |
 | `FluxInput` | One target, its exact prefix boundary, its clean latent, and a reference to the shared sequence state. |
-| Private FIFO queue | Prepared target inputs waiting for optimizer-batch selection. |
-| `OptimizerBatch` | All targets that contribute to one parameter update. |
-| `PackedFluxMicrobatch` | Exact text prefixes, attention-segment boundaries, and image inputs for one B3 forward/backward call. |
+| `EncodedTrainingBatch` | Prepared targets plus CPU metadata for their NVARC/VAE execution. |
+| `TrainStepResult` | Update scalars, workload counters, target measurements and separate diagnostics returned to the outer loop. |
+| `TargetMetrics` | One target's loss, flow time, demonstration count and regional measurements, before logging aggregation. |
+| `StepDiagnostics` | CPU-only preparation details, physical FLUX packs and logical target prefix lengths. |
+| `FluxMicrobatch` | Exact text prefixes, attention-segment boundaries and image positions for one packed FLUX call; flow tensors are supplied separately. |
 
 The shared hidden-state tensor is released after its last target prefix has been
 copied into a physical microbatch. Python later collects the small
@@ -77,21 +103,55 @@ grouping preserves the mathematical objective; finite-precision gradients can
 still differ. The [FLUX packing guide](flux-sequence-packing.md) documents
 physical grouping and loss normalization, including a smaller final batch.
 
+## Package responsibilities
+
+`arc_data` defines ARC tasks, augmentation, prompts, and tokenization. `model`
+defines neural components, forward operations, and their tensor interfaces.
+`training` composes those components with targets, objectives, optimizer steps,
+and validation. `inference` generates predictions from target-free conditioning.
+Neither `model` nor `inference` imports training code; validation passes only
+conditioning to generation and scores the returned predictions afterward.
+
+Within `model`, `nvarc/` contains the frozen encoder and explicit attention
+binding. `flux/` contains the transformer, text conditioning, velocity prediction,
+packing and modulation. The independent VAE encoder/decoder lives in
+[`model/vae.py`](../../src/diffusion_arc/model/vae.py); shared tensor interfaces
+remain in [`model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
+The component packages import no backends on their own; model setup still
+explicitly registers NVARC attention and selects the FLUX packing backend.
+
 ## Training module map
+
+`trainer.py` and `runner.py` are the two entrypoints. `step/` contains the
+components of one optimizer update; `run/` contains validation, logging and
+checkpoint services. Shared configuration, setup, data loading and optional
+profiling remain at the package root.
 
 | Module | Responsibility |
 | --- | --- |
-| [`dataset.py`](../../src/diffusion_arc/training/dataset.py) | Build tokenized ARC training samples from configured task views. |
-| [`collation.py`](../../src/diffusion_arc/training/collation.py) | Provide the auxiliary packed CPU batch used by tests and diagnostics. |
-| [`single_gpu_config.py`](../../src/diffusion_arc/training/single_gpu_config.py) | Validate model, data, loop, and optimizer settings. |
-| [`single_gpu_setup.py`](../../src/diffusion_arc/training/single_gpu_setup.py) | Select the device, seed RNGs, load models, and construct the training components. |
-| [`flux_input.py`](../../src/diffusion_arc/training/flux_input.py) | Create target-level inputs from frozen NVARC and VAE outputs. |
-| [`flux_microbatch.py`](../../src/diffusion_arc/training/flux_microbatch.py) | Copy exact prefixes and build physical FLUX microbatches. |
-| [`flux_schedule.py`](../../src/diffusion_arc/training/flux_schedule.py) | Group one optimizer window by packed token budget or the padded reference cost catalog. |
-| [`flux_loss.py`](../../src/diffusion_arc/training/flux_loss.py) | Sample flow states, run FLUX, and compute the velocity loss. |
-| [`single_gpu_loop.py`](../../src/diffusion_arc/training/single_gpu_loop.py) | Keep FIFO membership, execute scheduled FLUX batches, and update FLUX. |
-| [`flow_probes.py`](../../src/diffusion_arc/training/flow_probes.py) | Measure comparable fixed-noise flow losses. |
-| [`__init__.py`](../../src/diffusion_arc/training/__init__.py) | Define the public training-package exports. |
+| [`config.py`](../../src/diffusion_arc/training/config.py) | Parse baseline and run JSON formats directly into one `TrainingConfig`. |
+| [`setup.py`](../../src/diffusion_arc/training/setup.py) | Select the device, seed RNGs, load frozen/trainable models, and construct AdamW. |
+| [`data.py`](../../src/diffusion_arc/training/data.py) | Build the dataset, DataLoader and whole-sequence optimizer batches; retain auxiliary CPU collation. |
+| [`trainer.py`](../../src/diffusion_arc/training/trainer.py) | Execute one complete update from supplied sequences and return aggregated step metrics. |
+| [`runner.py`](../../src/diffusion_arc/training/runner.py) | Build or restore components, iterate the remaining epoch and run scheduled evaluation/checkpoint events. |
+| [`profiling.py`](../../src/diffusion_arc/training/profiling.py) | Record explicit benchmark measurements and optional profiler ranges. |
+| [`step/encoding.py`](../../src/diffusion_arc/training/step/encoding.py) | Encode source sequences and target grids through frozen NVARC and VAE models. |
+| [`step/flux_microbatch.py`](../../src/diffusion_arc/training/step/flux_microbatch.py) | Build physical microbatches, execute FLUX, and apply the selected loss. |
+| [`step/flux_batching.py`](../../src/diffusion_arc/training/step/flux_batching.py) | Group one optimizer window by packed token budget. |
+| [`step/flow_sampling.py`](../../src/diffusion_arc/training/step/flow_sampling.py) | Draw noise/times and construct straight-path supervision, including endpoint quotas. |
+| [`step/loss.py`](../../src/diffusion_arc/training/step/loss.py) | Define plain MSE and equal-target canvas/grid/boundary reductions. |
+| [`step/lr_schedule.py`](../../src/diffusion_arc/training/step/lr_schedule.py) | Construct linear-warmup constant or cosine learning-rate schedules. |
+| [`run/logging.py`](../../src/diffusion_arc/training/run/logging.py) | Reduce measurements, render prediction tables, collect selected hardware counters and own the W&B run. |
+| [`run/validation.py`](../../src/diffusion_arc/training/run/validation.py) | Verify the held-out bundle, prepare fixed CPU caches, evaluate loss and score generated predictions. |
+| [`run/checkpointing.py`](../../src/diffusion_arc/training/run/checkpointing.py) | Save HF transformer weights and training state, verify checkpoint contracts, restore RNG/optimizer state and apply retention. |
+
+Import components from their owning modules. Loading `training.config` requires
+neither PyTorch nor model initialization. The outer caller selects and constructs
+models, optimizer, sampler, loss and scheduler. `Trainer` accepts those components
+and execution limits directly, without a run config or logging callbacks. Its
+only public execution method is `step`; it does not own epochs or stop criteria.
+Logging and checkpoints serialize the recipe through `TrainingConfig.recipe_dict()`.
+Training and validation share `plan_nvarc_batches` from `step.encoding`.
 
 ## Further reading
 
@@ -100,7 +160,7 @@ physical grouping and loss normalization, including a smaller final batch.
 | [`../data/data-pipeline.md`](../data/data-pipeline.md) | ARC loading, task splits, augmentation, prompts, tokenization, and target canvases. |
 | [`../data/training-data-assembly.md`](../data/training-data-assembly.md) | The auxiliary `TrainingCollator` and `PackedTrainingBatch` contract. |
 | [`nvarc-batch-runner.md`](nvarc-batch-runner.md) | Frozen NVARC packing, causal boundaries, early exit, and checkpoint evidence. |
-| [`flux-text-conditioning.md`](flux-text-conditioning.md) | Exact-prefix and ownership contracts, including the padded reference interface. |
+| [`flux-text-conditioning.md`](flux-text-conditioning.md) | Training prefix ownership and the separate dense inference interface. |
 | [`flux-image-encoding.md`](flux-image-encoding.md) | Frozen VAE target encoding, latent packing, and normalization. |
 | [`flow-matching.md`](flow-matching.md) | Flow sampling, velocity supervision, loss computation, and validation. |
 | [`batching-and-efficiency-roadmap.md`](batching-and-efficiency-roadmap.md) | Superseded design note for the padded pipeline and proposed lookahead schedulers. |
@@ -122,11 +182,14 @@ remain explicit smoke or preflight tests.
 ## Current boundaries
 
 - Training is single-process and single-GPU; DDP and FSDP2 are not implemented.
-- Schema v8 is the combined configuration contract. Historical schemas and
-  NVARC scheduler/bucket options are rejected rather than silently translated.
-- B3 enables FLUX packing explicitly. Other recipes, including
-  [single_gpu.json](../../configs/training/single_gpu.json), retain the padded
-  FLUX reference path; schema v8 alone does not enable packing.
+- Baseline JSON uses schema v10; the finite epoch recipe uses schema v1 with
+  `config_type="training_run"`. Both normalize to `TrainingConfig`; entrypoints
+  explicitly restrict the supported type. Older baseline schemas and NVARC
+  scheduler/bucket options and `loop.nvarc_source_batch_size` remain rejected.
+  NVARC execution uses `nvarc_max_tokens`; optimizer size remains a target count.
+- Training always uses FLUX packing with an explicit token budget. Padded
+  training, fixed FLUX microbatch sizes, and measured padding-cost catalogs
+  have been removed; retired fields are rejected even when set to null.
 - The [B3 benchmark](../../configs/training/benchmarks/single_gpu_b3.json),
   [three-step smoke](../../configs/training/benchmarks/single_gpu_b3_smoke.json),
   and [profiler](../../configs/training/profiling/single_gpu_b3_torch_profile.json)

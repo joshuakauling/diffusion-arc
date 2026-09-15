@@ -1,0 +1,657 @@
+"""Tests for offline model and runtime construction on one GPU."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from itertools import permutations
+from pathlib import Path
+import tempfile
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import ANY, patch
+
+from torch import nn
+import torch
+
+from diffusion_arc.model import NVARC_HIDDEN_SIZE, NVARC_VOCAB_SIZE
+from diffusion_arc.training.config import (
+    AdamWConfig,
+    CosineSchedulerConfig,
+    DataConfig,
+    LoopConfig,
+    ModelConfig,
+    TrainingConfig,
+)
+from diffusion_arc.training.data import ArcTrainingDataset, build_dataloader
+from diffusion_arc.training.step.flow_sampling import build_flow_generator
+from diffusion_arc.training.step.flux_batching import FluxPackingPolicy
+from diffusion_arc.training.step.lr_schedule import build_lr_scheduler
+from diffusion_arc.training.setup import (
+    _validate_parameter_placement,
+    build_optimizer,
+    load_models,
+    prepare_device,
+)
+
+from tests.training.test_data import build_layout, make_nvarc_tokenizer
+
+
+class _FakeTokenizer:
+    def __init__(self) -> None:
+        self.model_max_length = 0
+        self.pad_token_id = 13
+        self.eos_token_id = 15
+
+    def __len__(self) -> int:
+        return 16
+
+    def get_vocab(self) -> dict[str, int]:
+        return {
+            **{str(value): value for value in range(10)},
+            "Ċ": 10,
+            "user": 11,
+            "assistant": 12,
+            "<|endoftext|>": 13,
+            "<|im_start|>": 14,
+            "<|im_end|>": 15,
+        }
+
+    def encode(
+        self,
+        _text: str,
+        *,
+        add_special_tokens: bool,
+    ) -> list[int]:
+        if add_special_tokens:
+            raise AssertionError("the checkpoint probe must not add tokens")
+        return [14, 11, 10, 0, 15, 14, 12, 10]
+
+
+class _SlowFirstDataset(ArcTrainingDataset):
+    """Exercise ordered delivery when the first worker has slower CPU work."""
+
+    def __getitem__(self, index):
+        if index == 0:
+            time.sleep(0.1)
+        return super().__getitem__(index)
+
+
+class _FakeNvarc(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(NVARC_VOCAB_SIZE, NVARC_HIDDEN_SIZE, dtype=torch.bfloat16)
+        self.config = SimpleNamespace(
+            vocab_size=NVARC_VOCAB_SIZE,
+            hidden_size=NVARC_HIDDEN_SIZE,
+            num_hidden_layers=36,
+            max_position_embeddings=262144,
+            _attn_implementation="nvarc_fa3",
+            head_dim=128, num_attention_heads=32, num_key_value_heads=8, attention_dropout=0.0,
+        )
+
+    def get_input_embeddings(self) -> nn.Embedding:
+        return self.embedding
+
+    def get_output_embeddings(self) -> nn.Embedding:
+        return self.embedding
+
+
+class _FakeVae(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bn = nn.BatchNorm1d(128)
+        self.config = SimpleNamespace(batch_norm_eps=1e-5)
+
+    def encode(self, _images: torch.Tensor) -> None:
+        raise AssertionError("model loading must not execute the VAE")
+
+    def decode(self, _latents: torch.Tensor) -> None:
+        raise AssertionError("model loading must not execute the VAE")
+
+
+class _FakeFluxTransformer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(()))
+        self.out_channels = 128
+        self.config = SimpleNamespace(
+            in_channels=128,
+            joint_attention_dim=7680,
+            attention_head_dim=128,
+            num_attention_heads=24,
+            num_layers=5,
+            num_single_layers=20,
+            guidance_embeds=False,
+            axes_dims_rope=(32, 32, 32, 32),
+        )
+
+
+def _config(root: Path, *, shuffle: bool = False) -> TrainingConfig:
+    return TrainingConfig(
+        seed=17,
+        device="cuda",
+        models=ModelConfig(
+            nvarc_checkpoint=root / "nvarc",
+            flux_checkpoint=root / "flux",
+            nvarc_dtype="bfloat16",
+            vae_dtype="float32",
+            flux_parameter_dtype="float32",
+            flux_compute_dtype="bfloat16",
+        ),
+        data=DataConfig(
+            split_directory=root / "split",
+            view_name="train",
+            shuffle=shuffle,
+            num_workers=0,
+        ),
+        loop=LoopConfig(
+            max_optimizer_steps=2,
+            optimizer_batch_size=4,
+            min_context_pairs_before_target=1,
+        ),
+        flux_packing=FluxPackingPolicy(),
+        optimizer=AdamWConfig(
+            learning_rate=1e-5,
+            beta1=0.8,
+            beta2=0.9,
+            epsilon=1e-7,
+            weight_decay=0.02,
+        ),
+    )
+
+
+class SingleGpuSetupTests(unittest.TestCase):
+    def test_packed_backend_is_preflighted_before_loading_and_returned_with_models(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            backend = object()
+            transformer = _FakeFluxTransformer()
+            with (
+                patch("diffusion_arc.model.flux.packing.Flash3Backend", return_value=backend) as build_backend,
+                patch("diffusion_arc.model.flux.packing.validate_packed_transformer") as validate,
+                patch("diffusion_arc.training.setup.AutoTokenizer.from_pretrained", return_value=_FakeTokenizer()),
+                patch("diffusion_arc.training.setup.AutoModelForCausalLM.from_pretrained", return_value=_FakeNvarc()),
+                patch("diffusion_arc.training.setup.AutoencoderKLFlux2.from_pretrained", return_value=_FakeVae()),
+                patch("diffusion_arc.training.setup.Flux2Transformer2DModel.from_pretrained", return_value=transformer),
+            ):
+                models = load_models(config, device=torch.device("cpu"))
+            build_backend.assert_called_once_with(torch.device("cpu"))
+            validate.assert_called_once_with(transformer, torch.bfloat16)
+            self.assertIs(models.flux_packing_backend, backend)
+            self.assertIs(models.flux_transformer, transformer)
+            self.register_attention.assert_called_once_with()
+            self.assertFalse(any(p.requires_grad for p in models.nvarc_encoder.parameters()))
+            self.assertFalse(any(p.requires_grad for p in models.vae_encoder.parameters()))
+            self.assertTrue(all(p.requires_grad for p in transformer.parameters()))
+            with (
+                patch("diffusion_arc.model.flux.packing.Flash3Backend", side_effect=RuntimeError("FA3 unavailable")),
+                patch("diffusion_arc.training.setup.AutoTokenizer.from_pretrained") as load,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "FA3 unavailable"):
+                    load_models(config, device=torch.device("cpu"))
+            load.assert_not_called()
+
+    def setUp(self):
+        binding = patch("diffusion_arc.training.setup.register_nvarc_attention")
+        self.register_attention = binding.start()
+        self.addCleanup(binding.stop)
+        hardware = patch("torch.cuda.get_device_capability", return_value=(9, 0))
+        hardware.start()
+        self.addCleanup(hardware.stop)
+        backend = patch("diffusion_arc.model.flux.packing.Flash3Backend", return_value=object())
+        self.packing_backend = backend.start()
+        self.addCleanup(backend.stop)
+        validation = patch("diffusion_arc.model.flux.packing.validate_packed_transformer")
+        self.validate_packed_transformer = validation.start()
+        self.addCleanup(validation.stop)
+
+    def test_rejects_non_hopper_device_before_loading_models(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("torch.cuda.is_available", return_value=True), \
+                patch("torch.cuda.set_device"), \
+                patch("torch.cuda.current_device", return_value=0), \
+                patch("torch.cuda.is_bf16_supported", return_value=True), \
+                patch("torch.cuda.get_device_capability", return_value=(8, 0)):
+            with self.assertRaisesRegex(RuntimeError, "Hopper"):
+                prepare_device(_config(Path(directory)))
+
+    def test_fa3_checkpoint_preflight_rejects_unsupported_shapes_and_dropout(self):
+        from diffusion_arc.training.setup import _validate_nvarc_checkpoint
+        for field, value in (("head_dim", 64), ("num_attention_heads", 16),
+                             ("num_key_value_heads", 4), ("attention_dropout", 0.1),
+                             ("_attn_implementation", "sdpa")):
+            model = _FakeNvarc()
+            setattr(model.config, field, value)
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                _validate_nvarc_checkpoint(model, _FakeTokenizer(),
+                                           expected_device=torch.device("cpu"), expected_dtype=torch.bfloat16)
+
+    def test_spawn_prefetch_matches_serial_samples_and_preserves_flow_rng(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            keys = ["task-a_ID_0123456789_" + ",".join(map(str, order))
+                    for order in list(permutations(range(4)))[:8]]
+            split, _ = build_layout(root, keys=keys)
+            config = _config(root, shuffle=True)
+            config = replace(config, data=replace(config.data, split_directory=split))
+            tokenizer = make_nvarc_tokenizer()
+            serial = tuple(build_dataloader(config, tokenizer=tokenizer))
+            parallel_config = replace(config, data=replace(config.data, num_workers=2, prefetch_factor=8))
+            flow_generator = build_flow_generator(config, device=torch.device("cpu"))
+            flow_state = flow_generator.get_state().clone()
+            with patch("diffusion_arc.training.data.ArcTrainingDataset", _SlowFirstDataset):
+                loader = build_dataloader(parallel_config, tokenizer=tokenizer)
+            self.assertEqual(loader.multiprocessing_context.get_start_method(), "spawn")
+            self.assertEqual(loader.prefetch_factor, 8)
+            self.assertTrue(loader.in_order)
+            self.assertEqual(tuple(loader), serial)
+            self.assertEqual(tuple(build_dataloader(parallel_config, tokenizer=tokenizer)), serial)
+            torch.testing.assert_close(flow_generator.get_state(), flow_state)
+
+    def test_spawn_workers_report_data_errors_and_stop_after_early_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split, _ = build_layout(root)
+            config = _config(root)
+            config = replace(config, data=replace(config.data, split_directory=split,
+                                                  num_workers=2, prefetch_factor=8))
+            loader = build_dataloader(config, tokenizer=make_nvarc_tokenizer())
+            iterator = iter(loader)
+            workers = tuple(iterator._workers)
+            next(iterator)
+            del iterator
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+
+            build_layout(root, max_tokens=1)
+            loader = build_dataloader(config, tokenizer=make_nvarc_tokenizer())
+            iterator = iter(loader)
+            workers = tuple(iterator._workers)
+            with self.assertRaisesRegex(ValueError, "exceeding 1"):
+                next(iterator)
+            del iterator
+            for worker in workers:
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+
+    def test_cosine_schedule_and_constant_lr(self) -> None:
+        config = _config(Path("/unused"))
+        optimizer = build_optimizer(config, flux_transformer=nn.Linear(1, 1))
+        self.assertIsNone(build_lr_scheduler(config, optimizer=optimizer))
+        self.assertEqual(optimizer.param_groups[0]["lr"], 1e-5)
+        config = replace(config, scheduler=CosineSchedulerConfig(warmup_steps=213, total_steps=7245))
+        scheduler = build_lr_scheduler(config, optimizer=optimizer)
+        self.assertEqual(optimizer.param_groups[0]["lr"], 0.0)
+        checkpoints = {1: 1e-5 / 213, 213: 1e-5, 3729: 0.5e-5, 7245: 0.0}
+        for step in range(1, 7246):
+            optimizer.step()
+            scheduler.step()
+            if step in checkpoints:
+                self.assertAlmostEqual(optimizer.param_groups[0]["lr"], checkpoints[step])
+
+    def test_missing_checkpoint_directory_fails_before_model_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+            with patch(
+                "diffusion_arc.training.setup."
+                "AutoTokenizer.from_pretrained"
+            ) as load_tokenizer:
+                with self.assertRaisesRegex(FileNotFoundError, "NVARC checkpoint"):
+                    load_models(config, device=torch.device("cpu"))
+
+        load_tokenizer.assert_not_called()
+
+    def test_loads_only_local_checkpoints_and_sets_parameter_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+
+            tokenizer = _FakeTokenizer()
+            nvarc = _FakeNvarc()
+            vae = _FakeVae()
+            transformer = _FakeFluxTransformer()
+            with (
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoTokenizer.from_pretrained",
+                    return_value=tokenizer,
+                ) as load_tokenizer,
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoModelForCausalLM.from_pretrained",
+                    return_value=nvarc,
+                ) as load_nvarc,
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoencoderKLFlux2.from_pretrained",
+                    return_value=vae,
+                ) as load_vae,
+                patch(
+                    "diffusion_arc.training.setup."
+                    "Flux2Transformer2DModel.from_pretrained",
+                    return_value=transformer,
+                ) as load_flux,
+            ):
+                models = load_models(
+                    config,
+                    device=torch.device("cpu"),
+                )
+
+        load_tokenizer.assert_called_once_with(
+            config.models.nvarc_checkpoint,
+            local_files_only=True,
+            trust_remote_code=False,
+        )
+        load_nvarc.assert_called_once_with(
+            config.models.nvarc_checkpoint,
+            local_files_only=True,
+            trust_remote_code=False,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.bfloat16,
+            device_map={"": torch.device("cpu")},
+            attn_implementation="nvarc_fa3",
+        )
+        for loader, subfolder in ((load_vae, "vae"), (load_flux, "transformer")):
+            loader.assert_called_once_with(
+                config.models.flux_checkpoint,
+                subfolder=subfolder,
+                local_files_only=True,
+                use_safetensors=True,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float32,
+                device_map={"": torch.device("cpu")},
+            )
+
+        self.assertIs(models.tokenizer, tokenizer)
+        self.assertEqual(models.tokenizer.model_max_length, 9330)
+        self.assertIs(models.nvarc_encoder.model, nvarc)
+        self.assertIs(models.vae_encoder.vae, vae)
+        self.assertIs(models.vae_decoder.vae, vae)
+        self.assertIs(models.flux_transformer, transformer)
+        self.assertEqual(models.flux_compute_dtype, torch.bfloat16)
+        self.assertFalse(models.nvarc_encoder.training)
+        self.assertFalse(models.vae_encoder.training)
+        self.assertFalse(models.vae_decoder.training)
+        self.assertTrue(all(not parameter.requires_grad for parameter in nvarc.parameters()))
+        self.assertTrue(all(not parameter.requires_grad for parameter in vae.parameters()))
+        self.assertTrue(all(parameter.requires_grad for parameter in transformer.parameters()))
+
+    def test_loads_standalone_transformer_while_reusing_base_vae(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            transformer_checkpoint = root / "trained-transformer"
+            transformer_checkpoint.mkdir()
+
+            with (
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoTokenizer.from_pretrained",
+                    return_value=_FakeTokenizer(),
+                ),
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoModelForCausalLM.from_pretrained",
+                    return_value=_FakeNvarc(),
+                ),
+                patch(
+                    "diffusion_arc.training.setup."
+                    "AutoencoderKLFlux2.from_pretrained",
+                    return_value=_FakeVae(),
+                ) as load_vae,
+                patch(
+                    "diffusion_arc.training.setup."
+                    "Flux2Transformer2DModel.from_pretrained",
+                    return_value=(_FakeFluxTransformer(), {}),
+                ) as load_flux,
+            ):
+                load_models(
+                    config,
+                    device=torch.device("cpu"),
+                    transformer_checkpoint=transformer_checkpoint,
+                )
+                for field in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
+                    with self.subTest(field=field):
+                        load_flux.return_value = (_FakeFluxTransformer(), {field: ["bad_parameter"]})
+                        with self.assertRaisesRegex(ValueError, "restore every parameter"):
+                            load_models(config, device=torch.device("cpu"),
+                                        transformer_checkpoint=transformer_checkpoint)
+
+        load_vae.assert_called_with(
+            config.models.flux_checkpoint,
+            subfolder="vae",
+            local_files_only=True,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            device_map={"": torch.device("cpu")},
+        )
+        load_flux.assert_called_with(
+            transformer_checkpoint,
+            local_files_only=True,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+            device_map={"": torch.device("cpu")},
+            output_loading_info=True,
+        )
+
+    def test_missing_standalone_transformer_fails_before_model_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            config = _config(root)
+            config.models.nvarc_checkpoint.mkdir()
+            config.models.flux_checkpoint.mkdir()
+            missing_transformer = root / "missing-transformer"
+
+            with patch(
+                "diffusion_arc.training.setup."
+                "AutoTokenizer.from_pretrained"
+            ) as load_tokenizer:
+                with self.assertRaisesRegex(
+                    FileNotFoundError,
+                    "standalone FLUX transformer",
+                ):
+                    load_models(
+                        config,
+                        device=torch.device("cpu"),
+                        transformer_checkpoint=missing_transformer,
+                    )
+
+        load_tokenizer.assert_not_called()
+
+    def test_builds_unbatched_dataloader_and_independent_generators(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+            samples = tuple(object() for _ in range(8))
+            with patch(
+                "diffusion_arc.training.data.ArcTrainingDataset",
+                return_value=samples,
+            ) as build_dataset:
+                loader = build_dataloader(
+                    config,
+                    tokenizer=_FakeTokenizer(),
+                )
+            flow_generator = build_flow_generator(
+                config,
+                device=torch.device("cpu"),
+            )
+
+        build_dataset.assert_called_once_with(
+            split_directory=config.data.split_directory,
+            view_name="train",
+            tokenizer=ANY,
+        )
+        self.assertIsNone(loader.batch_size)
+        self.assertEqual(tuple(loader), samples)
+        self.assertIsNot(loader.generator, flow_generator)
+        self.assertEqual(loader.generator.initial_seed(), config.seed)
+        self.assertEqual(flow_generator.initial_seed(), config.seed)
+
+    def test_seeded_shuffle_repeats_the_same_source_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory), shuffle=True)
+            samples = tuple(object() for _ in range(8))
+            with patch(
+                "diffusion_arc.training.data.ArcTrainingDataset",
+                return_value=samples,
+            ):
+                first_loader = build_dataloader(
+                    config,
+                    tokenizer=_FakeTokenizer(),
+                )
+                second_loader = build_dataloader(
+                    config,
+                    tokenizer=_FakeTokenizer(),
+                )
+
+        first_order = tuple(first_loader)
+        second_order = tuple(second_loader)
+        self.assertEqual(first_order, second_order)
+        self.assertNotEqual(first_order, samples)
+
+    def test_builds_adamw_over_exactly_the_transformer_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+        transformer = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 1))
+
+        optimizer = build_optimizer(config, flux_transformer=transformer)
+
+        optimized = {
+            id(parameter)
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        }
+        self.assertEqual(optimized, {id(parameter) for parameter in transformer.parameters()})
+        self.assertEqual(optimizer.defaults["lr"], 1e-5)
+        self.assertEqual(optimizer.defaults["betas"], (0.8, 0.9))
+        self.assertEqual(optimizer.defaults["eps"], 1e-7)
+        self.assertEqual(optimizer.defaults["weight_decay"], 0.02)
+        self.assertFalse(optimizer.defaults["foreach"])
+
+    def test_adamw_preserves_small_updates_in_fp32_parameters_and_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+        transformer = nn.Linear(1, 1, bias=False, dtype=torch.float32)
+        with torch.no_grad():
+            transformer.weight.fill_(0.02)
+        optimizer = build_optimizer(config, flux_transformer=transformer)
+        before = transformer.weight.detach().clone()
+        transformer.weight.grad = torch.ones_like(transformer.weight)
+
+        optimizer.step()
+
+        state = optimizer.state[transformer.weight]
+        self.assertEqual(transformer.weight.dtype, torch.float32)
+        self.assertEqual(transformer.weight.grad.dtype, torch.float32)
+        self.assertEqual(state["exp_avg"].dtype, torch.float32)
+        self.assertEqual(state["exp_avg_sq"].dtype, torch.float32)
+        self.assertFalse(torch.equal(transformer.weight.detach(), before))
+
+    def test_prepares_canonical_cuda_device_and_rejects_missing_cuda(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+
+        with patch(
+            "diffusion_arc.training.setup.torch.cuda.is_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires an available CUDA"):
+                prepare_device(config)
+
+        with (
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.set_device"
+            ) as set_device,
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.current_device",
+                return_value=2,
+            ),
+            patch(
+                "diffusion_arc.training.setup."
+                "torch.cuda.is_bf16_supported",
+                return_value=True,
+            ),
+        ):
+            device = prepare_device(config)
+
+        set_device.assert_not_called()
+        self.assertEqual(device, torch.device("cuda:2"))
+
+        indexed_config = replace(config, device="cuda:1")
+        with (
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.set_device"
+            ) as set_indexed_device,
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.current_device",
+                return_value=1,
+            ),
+            patch(
+                "diffusion_arc.training.setup."
+                "torch.cuda.is_bf16_supported",
+                return_value=True,
+            ),
+        ):
+            indexed_device = prepare_device(indexed_config)
+
+        set_indexed_device.assert_called_once_with(torch.device("cuda:1"))
+        self.assertEqual(indexed_device, torch.device("cuda:1"))
+
+    def test_rejects_cuda_without_required_bfloat16_support(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = _config(Path(temporary_directory))
+        with (
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "diffusion_arc.training.setup.torch.cuda.current_device",
+                return_value=0,
+            ),
+            patch(
+                "diffusion_arc.training.setup."
+                "torch.cuda.is_bf16_supported",
+                return_value=False,
+            ) as supports_bfloat16,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "does not support bfloat16"):
+                prepare_device(config)
+
+        supports_bfloat16.assert_called_once_with()
+
+    def test_rejects_mixed_parameter_placement(self) -> None:
+        model = nn.Module()
+        model.first = nn.Parameter(torch.ones((), dtype=torch.float32))
+        model.second = nn.Parameter(torch.ones((), dtype=torch.bfloat16))
+
+        with self.assertRaisesRegex(RuntimeError, "must use only"):
+            _validate_parameter_placement(
+                model,
+                name="mixed model",
+                expected_device=torch.device("cpu"),
+                expected_dtype=torch.float32,
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

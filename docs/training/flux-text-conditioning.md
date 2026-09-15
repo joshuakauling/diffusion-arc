@@ -5,15 +5,13 @@ the [training system overview](README.md).
 
 ## Status and scope
 
-This page describes exact-prefix selection and shared-state ownership, followed
-by the retained padded reference interface. B3 copies exact prefixes into
-unpadded segments; see the [FLUX packing guide](flux-sequence-packing.md).
-Prefix boundaries and consumption rules are shared by both paths.
+This page describes training prefix ownership and the separate dense inference
+interface. Training copies exact prefixes into unpadded segments; see the
+[FLUX packing guide](flux-sequence-packing.md). Padded training has been removed.
 
 `pad_flux_text_prefixes` is the implemented pure tensor boundary between exact
-frozen-NVARC prefix tensors and the padded text portion of a physical FLUX
-microbatch. It pads the supplied prefixes to the longest one in that
-microbatch and records which positions are real.
+frozen-NVARC prefix tensors and the padded text portion used by dense inference
+and model-level correctness references. It records which positions are real.
 
 This model-side component does not select prefixes, own NVARC state, execute
 NVARC or FLUX, or receive target images, latents, noise, or flow timesteps.
@@ -21,7 +19,7 @@ Prefix selection and lifetime management belong to the training-side
 `build_flux_microbatch` operation.
 
 The implementation lives in
-[`src/diffusion_arc/model/flux_conditioning.py`](../../src/diffusion_arc/model/flux_conditioning.py),
+[`src/diffusion_arc/model/flux/conditioning.py`](../../src/diffusion_arc/model/flux/conditioning.py),
 and the immutable `FluxTextInputs` contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 
@@ -43,7 +41,7 @@ text_inputs = pad_flux_text_prefixes(
 ```
 
 Each input has shape `[p_k, 7680]` and uses the same floating dtype and device.
-The function preserves input order. It trusts that the training-side caller
+The function preserves input order. It trusts that the caller
 already selected the correct end-exclusive prefix:
 
 ```python
@@ -86,7 +84,7 @@ masked.
 
 ## Training-side ownership and microbatch construction
 
-`NvarcBatchRunner` returns one independent owning hidden-state tensor per ARC
+`NvarcEncoder` returns one independent owning hidden-state tensor per ARC
 source. The initial training preparation wraps each source tensor in one
 `NvarcSequenceState`. All `FluxInput` objects produced from that source share
 the owner and store a relative `prefix_end`; they do not copy the complete
@@ -95,22 +93,21 @@ hidden states.
 Prefix ends are strictly increasing within one source, so the owner uses its
 pending `prefix_end` values directly for lifetime bookkeeping.
 `build_flux_microbatch` performs the complete deterministic physical assembly.
-B3 supplies `max_joint_tokens=12288`; omitting it selects the padded reference:
+The packed token budget is required; B3 supplies `max_joint_tokens=12288`:
 
 1. validate that every prefix is unique within its source and still pending;
 2. obtain each exact `hidden_states[:prefix_end]` view;
-3. copy the prefixes into one unpadded tensor with segment boundaries for B3,
-   or call `pad_flux_text_prefixes` for the padded reference;
-4. stack the clean target latents and generate the fixed image position IDs;
-   and
+3. copy the prefixes into one unpadded tensor with independent segment boundaries;
+4. generate the fixed image position IDs on the conditioning device; and
 5. only after all construction succeeds, commit all consumed prefix ends
    without another fallible operation.
 
 A failed build leaves every source state pending and available for diagnosis or
 retry. After the final dependent prefix is committed, the owner replaces its
-hidden-state reference with `None`. The resulting `PackedFluxMicrobatch` or
-reference `FluxMicrobatch` retains independent text and image tensors, so it
-does not keep the source owner or its original hidden-state storage alive.
+hidden-state reference with `None`. The resulting `FluxMicrobatch`
+retains the copied text, attention layout and image position IDs, so it does
+not keep the source owner or its original hidden-state storage alive. Flow
+image tensors are supplied separately; clean target latents are not copied here.
 
 ## Joint FLUX attention mask
 

@@ -19,6 +19,20 @@ The data layer is designed around four rules:
 The public API lives in
 [`src/diffusion_arc/arc_data`](../../src/diffusion_arc/arc_data).
 
+## Package layout
+
+| Package | Responsibility |
+| --- | --- |
+| `text/` | [`prompt.py`](../../src/diffusion_arc/arc_data/text/prompt.py) renders NVARC prompts; [`tokenization.py`](../../src/diffusion_arc/arc_data/text/tokenization.py) converts them to token sequences. |
+| `image/` | [`canvas.py`](../../src/diffusion_arc/arc_data/image/canvas.py) renders grids and decodes predictions using [`palette.py`](../../src/diffusion_arc/arc_data/image/palette.py). |
+| `splits/` | [`views.py`](../../src/diffusion_arc/arc_data/splits/views.py) configures and generates training views; [`io.py`](../../src/diffusion_arc/arc_data/splits/io.py) loads and validates split files; [`layout.py`](../../src/diffusion_arc/arc_data/splits/layout.py) resolves their directories. |
+
+Shared task types, grid validation, individual task loading and augmentation
+remain in `types.py`, `_grid.py`, `task_loading.py` and `augmentation.py` at the
+package root. Split I/O and layout functions are also used by the training
+dataset. Existing component exports through `diffusion_arc.arc_data` remain
+available; direct module imports use the paths above.
+
 ## On-disk layout
 
 Raw ARC files use the standard `train` and `test` arrays:
@@ -293,7 +307,7 @@ from pathlib import Path
 
 from torch.utils.data import DataLoader
 
-from diffusion_arc.training import ArcTrainingDataset
+from diffusion_arc.training.data import ArcTrainingDataset
 
 
 dataset = ArcTrainingDataset(
@@ -310,7 +324,7 @@ loader = DataLoader(
 
 Each loader item therefore remains one `ArcTokenizedTrainingSample`. The
 single-GPU loop groups consecutive items into a configured source batch and
-sends that group to `prepare_flux_inputs_batch`. That function performs batched
+sends that group to `encode_training_batch`. That function performs batched
 frozen NVARC preparation, bounded VAE preparation, and appends the resulting
 targets in source-major order to the internal `FluxInput` queue. The complete
 runtime path is documented in the [training system overview](../training/README.md).

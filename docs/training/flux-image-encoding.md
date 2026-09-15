@@ -11,7 +11,7 @@ FLUX.2 VAE in evaluation mode, uses the posterior mode, applies FLUX.2's native
 2×2 packing and frozen BatchNorm normalization, and returns the clean latents.
 
 The implementation lives in
-[`src/diffusion_arc/model/flux_vae.py`](../../src/diffusion_arc/model/flux_vae.py).
+[`src/diffusion_arc/model/vae.py`](../../src/diffusion_arc/model/vae.py).
 
 This component does not choose the palette, sample flow noise or timesteps,
 construct image position IDs or a noisy state, execute the FLUX transformer, or
@@ -26,7 +26,7 @@ Target preparation renders one canvas for every target exposure:
 ```
 
 ARC IDs use the fixed `greedy_rgb_maximin_v1` mapping defined in
-[`arc_data/palette.py`](../../src/diffusion_arc/arc_data/palette.py), with class
+[`arc_data/image/palette.py`](../../src/diffusion_arc/arc_data/image/palette.py), with class
 `10` reserved for RGB-white PAD. Palette selection is established before this
 model boundary; the VAE encoder consumes trusted rendered tensors and does not
 reclassify their pixels.

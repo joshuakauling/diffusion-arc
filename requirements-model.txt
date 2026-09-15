@@ -7,3 +7,8 @@ accelerate==1.12.0
 einops==0.8.1
 safetensors==0.8.0
 transformers==4.56.1
+
+# Explicit W&B logging and bounded GPU/process hardware measurements.
+wandb==0.30.0
+nvidia-ml-py==13.610.43
+psutil==7.2.2
