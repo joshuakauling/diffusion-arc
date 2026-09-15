@@ -9,9 +9,9 @@ from unittest.mock import patch
 import torch
 from torch.nn import functional as F
 
-from diffusion_arc.model import flux_packing as packing
-from diffusion_arc.model.flux_modulation import modulation_gather
-from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
+from diffusion_arc.model.flux import packing
+from diffusion_arc.model.flux.modulation import modulation_gather
+from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
 
 
 class SegmentedReference:

@@ -27,4 +27,4 @@ configuration, checkpoint loading, attention dispatch, and normalization is not
 copied and remains supplied by the pinned `diffusers==0.39.0` dependency.
 
 Project code should import the transformer through
-`diffusion_arc.model.flux_transformer`, not from this internal package.
+`diffusion_arc.model.flux.transformer`, not from this internal package.

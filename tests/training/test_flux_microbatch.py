@@ -9,7 +9,7 @@ import weakref
 import torch
 from diffusion_arc.model import TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
 from diffusion_arc.model.contracts import FluxSpatialShape
-from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
+from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
 from diffusion_arc.training.step.encoding import FluxInput, NvarcSequenceState
 from diffusion_arc.training.step.flow_sampling import UniformFlowSampler, select_flow_batch
 from diffusion_arc.training.step.flux_microbatch import FluxMicrobatch, build_flux_microbatch, compute_flux_microbatch_loss

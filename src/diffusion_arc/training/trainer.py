@@ -16,7 +16,7 @@ from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS
 from diffusion_arc.arc_data.canvas import CANVAS_SIZE
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.contracts import TARGET_LATENT_TOKEN_COUNT
-from diffusion_arc.model.flux_velocity import flux_transformer_device
+from diffusion_arc.model.flux.velocity import flux_transformer_device
 
 from .step.encoding import FluxInput, PreparationMetrics, encode_training_batch
 from .step.flow_sampling import FlowMatchingBatch, select_flow_batch

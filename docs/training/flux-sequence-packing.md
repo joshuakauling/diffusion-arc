@@ -111,6 +111,6 @@ the same packed path with 48 targets per update.
 Relevant implementation:
 [batch planning](../../src/diffusion_arc/training/step/flux_batching.py),
 [microbatch assembly](../../src/diffusion_arc/training/step/flux_microbatch.py),
-[FA3 execution](../../src/diffusion_arc/model/flux_packing.py),
-[modulation backward](../../src/diffusion_arc/model/flux_modulation.py),
+[FA3 execution](../../src/diffusion_arc/model/flux/packing.py),
+[modulation backward](../../src/diffusion_arc/model/flux/modulation.py),
 [training loop](../../src/diffusion_arc/training/trainer.py).

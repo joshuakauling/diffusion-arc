@@ -21,13 +21,13 @@ from diffusion_arc.model.contracts import (
     NVARC_VOCAB_SIZE,
     TARGET_LATENT_CHANNELS,
 )
-from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
-from diffusion_arc.model.flux_vae import FluxVaeDecoder, FluxVaeEncoder
-from diffusion_arc.model.nvarc_attention import (
+from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
+from diffusion_arc.model.vae import FluxVaeDecoder, FluxVaeEncoder
+from diffusion_arc.model.nvarc.attention import (
     NVARC_ATTENTION_IMPLEMENTATION,
     register_nvarc_attention,
 )
-from diffusion_arc.model.nvarc_encoder import NvarcEncoder
+from diffusion_arc.model.nvarc.encoder import NvarcEncoder
 
 from .config import TrainingConfig
 
@@ -124,7 +124,7 @@ def load_models(
     flux_parameter_dtype = _TORCH_DTYPES[config.models.flux_parameter_dtype]
     flux_compute_dtype = _TORCH_DTYPES[config.models.flux_compute_dtype]
     device_map = {"": device}
-    from diffusion_arc.model.flux_packing import Flash3Backend, validate_packed_transformer
+    from diffusion_arc.model.flux.packing import Flash3Backend, validate_packed_transformer
 
     flux_packing_backend = Flash3Backend(device)
 

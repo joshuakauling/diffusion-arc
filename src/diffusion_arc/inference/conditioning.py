@@ -15,10 +15,10 @@ from diffusion_arc._constants import NVARC_CONTEXT_WIDTH, NVARC_MAX_TOKENS
 
 from diffusion_arc.arc_data import ArcTokenizedEvaluationSample
 from diffusion_arc.model import FluxTextInputs, NvarcEncoder
-from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
+from diffusion_arc.model.flux.conditioning import pad_flux_text_prefixes
 from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
-from diffusion_arc.model.flux_packing import PackingLayout, packing_layout
-from diffusion_arc.model.flux_velocity import build_flux_image_position_ids, flux_transformer_device
+from diffusion_arc.model.flux.packing import PackingLayout, packing_layout
+from diffusion_arc.model.flux.velocity import build_flux_image_position_ids, flux_transformer_device
 
 
 def prepare_evaluation_text_inputs(

@@ -18,8 +18,8 @@ from diffusion_arc._third_party.diffusers_flux2.transformer_flux2 import (
 )
 from diffusion_arc._constants import NVARC_CONTEXT_WIDTH, NVARC_MAX_TOKENS
 
-from .contracts import TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
-from .flux_modulation import modulation_gather
+from ..contracts import TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
+from .modulation import modulation_gather
 
 
 @dataclass(frozen=True)

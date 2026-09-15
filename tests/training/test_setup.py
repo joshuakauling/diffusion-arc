@@ -171,8 +171,8 @@ class SingleGpuSetupTests(unittest.TestCase):
             backend = object()
             transformer = _FakeFluxTransformer()
             with (
-                patch("diffusion_arc.model.flux_packing.Flash3Backend", return_value=backend) as build_backend,
-                patch("diffusion_arc.model.flux_packing.validate_packed_transformer") as validate,
+                patch("diffusion_arc.model.flux.packing.Flash3Backend", return_value=backend) as build_backend,
+                patch("diffusion_arc.model.flux.packing.validate_packed_transformer") as validate,
                 patch("diffusion_arc.training.setup.AutoTokenizer.from_pretrained", return_value=_FakeTokenizer()),
                 patch("diffusion_arc.training.setup.AutoModelForCausalLM.from_pretrained", return_value=_FakeNvarc()),
                 patch("diffusion_arc.training.setup.AutoencoderKLFlux2.from_pretrained", return_value=_FakeVae()),
@@ -188,7 +188,7 @@ class SingleGpuSetupTests(unittest.TestCase):
             self.assertFalse(any(p.requires_grad for p in models.vae_encoder.parameters()))
             self.assertTrue(all(p.requires_grad for p in transformer.parameters()))
             with (
-                patch("diffusion_arc.model.flux_packing.Flash3Backend", side_effect=RuntimeError("FA3 unavailable")),
+                patch("diffusion_arc.model.flux.packing.Flash3Backend", side_effect=RuntimeError("FA3 unavailable")),
                 patch("diffusion_arc.training.setup.AutoTokenizer.from_pretrained") as load,
             ):
                 with self.assertRaisesRegex(RuntimeError, "FA3 unavailable"):
@@ -202,10 +202,10 @@ class SingleGpuSetupTests(unittest.TestCase):
         hardware = patch("torch.cuda.get_device_capability", return_value=(9, 0))
         hardware.start()
         self.addCleanup(hardware.stop)
-        backend = patch("diffusion_arc.model.flux_packing.Flash3Backend", return_value=object())
+        backend = patch("diffusion_arc.model.flux.packing.Flash3Backend", return_value=object())
         self.packing_backend = backend.start()
         self.addCleanup(backend.stop)
-        validation = patch("diffusion_arc.model.flux_packing.validate_packed_transformer")
+        validation = patch("diffusion_arc.model.flux.packing.validate_packed_transformer")
         self.validate_packed_transformer = validation.start()
         self.addCleanup(validation.stop)
 

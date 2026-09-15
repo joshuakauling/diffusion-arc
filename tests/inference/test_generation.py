@@ -344,7 +344,7 @@ class PackedGenerationTests(unittest.TestCase):
 
     def test_real_packed_transformer_matches_singleton_euler_trajectories(self):
         from diffusion_arc.inference.generation import continue_arc_batch, linear_timestep_schedule
-        from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
+        from diffusion_arc.model.flux.conditioning import pad_flux_text_prefixes
         from tests.model.test_flux_packing import SegmentedReference, tiny_model
 
         old_threads = torch.get_num_threads()

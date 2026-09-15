@@ -5,9 +5,9 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .nvarc_attention import NVARC_ATTENTION_IMPLEMENTATION
+from .attention import NVARC_ATTENTION_IMPLEMENTATION
 
-from .contracts import (
+from ..contracts import (
     NVARC_HIDDEN_STATE_INDICES,
     NvarcBatchOutput,
 )

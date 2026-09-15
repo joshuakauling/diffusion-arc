@@ -5,13 +5,13 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
-from .contracts import (
+from ..contracts import (
     DEFAULT_FLUX_SPATIAL_SHAPE,
     TARGET_LATENT_CHANNELS,
     FluxSpatialShape,
     FluxTextInputs,
 )
-from .flux_conditioning import build_flux_joint_attention_mask
+from .conditioning import build_flux_joint_attention_mask
 
 
 def flux_transformer_device(transformer: nn.Module) -> torch.device:

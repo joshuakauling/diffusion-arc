@@ -41,7 +41,7 @@ def _source_hidden_states(
 
 
 def _tiny_flux_model():
-    from diffusion_arc.model.flux_transformer import Flux2Transformer2DModel
+    from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
 
     return Flux2Transformer2DModel(
         in_channels=8,

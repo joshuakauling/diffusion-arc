@@ -112,6 +112,14 @@ and validation. `inference` generates predictions from target-free conditioning.
 Neither `model` nor `inference` imports training code; validation passes only
 conditioning to generation and scores the returned predictions afterward.
 
+Within `model`, `nvarc/` contains the frozen encoder and explicit attention
+binding. `flux/` contains the transformer, text conditioning, velocity prediction,
+packing and modulation. The independent VAE encoder/decoder lives in
+[`model/vae.py`](../../src/diffusion_arc/model/vae.py); shared tensor interfaces
+remain in [`model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
+The component packages import no backends on their own; model setup still
+explicitly registers NVARC attention and selects the FLUX packing backend.
+
 ## Training module map
 
 `trainer.py` and `runner.py` are the two entrypoints. `step/` contains the

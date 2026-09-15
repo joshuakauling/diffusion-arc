@@ -9,7 +9,7 @@ from torch import Tensor
 
 from diffusion_arc.sequence_buckets import SequenceLengthBuckets
 
-from .contracts import FluxTextInputs
+from ..contracts import FluxTextInputs
 
 
 def pad_flux_text_prefixes(

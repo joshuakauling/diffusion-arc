@@ -20,8 +20,8 @@ from diffusion_arc.model.contracts import (
     FluxSpatialShape,
     FluxTextInputs,
 )
-from diffusion_arc.model.flux_packing import predict_packed_flux_velocity
-from diffusion_arc.model.flux_velocity import (
+from diffusion_arc.model.flux.packing import predict_packed_flux_velocity
+from diffusion_arc.model.flux.velocity import (
     build_flux_image_position_ids,
     flux_transformer_device,
     predict_flux_velocity,

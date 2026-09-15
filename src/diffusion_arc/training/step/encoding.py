@@ -12,8 +12,8 @@ from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS, NVARC_MAX_TOKENS
 from diffusion_arc.arc_data.canvas import _render_valid_grid_canvas
 from diffusion_arc.arc_data.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.arc_data.types import Grid
-from diffusion_arc.model.flux_vae import FluxVaeEncoder
-from diffusion_arc.model.nvarc_encoder import NvarcEncoder
+from diffusion_arc.model.vae import FluxVaeEncoder
+from diffusion_arc.model.nvarc.encoder import NvarcEncoder
 
 
 # Benchmark metadata: source identities and the physical batches used to prepare them.

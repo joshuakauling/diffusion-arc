@@ -19,7 +19,7 @@ Prefix selection and lifetime management belong to the training-side
 `build_flux_microbatch` operation.
 
 The implementation lives in
-[`src/diffusion_arc/model/flux_conditioning.py`](../../src/diffusion_arc/model/flux_conditioning.py),
+[`src/diffusion_arc/model/flux/conditioning.py`](../../src/diffusion_arc/model/flux/conditioning.py),
 and the immutable `FluxTextInputs` contract lives in
 [`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
 

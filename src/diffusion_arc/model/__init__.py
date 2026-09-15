@@ -23,17 +23,17 @@ from .contracts import (
     validate_packed_source_sequences,
 )
 
-from .flux_conditioning import (
+from .flux.conditioning import (
     build_flux_joint_attention_mask,
     pad_flux_text_prefixes,
 )
-from .flux_vae import FluxVaeDecoder, FluxVaeEncoder
-from .flux_velocity import (
+from .vae import FluxVaeDecoder, FluxVaeEncoder
+from .flux.velocity import (
     build_flux_image_position_ids,
     flux_transformer_device,
     predict_flux_velocity,
 )
-from .nvarc_encoder import NvarcEncoder
+from .nvarc.encoder import NvarcEncoder
 
 __all__ = [
     "DEFAULT_FLUX_SPATIAL_SHAPE",

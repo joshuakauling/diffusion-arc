@@ -9,8 +9,8 @@ import torch
 from torch import Tensor, nn
 
 from diffusion_arc.model.contracts import DEFAULT_FLUX_SPATIAL_SHAPE, FluxSpatialShape
-from diffusion_arc.model.flux_packing import PackingLayout, packing_layout, predict_packed_flux_velocity
-from diffusion_arc.model.flux_velocity import build_flux_image_position_ids
+from diffusion_arc.model.flux.packing import PackingLayout, packing_layout, predict_packed_flux_velocity
+from diffusion_arc.model.flux.velocity import build_flux_image_position_ids
 
 from .encoding import FluxInput, NvarcSequenceState
 from .flow_sampling import FlowMatchingBatch

@@ -36,9 +36,9 @@ from diffusion_arc.inference.conditioning import (
 )
 from diffusion_arc.inference.generation import generate_packed_arc_samples
 from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
-from diffusion_arc.model.flux_packing import predict_packed_flux_velocity
-from diffusion_arc.model.flux_vae import FluxVaeEncoder
-from diffusion_arc.model.nvarc_encoder import NvarcEncoder
+from diffusion_arc.model.flux.packing import predict_packed_flux_velocity
+from diffusion_arc.model.vae import FluxVaeEncoder
+from diffusion_arc.model.nvarc.encoder import NvarcEncoder
 
 from ..step.encoding import plan_nvarc_batches
 from ..step.loss import RegionLossWeights, build_region_loss_reduction

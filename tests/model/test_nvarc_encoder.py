@@ -17,7 +17,7 @@ from diffusion_arc.model import (
 )
 from unittest.mock import patch
 from contextlib import ExitStack
-from diffusion_arc.model.nvarc_attention import register_nvarc_attention, NVARC_ATTENTION_IMPLEMENTATION
+from diffusion_arc.model.nvarc.attention import register_nvarc_attention, NVARC_ATTENTION_IMPLEMENTATION
 
 
 class FakeEmbedding(nn.Embedding):
@@ -126,7 +126,7 @@ class NvarcEncoderTests(unittest.TestCase):
 
     def test_real_qwen_packed_equals_separate_and_isolates_sources(self):
         from transformers import Qwen3Config, Qwen3Model
-        with patch("diffusion_arc.model.nvarc_attention.import_module",
+        with patch("diffusion_arc.model.nvarc.attention.import_module",
                    return_value=types.SimpleNamespace(flash_attn_varlen_func=reference_varlen)):
             register_nvarc_attention()
         torch.manual_seed(11)
@@ -153,7 +153,7 @@ class NvarcEncoderTests(unittest.TestCase):
 
     def test_early_exit_matches_full_qwen_and_skips_unused_modules(self):
         from transformers import Qwen3Config, Qwen3ForCausalLM
-        with patch("diffusion_arc.model.nvarc_attention.import_module",
+        with patch("diffusion_arc.model.nvarc.attention.import_module",
                    return_value=types.SimpleNamespace(flash_attn_varlen_func=reference_varlen)):
             register_nvarc_attention()
         torch.manual_seed(23)
@@ -209,6 +209,6 @@ class NvarcEncoderTests(unittest.TestCase):
             NvarcEncoder(model)
 
     def test_missing_fa3_fails_without_fallback(self):
-        with patch("diffusion_arc.model.nvarc_attention.import_module", side_effect=ImportError("FA3 missing")):
+        with patch("diffusion_arc.model.nvarc.attention.import_module", side_effect=ImportError("FA3 missing")):
             with self.assertRaisesRegex(ImportError, "FA3 missing"):
                 register_nvarc_attention()
