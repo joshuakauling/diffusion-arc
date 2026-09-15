@@ -13,12 +13,14 @@ import unittest
 from diffusion_arc.arc_data import (
     ArcGeometry, load_training_task, parse_augmentation_key,
 )
-from diffusion_arc.training.dataset import ArcTrainingDataset
+from diffusion_arc.training.data import ArcTrainingDataset
 from scripts.data.prepare_nvarc_benchmark import DERIVED_GROUP, prepare_benchmark
-from tests.training.test_dataset import make_nvarc_tokenizer, write_json
+from tests.training.test_data import make_nvarc_tokenizer, write_json
 
 
-def _fixture(root: Path, *, pair_count: int = 30, large: bool = False) -> list[dict]:
+def _fixture(
+    root: Path, *, pair_count: int = 30, large: bool = False, task_count: int = 12,
+) -> list[dict]:
     root.mkdir()
     write_json(root / "arc_agi_1_training_keys.json", {
         "group": "arc_agi_1_training", "key_count": 400,
@@ -30,7 +32,7 @@ def _fixture(root: Path, *, pair_count: int = 30, large: bool = False) -> list[d
     content = json.dumps(pairs).encode()
     records = []
     with tarfile.open(root / "nvarc-all-classified.tar.gz", "w:gz") as archive:
-        for index in range(12):
+        for index in range(task_count):
             parent1, parent2 = f"{index:08x}", f"{index + 20:08x}"
             task_id = f"{parent1}_{parent2}"
             path = f"tasks/nvarc_training/{parent1}/{task_id}.json"

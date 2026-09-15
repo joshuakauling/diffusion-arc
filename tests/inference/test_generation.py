@@ -1,22 +1,22 @@
-"""Tests for reusable Euler generation and exact-grid diagnostics."""
+"""Tests for target-free padded and packed Euler generation."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from dataclasses import replace
+from unittest.mock import patch
 import unittest
 
 import torch
 from torch import nn
 
 from diffusion_arc.arc_data import (
-    CANVAS_SIZE,
-    PAD_CLASS,
-    decode_arc_grids,
     render_grid_canvas,
 )
+from diffusion_arc.inference import generation
+from diffusion_arc.inference.conditioning import PackedGenerationInput, sample_conditioning_noise
 from diffusion_arc.inference import (
     continue_arc_batch,
-    diagnose_exact_grids,
     generate_arc_batch,
     linear_timestep_schedule,
 )
@@ -87,17 +87,6 @@ def _text_inputs(batch_size: int = 1) -> FluxTextInputs:
         text_position_ids=position_ids,
         text_attention_mask=torch.ones((batch_size, text_length), dtype=torch.bool),
     )
-
-
-def _class_canvas(grid: tuple[tuple[int, ...], ...]) -> torch.Tensor:
-    canvas = torch.full(
-        (CANVAS_SIZE, CANVAS_SIZE),
-        PAD_CLASS,
-        dtype=torch.int64,
-    )
-    values = torch.tensor(grid, dtype=torch.int64)
-    canvas[: values.shape[0], : values.shape[1]] = values
-    return canvas
 
 
 class GenerationTests(unittest.TestCase):
@@ -315,33 +304,101 @@ class GenerationTests(unittest.TestCase):
 
         self.assertTrue(transformer.training)
 
-    def test_exact_grid_diagnostics_distinguish_all_failure_modes(self) -> None:
-        exact = _class_canvas(((1, 2), (3, 4)))
-        wrong_cell = _class_canvas(((1, 2), (3, 0)))
-        wrong_shape = _class_canvas(((1, 2),))
-        all_pad = torch.full_like(exact, PAD_CLASS)
-        predictions = decode_arc_grids(
-            torch.stack((exact, wrong_cell, wrong_shape, all_pad))
-        )
-        expected = ((1, 2), (3, 4))
 
-        diagnostics = diagnose_exact_grids(
-            predictions,
-            (expected, expected, expected, expected),
+def _packed_input(index=0, *, task_id=None, query_index=0, length=2, value=0.0):
+    return PackedGenerationInput(
+        task_id=task_id or f"task-{index}", query_index=query_index,
+        text=torch.full((length, 7680), value, dtype=torch.bfloat16),
+    )
+
+
+class _PackedTransformer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = nn.Parameter(torch.tensor(0.0))
+
+
+class _PackedDecoder(nn.Module):
+    def __init__(self, grid=((0, 0, 0),) * 3):
+        super().__init__()
+        self.image = render_grid_canvas(grid)
+        self.states = []
+
+    def forward(self, latents, *, spatial_shape):
+        assert not torch.is_grad_enabled()
+        assert (spatial_shape.height, spatial_shape.width) == (30, 30)
+        self.states.append(latents.detach().clone())
+        return self.image.unsqueeze(0).expand(latents.shape[0], -1, -1, -1)
+
+
+class PackedGenerationTests(unittest.TestCase):
+    def setUp(self):
+        self.transformer = _PackedTransformer().train()
+        self.arguments = {"compute_dtype": torch.float32, "backend": object()}
+
+    def generate(self, inputs, packs, decoder=None, **overrides):
+        arguments = {"steps": 4, "seeds": (50, 51), **self.arguments, **overrides}
+        return generation.generate_packed_arc_samples(
+            self.transformer, decoder or _PackedDecoder(), inputs, packs, **arguments,
         )
 
-        self.assertTrue(diagnostics[0].exact_grid)
-        self.assertEqual(diagnostics[0].cell_accuracy, 1.0)
-        self.assertTrue(diagnostics[1].shape_match)
-        self.assertEqual(diagnostics[1].cell_accuracy, 0.75)
-        self.assertFalse(diagnostics[1].exact_grid)
-        self.assertEqual(diagnostics[2].predicted_shape, (1, 2))
-        self.assertFalse(diagnostics[2].shape_match)
-        self.assertIsNone(diagnostics[2].cell_accuracy)
-        self.assertFalse(diagnostics[3].prediction_valid)
-        self.assertEqual(diagnostics[3].invalid_reason, "all_pad")
-        self.assertIsNone(diagnostics[3].predicted_shape)
-        self.assertFalse(diagnostics[3].exact_grid)
+    def test_real_packed_transformer_matches_singleton_euler_trajectories(self):
+        from diffusion_arc.inference.generation import continue_arc_batch, linear_timestep_schedule
+        from diffusion_arc.model.flux_conditioning import pad_flux_text_prefixes
+        from tests.model.test_flux_packing import SegmentedReference, tiny_model
+
+        old_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        self.addCleanup(torch.set_num_threads, old_threads)
+        model = tiny_model(in_channels=128, out_channels=128, joint_attention_dim=7680)
+        targets = tuple(replace(_packed_input(i, length=i + 2), text=_packed_input(i, length=i + 2).text.float())
+                        for i in range(2))
+        decoder = _PackedDecoder()
+        generation.generate_packed_arc_samples(model, decoder, targets, ((0, 1),), steps=2,
+            seeds=(50, 51), compute_dtype=torch.float32, backend=SegmentedReference())
+        for index, target in enumerate(targets):
+            for sample_index, seed in enumerate((50, 51)):
+                initial = sample_conditioning_noise(target, seed, ("generation", sample_index), "cpu").unsqueeze(0)
+                reference = continue_arc_batch(model, _PackedDecoder(), pad_flux_text_prefixes((target.text,)),
+                    initial_latents=initial, timestep_schedule=linear_timestep_schedule(2),
+                    compute_dtype=torch.float32)
+                torch.testing.assert_close(decoder.states[sample_index][index], reference.final_latents[0],
+                                           atol=2e-5, rtol=2e-5)
+
+    def test_euler_uses_fp32_state_negative_deltas_and_fixed_independent_noise(self):
+        target = _packed_input()
+        decoder = _PackedDecoder()
+        initial = []
+        times_seen = []
+
+        def predict(transformer, state, text, positions, times, layout, **_):
+            self.assertFalse(transformer.training)
+            self.assertFalse(torch.is_grad_enabled())
+            self.assertEqual(state.dtype, torch.float32)
+            self.assertEqual(state.shape, (1, 900, 128))
+            times_seen.append(times[0].item())
+            if times[0] == 1:
+                initial.append(state.clone())
+            return torch.full_like(state, 2.0, dtype=torch.bfloat16)
+
+        rng = torch.random.get_rng_state().clone()
+        with patch.object(generation, "predict_packed_flux_velocity", side_effect=predict):
+            result = self.generate((target,), ((0,),), decoder)
+        self.assertEqual(times_seen, [1., .75, .5, .25] * 2)
+        for original, final in zip(initial, decoder.states, strict=True):
+            torch.testing.assert_close(final, original - 2.0)
+        self.assertFalse(torch.equal(initial[0], initial[1]))
+        self.assertTrue(self.transformer.training)
+        torch.testing.assert_close(torch.random.get_rng_state(), rng)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result[0]), 2)
+        self.assertTrue(all(prediction.valid for prediction in result[0]))
+
+    def test_generates_without_any_supervision_fields(self):
+        with patch.object(generation, "predict_packed_flux_velocity", side_effect=lambda _, x, *a, **k: x * 0):
+            result = self.generate((_packed_input(),), ((0,),), steps=1, seeds=(50,))
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(result[0][0].grid, ((0, 0, 0),) * 3)
 
 
 if __name__ == "__main__":

@@ -219,7 +219,7 @@ def packed_processors(model, layout, backend):
             attention.set_processor(original)
 
 
-def packed_velocity(model, text, images, image_positions, timesteps, layout):
+def _forward_packed_flux(model, text, images, image_positions, timesteps, layout):
     """Reuse FLUX's blocks and heads, with example-specific token modulations.
 
     The caller supplies concatenated *valid* text prefixes and installs packed
@@ -277,7 +277,7 @@ def predict_packed_flux_velocity(
     with packed_processors(transformer, layout, backend), torch.autocast(
         device_type=device.type, dtype=compute_dtype, enabled=compute_dtype != torch.float32,
     ):
-        output = packed_velocity(transformer, text, latents, image_positions, timesteps, layout)
+        output = _forward_packed_flux(transformer, text, latents, image_positions, timesteps, layout)
     if output.shape != latents.shape:
         raise RuntimeError("packed FLUX output shape disagrees with input latents")
     return output

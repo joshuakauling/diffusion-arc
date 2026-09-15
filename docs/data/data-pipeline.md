@@ -293,7 +293,7 @@ from pathlib import Path
 
 from torch.utils.data import DataLoader
 
-from diffusion_arc.training import ArcTrainingDataset
+from diffusion_arc.training.data import ArcTrainingDataset
 
 
 dataset = ArcTrainingDataset(
@@ -310,7 +310,7 @@ loader = DataLoader(
 
 Each loader item therefore remains one `ArcTokenizedTrainingSample`. The
 single-GPU loop groups consecutive items into a configured source batch and
-sends that group to `prepare_flux_inputs_batch`. That function performs batched
+sends that group to `encode_training_batch`. That function performs batched
 frozen NVARC preparation, bounded VAE preparation, and appends the resulting
 targets in source-major order to the internal `FluxInput` queue. The complete
 runtime path is documented in the [training system overview](../training/README.md).

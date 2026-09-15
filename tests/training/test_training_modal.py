@@ -58,6 +58,10 @@ class TrainingModalTests(unittest.TestCase):
                 volume_factory.assert_called_once_with("diffusion-arc-models", create_if_missing=False)
                 self.assertEqual(module.app.function_options["gpu"], "H200")
                 self.assertEqual(module.app.function_options["retries"], 0)
+                if name == "profile_single_gpu_modal":
+                    self.assertFalse(module._ignore_data(Path("benchmarks/single_gpu_b0/splits/train")))
+                    self.assertTrue(module._ignore_data(Path("raw/arc-agi-2/training")))
+                    self.assertTrue(module._ignore_data(Path("splits")))
                 commands = "\n".join(arg for call, args, _ in image.calls if call == "run_commands" for arg in args)
                 self.assertIn(FA3_REVISION + "#subdirectory=hopper", commands)
                 self.assertIn("flash_attn_3.flash_attn_interface", commands)

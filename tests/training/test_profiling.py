@@ -5,15 +5,17 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from scripts import profile_single_gpu
 import torch
 
 from diffusion_arc.training.profiling import nsight_capture, training_range
-from scripts import train_single_gpu
-from tests.training.test_train_single_gpu_script import _config, _AcceptAnyModule
-from types import SimpleNamespace
+
+from tests.training.test_profile_single_gpu_script import _AcceptAnyModule, _config
+from diffusion_arc.training.setup import TrainingModels
 
 
 class NsightCaptureTests(unittest.TestCase):
@@ -104,39 +106,42 @@ class NsightCaptureTests(unittest.TestCase):
     def test_wrong_step_limit_fails_before_device_or_model_loading(self):
         config = _config(Path("/tmp"))
         config = replace(config, loop=replace(config.loop, max_optimizer_steps=60))
-        with patch.object(train_single_gpu, "load_single_gpu_training_config", return_value=config), \
-             patch.object(train_single_gpu, "prepare_single_gpu_device") as prepare:
+        with patch.object(profile_single_gpu, "load_training_config", return_value=config), \
+             patch.object(profile_single_gpu, "prepare_device") as prepare:
             with self.assertRaisesRegex(ValueError, "exactly seven"):
-                train_single_gpu.train_from_config("unused.json", profiler_kind="nsys")
+                profile_single_gpu.profile_from_config("unused.json", profiler_kind="nsys")
             prepare.assert_not_called()
 
     def test_nsys_entrypoint_shares_training_without_torch_profiler(self):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             config = _config(root)
-            models = SimpleNamespace(tokenizer=object(), nvarc_runner=_AcceptAnyModule(),
-                vae_encoder=_AcceptAnyModule(), transformer=_AcceptAnyModule(),
+            models = TrainingModels(vae_decoder=object(), flux_packing_backend=object(),tokenizer=object(), nvarc_encoder=_AcceptAnyModule(),
+                vae_encoder=_AcceptAnyModule(), flux_transformer=_AcceptAnyModule(),
                 flux_compute_dtype=torch.bfloat16)
             events = self._cuda(stack)
             for name, result in {
-                "load_single_gpu_training_config": config,
-                "prepare_single_gpu_device": torch.device("cuda:0"),
-                "seed_single_gpu_process": None, "load_single_gpu_models": models,
-                "build_single_sample_loader": [], "build_flux_optimizer": object(),
-                "build_flux_scheduler": None, "build_flow_generator": object(),
+                "load_training_config": config,
+                "prepare_device": torch.device("cuda:0"),
+                "seed_process": None, "load_models": models,
+                "build_dataloader": [SimpleNamespace(target_grids=(None,) * 6, key=f"s{i}") for i in range(7)],
+                "build_optimizer": object(),
+                "build_lr_scheduler": None, "build_flow_generator": object(),
+                "build_flow_sampler": object(), "build_velocity_loss": object(),
                 "version": "test-version",
             }.items():
-                stack.enter_context(patch.object(train_single_gpu, name, return_value=result))
+                stack.enter_context(patch.object(profile_single_gpu, name, return_value=result))
             stack.enter_context(patch.dict("os.environ", {"DIFFUSION_ARC_PROFILER_OUTPUT_ROOT": str(root)}))
             stack.enter_context(patch("torch.cuda.get_device_name", return_value="test GPU"))
             torch_profiler = stack.enter_context(patch("torch.profiler.profile"))
-            def run(*args, **kwargs):
-                for _ in range(7):
+            def make_trainer(*args, **kwargs):
+                def step(sequences):
                     with training_range("train/adamw"):
                         pass
-                    kwargs["on_optimizer_step"](torch.tensor(0.5), 5, 2)
-            stack.enter_context(patch.object(train_single_gpu, "run_single_gpu_training", side_effect=run))
-            train_single_gpu.main(["--config", str(root / "run.json"), "--profiler", "nsys"])
+                    return SimpleNamespace(loss=0.5, target_count=5, flux_forward_calls=2)
+                return SimpleNamespace(step=step)
+            stack.enter_context(patch.object(profile_single_gpu, "Trainer", side_effect=make_trainer))
+            profile_single_gpu.main(["--config", str(root / "run.json"), "--profiler", "nsys"])
             torch_profiler.assert_not_called()
             summary = json.loads((root / "training-summary.json").read_text())
             self.assertEqual(summary["status"], "complete")

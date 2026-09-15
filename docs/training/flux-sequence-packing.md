@@ -50,21 +50,23 @@ next physical batch is constructed.
 
 ## Configuration and runtime
 
-Schema v8 combines NVARC and FLUX packing. B3 sets
-`"flux_packing": {"max_tokens": 12288}`; `flux_scheduling`,
-`loop.flux_microbatch_size` and `padding.flux_bucket_boundaries` are null.
+Baseline schema v10 requires NVARC and FLUX packing. B3 sets
+`"flux_packing": {"max_tokens": 12288}`. The retired `flux_scheduling`,
+`loop.flux_microbatch_size`, `loop.nvarc_source_batch_size` and `padding` fields are rejected, including null values.
 FA3 and FP32 modulation sums are mandatory in this packed training path.
 Older schemas are rejected. Recorded B0/B1/B2 recipes and diagnostic code are
 recoverable from the [archive](https://github.com/joshuakauling/diffusion-arc/tree/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/).
 
-The same runtime packs each 16-source NVARC window without padding and stops
-after block 27, retaining raw hidden states 9, 18 and 27. CPU prefetch, frozen
-VAE chunks of 48, FIFO optimizer membership, data selection and the LR schedule
-remain unchanged. See the [NVARC encoder guide](nvarc-batch-runner.md).
-Existing generation and fixed-probe entrypoints keep their own FLUX attention
-path; a matching packed generation adapter remains separate work.
+The same runtime uses a separate NVARC budget (`nvarc_max_tokens`, default
+134,400) and stops after block 27, retaining raw hidden states 9, 18 and 27.
+Whole CPU sequences are grouped into optimizer batches outside the trainer;
+NVARC/VAE/FLUX splitting stays inside each step. VAE calls contain up to 48
+images in the current configuration. See the [NVARC encoder guide](nvarc-batch-runner.md).
+Packed validation uses the same model backend through target-free generation.
+Dense inference and model-level correctness references remain separate from
+the packed training path.
 
-`load_single_gpu_models` explicitly checks the CUDA/Hopper FA3 build using a
+`load_models` explicitly checks the CUDA/Hopper FA3 build using a
 small BF16, head-128, unequal-segment forward/backward before loading the models.
 It then checks the FLUX architecture, trainable FP32 parameters and disabled
 checkpointing. Missing or incompatible FA3 is an error. Model parameter names
@@ -107,8 +109,8 @@ and [cloud launcher](../../scripts/cloud/benchmark_flux_packing_modal.py) use
 the same packed path with 48 targets per update.
 
 Relevant implementation:
-[scheduler](../../src/diffusion_arc/training/flux_schedule.py),
-[microbatch assembly](../../src/diffusion_arc/training/flux_microbatch.py),
+[batch planning](../../src/diffusion_arc/training/step/flux_batching.py),
+[microbatch assembly](../../src/diffusion_arc/training/step/flux_microbatch.py),
 [FA3 execution](../../src/diffusion_arc/model/flux_packing.py),
 [modulation backward](../../src/diffusion_arc/model/flux_modulation.py),
-[training loop](../../src/diffusion_arc/training/single_gpu_loop.py).
+[training loop](../../src/diffusion_arc/training/trainer.py).

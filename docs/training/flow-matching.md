@@ -17,17 +17,20 @@ performs an update.
 
 The training-side `compute_flux_microbatch_loss` operation composes these
 helpers with one prepared microbatch: it executes FLUX with the supplied
-flow draws and returns the unscaled mean loss. B3 uses independent packed
-attention segments; the padded reference helper constructs a joint mask.
+flow draws and returns the unscaled mean loss with its optional regional metrics.
+Training uses independent packed attention segments throughout.
 Flow draws are assigned in FIFO order before physical grouping, preserving
 each target's timestep and noise.
 
-The implementation lives in
-[`src/diffusion_arc/model/flow_matching.py`](../../src/diffusion_arc/model/flow_matching.py). Its
-immutable `FlowMatchingBatch` output contract lives in
-[`src/diffusion_arc/model/contracts.py`](../../src/diffusion_arc/model/contracts.py).
+The samplers and immutable `FlowMatchingBatch` contract live in
+[`training/step/flow_sampling.py`](../../src/diffusion_arc/training/step/flow_sampling.py).
+The plain and regional objectives live in
+[`training/step/loss.py`](../../src/diffusion_arc/training/step/loss.py).
 The complete microbatch composition lives in
-[`src/diffusion_arc/training/flux_loss.py`](../../src/diffusion_arc/training/flux_loss.py).
+[`training/step/flux_microbatch.py`](../../src/diffusion_arc/training/step/flux_microbatch.py).
+This page describes the plain baseline; the
+[first epoch recipe](arc-agi-1-recipe.md) adds regional weighting and a fixed
+quota of exact `t=1` targets through the same training loop.
 
 ## Input and per-target sampling
 
@@ -83,9 +86,9 @@ transformer without pre-scaling. Its forward method performs the internal
 factor-of-1000 conversion used by the timestep embedding.
 
 The sampled noise is not retained as a separate public field because training
-needs only `z_t`, `t`, and `u_t` after construction. The `FluxMicrobatch`
-retains the clean latents and independently generated image position IDs needed
-by the later FLUX execution.
+needs only `z_t`, `t`, and `u_t` after construction. `FluxMicrobatch` contains
+text conditioning, the attention layout and image position IDs. It does not
+copy clean target latents; image tensors come from the supplied `FlowMatchingBatch`.
 
 ## Velocity loss
 
@@ -106,24 +109,30 @@ per-target weighting in this baseline.
 
 ## Complete microbatch computation
 
-`compute_flux_microbatch_loss` accepts either a B3 `PackedFluxMicrobatch` or
-a padded reference `FluxMicrobatch`. B3 passes a preflighted `packing_backend`
-and a `flow_batch` containing draws assigned before physical grouping:
+`Trainer` receives the sampler and loss as ready-to-use components. Each
+`compute_flux_microbatch_loss` call receives the model, preflighted
+`packing_backend`, token budget and loss function, together with its selected `FluxInput` objects and the corresponding `flow_batch`:
 
 ```text
 FIFO targets -> per-target flow draws -> select draws for this packed microbatch
     -> FLUX velocity prediction with separate FA3 attention segments
-    -> unweighted FP32 mean squared error
+    -> selected FP32 velocity objective
 ```
 
-If no `flow_batch` is supplied, the helper samples one from the clean latents
-using the optional generator. The padded reference path still constructs a
-joint key mask. Only the transformer forward runs inside an autocast region
+Flow draws are required; the helper never samples or changes the time distribution.
+The selected loss receives only predicted velocity, target velocity and the
+output-grid dimensions in microbatch order. It has no dependency on `FluxInput`
+or NVARC state ownership, and grid dimensions never reach the transformer.
+The helper builds one packed `FluxMicrobatch`. Only the transformer forward runs inside an autocast region
 using the supplied compute dtype. Persistent transformer
 parameters retain their loader-established FP32 dtype, while the loss is
 computed after leaving autocast and explicitly uses FP32 inputs. The function
-returns one scalar loss. It does not scale that loss for an optimizer batch or
-call `backward()`.
+returns a `LossResult` containing the scalar mean, per-target losses and any
+already-computed regional reductions. The trainer returns these measurements
+as CPU-only `TargetMetrics` in logical target order, alongside each target's
+time and demonstration count. Grouping and averaging for logging belong to the
+caller. The microbatch helper
+does not scale the loss for an optimizer batch or call `backward()`.
 
 ## Validation boundaries
 
@@ -133,8 +142,8 @@ floating latent dtype, FP32 persistent FLUX parameter storage, matching
 prediction and target shapes, and matching loss devices. It does not scan
 complete tensors for finite values on every training step. Explicit preflights
 and the training runner provide finite-value diagnostics and recorded RNG seeds.
-The runner rejects non-finite losses before backward and checks gradients when
-gradient metrics or clipping are enabled.
+The trainer rejects non-finite losses before backward and non-finite gradient
+norms before the optimizer update. It clears gradients even when a step fails.
 
 Unit tests establish:
 
@@ -153,7 +162,7 @@ The complete microbatch computation does not:
 
 - load or select a FLUX checkpoint;
 - choose a non-uniform timestep density or loss weighting;
-- select or build `FluxInput` objects or physical microbatches;
+- select the logical targets belonging to an optimizer batch;
 - scale losses, call `backward()`, accumulate gradients, or update parameters;
 - configure gradient scaling, gradient checkpointing, or distributed execution;
   or

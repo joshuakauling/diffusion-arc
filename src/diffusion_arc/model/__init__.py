@@ -17,19 +17,12 @@ from .contracts import (
     TARGET_LATENT_SHAPE,
     TARGET_LATENT_TOKEN_COUNT,
     TARGET_LATENT_WIDTH,
-    FlowMatchingBatch,
     FluxSpatialShape,
     FluxTextInputs,
     NvarcBatchOutput,
-    PackedTrainingBatch,
     validate_packed_source_sequences,
-    validate_packed_training_batch,
 )
-from .flow_matching import (
-    flow_matching_loss,
-    sample_flow_matching_batch,
-    sample_stratified_flow_matching_batch,
-)
+
 from .flux_conditioning import (
     build_flux_joint_attention_mask,
     pad_flux_text_prefixes,
@@ -40,7 +33,7 @@ from .flux_velocity import (
     flux_transformer_device,
     predict_flux_velocity,
 )
-from .nvarc_encoder import NvarcBatchRunner
+from .nvarc_encoder import NvarcEncoder
 
 __all__ = [
     "DEFAULT_FLUX_SPATIAL_SHAPE",
@@ -59,22 +52,16 @@ __all__ = [
     "TARGET_LATENT_SHAPE",
     "TARGET_LATENT_TOKEN_COUNT",
     "TARGET_LATENT_WIDTH",
-    "FlowMatchingBatch",
     "FluxSpatialShape",
     "FluxTextInputs",
     "FluxVaeDecoder",
     "FluxVaeEncoder",
     "NvarcBatchOutput",
-    "NvarcBatchRunner",
-    "PackedTrainingBatch",
+    "NvarcEncoder",
     "build_flux_joint_attention_mask",
     "build_flux_image_position_ids",
     "flux_transformer_device",
-    "flow_matching_loss",
     "pad_flux_text_prefixes",
     "predict_flux_velocity",
-    "sample_flow_matching_batch",
-    "sample_stratified_flow_matching_batch",
     "validate_packed_source_sequences",
-    "validate_packed_training_batch",
 ]

@@ -13,7 +13,7 @@ from diffusion_arc.model import (
     NVARC_HIDDEN_SIZE,
     NVARC_HIDDEN_STATE_INDICES,
     NvarcBatchOutput,
-    NvarcBatchRunner,
+    NvarcEncoder,
 )
 from unittest.mock import patch
 from contextlib import ExitStack
@@ -99,10 +99,10 @@ def reference_varlen(q, k, v, *, cu_seqlens_q, cu_seqlens_k,
     return torch.cat(outputs)
 
 
-class NvarcBatchRunnerTests(unittest.TestCase):
+class NvarcEncoderTests(unittest.TestCase):
     def test_packed_positions_boundaries_layers_and_compact_frozen_outputs(self):
         model = FakeNvarc()
-        runner = NvarcBatchRunner(model)
+        runner = NvarcEncoder(model)
         runner.train(True)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
         output = runner(ids, torch.tensor([0, 2, 6]))
@@ -135,7 +135,7 @@ class NvarcBatchRunnerTests(unittest.TestCase):
                             num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
         config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         model = Qwen3Model(config)
-        runner = NvarcBatchRunner(model)
+        runner = NvarcEncoder(model)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
         actual = runner(ids, torch.tensor([0, 2, 6]))
         # Ordinary SDPA on independent sequences is the reference, including RoPE.
@@ -162,7 +162,7 @@ class NvarcBatchRunnerTests(unittest.TestCase):
                             num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
         config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         model = Qwen3ForCausalLM(config)
-        runner = NvarcBatchRunner(model)
+        runner = NvarcEncoder(model)
         # Make accidental final normalization easy to detect.
         with torch.no_grad():
             model.model.norm.weight.fill_(2)
@@ -206,7 +206,7 @@ class NvarcBatchRunnerTests(unittest.TestCase):
         model = FakeNvarc()
         model.config._attn_implementation = "sdpa"
         with self.assertRaisesRegex(ValueError, "nvarc_fa3"):
-            NvarcBatchRunner(model)
+            NvarcEncoder(model)
 
     def test_missing_fa3_fails_without_fallback(self):
         with patch("diffusion_arc.model.nvarc_attention.import_module", side_effect=ImportError("FA3 missing")):

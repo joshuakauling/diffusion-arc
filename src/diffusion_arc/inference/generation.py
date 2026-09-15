@@ -1,4 +1,4 @@
-"""Reusable Euler generation and exact-grid diagnostics for Diffusion-ARC."""
+"""Target-free padded and packed Euler generation for Diffusion-ARC."""
 
 from __future__ import annotations
 
@@ -8,24 +8,32 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from diffusion_arc.arc_data._grid import validate_arc_grid
 from diffusion_arc.arc_data.canvas import (
     ArcGridPrediction,
     classify_arc_cells,
     decode_arc_grids,
     decode_fixed_arc_grids,
 )
-from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.model.contracts import (
     DEFAULT_FLUX_SPATIAL_SHAPE,
     TARGET_LATENT_CHANNELS,
     FluxSpatialShape,
     FluxTextInputs,
 )
+from diffusion_arc.model.flux_packing import predict_packed_flux_velocity
 from diffusion_arc.model.flux_velocity import (
     build_flux_image_position_ids,
     flux_transformer_device,
     predict_flux_velocity,
+)
+
+from .conditioning import (
+    PackedGenerationInput,
+    evaluation_mode,
+    sample_conditioning_noise,
+    stage_packed_conditioning,
+    validate_packed_execution,
+    validate_sampling_seed,
 )
 
 
@@ -38,19 +46,6 @@ class ArcGenerationBatch:
     rgb_images: Tensor
     class_canvases: Tensor
     predictions: tuple[ArcGridPrediction, ...]
-
-
-@dataclass(frozen=True)
-class ExactGridDiagnostic:
-    """Exact-grid diagnostic computed after generation without fallback behavior."""
-
-    prediction_valid: bool
-    invalid_reason: str | None
-    predicted_shape: tuple[int, int] | None
-    expected_shape: tuple[int, int]
-    shape_match: bool
-    cell_accuracy: float | None
-    exact_grid: bool
 
 
 def linear_timestep_schedule(
@@ -185,58 +180,62 @@ def continue_arc_batch(
     )
 
 
-def diagnose_exact_grids(
-    predictions: Sequence[ArcGridPrediction],
-    expected_grids: Sequence[Grid],
-) -> tuple[ExactGridDiagnostic, ...]:
-    """Compare completed predictions with targets without affecting generation."""
+def generate_packed_arc_samples(
+    transformer: nn.Module,
+    vae_decoder: nn.Module,
+    inputs: Sequence[PackedGenerationInput],
+    packs: Sequence[Sequence[int]],
+    *,
+    steps: int,
+    seeds: Sequence[int],
+    compute_dtype: torch.dtype,
+    backend: object,
+) -> tuple[tuple[ArcGridPrediction, ...], ...]:
+    """Generate full 30×30 canvases, returning predictions by query then seed.
 
-    prediction_batch = tuple(predictions)
-    expected_batch = tuple(expected_grids)
-    if len(prediction_batch) != len(expected_batch):
-        raise ValueError("predictions and expected_grids must have equal lengths")
+    Every trajectory uses FP32 Euler integration and query-keyed noise. Inputs
+    contain no supervision, output dimensions, or target latents.
+    """
 
-    diagnostics: list[ExactGridDiagnostic] = []
-    for prediction, expected_grid in zip(
-        prediction_batch,
-        expected_batch,
-        strict=True,
-    ):
-        if not isinstance(prediction, ArcGridPrediction):
-            raise TypeError("predictions must contain ArcGridPrediction values")
-        validate_arc_grid(expected_grid)
-        expected_shape = (len(expected_grid), len(expected_grid[0]))
-        predicted_shape = (
-            None
-            if prediction.height is None or prediction.width is None
-            else (prediction.height, prediction.width)
-        )
-        shape_match = bool(
-            prediction.valid and predicted_shape == expected_shape
-        )
-        cell_accuracy: float | None = None
-        exact_grid = False
-        if shape_match:
-            if prediction.grid is None:
-                raise AssertionError("a valid shape-matched prediction must expose a grid")
-            predicted_tensor = torch.tensor(prediction.grid, dtype=torch.int64)
-            expected_tensor = torch.tensor(expected_grid, dtype=torch.int64)
-            matches = predicted_tensor == expected_tensor
-            cell_accuracy = float(matches.to(dtype=torch.float32).mean().item())
-            exact_grid = bool(matches.all().item())
-
-        diagnostics.append(
-            ExactGridDiagnostic(
-                prediction_valid=prediction.valid,
-                invalid_reason=prediction.invalid_reason,
-                predicted_shape=predicted_shape,
-                expected_shape=expected_shape,
-                shape_match=shape_match,
-                cell_accuracy=cell_accuracy,
-                exact_grid=exact_grid,
-            )
-        )
-    return tuple(diagnostics)
+    values, groups, device = validate_packed_execution(
+        transformer, inputs, packs, compute_dtype, backend,
+    )
+    if not isinstance(vae_decoder, nn.Module):
+        raise TypeError("vae_decoder must be a torch.nn.Module")
+    sample_seeds = tuple(seeds)
+    for seed in sample_seeds:
+        validate_sampling_seed(seed)
+    if not sample_seeds or len(set(sample_seeds)) != len(sample_seeds):
+        raise ValueError("seeds must contain distinct integers")
+    schedule = linear_timestep_schedule(steps, device=device)
+    predictions: dict[tuple[int, int], ArcGridPrediction] = {}
+    with evaluation_mode(transformer):
+        for indices in groups:
+            batch = tuple(values[index] for index in indices)
+            text, layout, positions = stage_packed_conditioning(batch, device)
+            for sample_index, seed in enumerate(sample_seeds):
+                latents = torch.stack(tuple(
+                    sample_conditioning_noise(query, seed, ("generation", sample_index), device)
+                    for query in batch
+                ))
+                for timestep, next_timestep in zip(schedule[:-1], schedule[1:], strict=True):
+                    velocity = predict_packed_flux_velocity(
+                        transformer, latents, text, positions, timestep.expand(len(batch)),
+                        layout, compute_dtype=compute_dtype, backend=backend,
+                    )
+                    latents = latents + (next_timestep - timestep) * velocity.float()
+                if not bool(torch.isfinite(latents).all().item()):
+                    raise RuntimeError("generated latents are non-finite")
+                images = vae_decoder(latents, spatial_shape=DEFAULT_FLUX_SPATIAL_SHAPE)
+                if not bool(torch.isfinite(images).all().item()):
+                    raise RuntimeError("decoded generation images are non-finite")
+                decoded = decode_arc_grids(classify_arc_cells(_normalized_images_to_uint8(images)))
+                if len(decoded) != len(indices):
+                    raise RuntimeError("decoded prediction count disagrees with the pack")
+                for index, prediction in zip(indices, decoded, strict=True):
+                    predictions[index, sample_index] = prediction
+    return tuple(tuple(predictions[index, sample_index] for sample_index in range(len(sample_seeds)))
+                 for index in range(len(values)))
 
 
 def _prepare_timestep_schedule(
@@ -393,9 +392,8 @@ def _normalized_images_to_uint8(images: Tensor) -> Tensor:
 
 __all__ = [
     "ArcGenerationBatch",
-    "ExactGridDiagnostic",
     "continue_arc_batch",
-    "diagnose_exact_grids",
     "generate_arc_batch",
+    "generate_packed_arc_samples",
     "linear_timestep_schedule",
 ]

@@ -52,6 +52,7 @@ class ArcTrainingViewConfig:
     exclude: tuple[str, ...]
     seed: int | None
     augmentations_per_task: int
+    geometry_sampling: str = "cycle"
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,8 @@ def _load_view_config(
     expected_fields = common_fields
     if mode is ArcTrainingViewMode.SAMPLED:
         expected_fields = common_fields | {"seed", "augmentations_per_task"}
+        if "geometry_sampling" in payload:
+            expected_fields |= {"geometry_sampling"}
     _require_exact_fields(payload, expected_fields, name=f"views.{view_name}")
 
     task_split = _require_string(
@@ -284,9 +287,13 @@ def _load_view_config(
             payload["augmentations_per_task"],
             name=f"views.{view_name}.augmentations_per_task",
         )
+        geometry_sampling = payload.get("geometry_sampling", "cycle")
+        if geometry_sampling not in ("cycle", "uniform"):
+            raise ValueError(f"views.{view_name}.geometry_sampling must be 'cycle' or 'uniform'")
     else:
         seed = None
         augmentations_per_task = 1
+        geometry_sampling = "cycle"
 
     return ArcTrainingViewConfig(
         name=view_name,
@@ -299,6 +306,7 @@ def _load_view_config(
         exclude=exclude,
         seed=seed,
         augmentations_per_task=augmentations_per_task,
+        geometry_sampling=geometry_sampling,
     )
 
 
@@ -368,6 +376,7 @@ def _generate_view_keys(
                 max_pairs=config.max_pairs,
                 max_cells=config.max_cells,
                 rng=rng,
+                geometry_sampling=view.geometry_sampling,
             )
             key = make_augmentation_key(task_id, augmentation)
             candidate_index += 1

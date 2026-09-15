@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 10,
   "seed": 167,
   "device": "cuda:0",
   "models": {
@@ -20,15 +20,9 @@
   "loop": {
     "max_optimizer_steps": 7,
     "optimizer_batch_size": 48,
-    "flux_microbatch_size": null,
     "min_context_pairs_before_target": 2,
-    "nvarc_source_batch_size": 16,
     "vae_microbatch_size": 48
   },
-  "padding": {
-    "flux_bucket_boundaries": null
-  },
-  "flux_scheduling": null,
   "optimizer": {
     "learning_rate": 1e-05,
     "beta1": 0.9,
@@ -44,5 +38,6 @@
   "benchmark": null,
   "flux_packing": {
     "max_tokens": 12288
-  }
+  },
+  "nvarc_max_tokens": 134400
 }

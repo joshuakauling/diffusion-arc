@@ -36,12 +36,12 @@ from diffusion_arc.model.contracts import (
     NVARC_CONTEXT_WIDTH, NVARC_MAX_TOKENS, TARGET_LATENT_CHANNELS,
     TARGET_LATENT_TOKEN_COUNT, validate_packed_source_sequences,
 )
-from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
-from diffusion_arc.training.single_gpu_loop import run_single_gpu_training
-from diffusion_arc.training.single_gpu_setup import (
-    build_flow_generator, build_flux_optimizer, build_flux_scheduler,
-    load_single_gpu_models, prepare_single_gpu_device, seed_single_gpu_process,
-)
+from diffusion_arc.training.config import load_training_config
+from diffusion_arc.training.trainer import Trainer
+from diffusion_arc.training.step.flow_sampling import build_flow_generator, build_flow_sampler
+from diffusion_arc.training.step.loss import build_velocity_loss
+from diffusion_arc.training.setup import build_optimizer, load_models, prepare_device, seed_process
+from diffusion_arc.training.step.lr_schedule import build_lr_scheduler
 
 
 TARGETS_PER_SOURCE = 3
@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_config(path: Path, *, require_checkpoints: bool = True):
-    config = load_single_gpu_training_config(path)
+    config = load_training_config(path, expected_type="baseline")
     if (
         config.loop.optimizer_batch_size != 48
         or config.loop.min_context_pairs_before_target != 2
@@ -129,34 +129,36 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 
 def initialize_training_memory(config, models, optimizer, *, device):
-    """Allocate real AdamW state and retain gradients for accumulation capacity probes."""
+    """Initialize real AdamW state, then allocate representative gradient storage.
+
+    Trainer.step releases its gradients. This probe explicitly reserves an
+    equally sized gradient buffer per parameter to measure capacity with the
+    conservative accumulation footprint, independent of the Trainer lifetime.
+    """
 
     sample = make_sample(models.tokenizer, seed=config.seed, grid_size=1, pair_count=2)
-    gradients = {}
-
-    def retain_gradients(_loss, _targets, _microbatches):
-        # Keep the actual buffers across the training loop's end-of-step cleanup.
-        gradients.update((parameter, parameter.grad) for parameter in models.transformer.parameters())
-
     # Apply the configured initial LR, including its zero-LR first warm-up step.
-    scheduler = build_flux_scheduler(config, optimizer=optimizer)
-    run_single_gpu_training(
-        (sample,), nvarc_runner=models.nvarc_runner, vae_encoder=models.vae_encoder,
-        transformer=models.transformer, optimizer=optimizer,
+    scheduler = build_lr_scheduler(config, optimizer=optimizer)
+    initial_learning_rate = optimizer.param_groups[0]["lr"]
+    Trainer(
+        nvarc_encoder=models.nvarc_encoder, vae_encoder=models.vae_encoder,
+        flux_transformer=models.flux_transformer, optimizer=optimizer, scheduler=scheduler,
+        flow_sampler=build_flow_sampler(config,
+            generator=build_flow_generator(config, device=device)),
+        loss_function=build_velocity_loss(config),
         flux_compute_dtype=models.flux_compute_dtype,
-        max_optimizer_steps=1, optimizer_batch_size=1, flux_microbatch_size=1,
-        min_context_pairs_before_target=1, nvarc_source_batch_size=1,
-        vae_microbatch_size=1, generator=build_flow_generator(config, device=device),
-        on_optimizer_step=retain_gradients,
-    )
-    for parameter, gradient in gradients.items():
-        parameter.grad = gradient
+        flux_packing_backend=models.flux_packing_backend,
+        nvarc_max_tokens=config.nvarc_max_tokens,
+        vae_microbatch_size=1, flux_max_joint_tokens=config.flux_packing.max_tokens,
+        min_context_pairs_before_target=1, max_grad_norm=config.optimizer.max_grad_norm,
+    ).step((sample,))
     gradient_bytes = optimizer_state_bytes = 0
-    for parameter in models.transformer.parameters():
+    for parameter in models.flux_transformer.parameters():
         if not parameter.requires_grad:
             raise RuntimeError("the complete FLUX transformer must be trainable")
-        if parameter.grad is None:
-            raise RuntimeError("initialization did not populate every FLUX gradient")
+        if parameter.grad is not None:
+            raise RuntimeError("Trainer.step must release every FLUX gradient")
+        parameter.grad = torch.zeros_like(parameter)
         gradient_bytes += _tensor_bytes(parameter.grad)
         state = optimizer.state.get(parameter, {})
         for name in ("exp_avg", "exp_avg_sq"):
@@ -170,18 +172,19 @@ def initialize_training_memory(config, models, optimizer, *, device):
     return {
         "optimizer_steps": 1, "initialization_targets": 1,
         "grid_size": 1, "image_tokens": TARGET_LATENT_TOKEN_COUNT,
-        "learning_rate": optimizer.param_groups[0]["lr"],
+        "learning_rate": initial_learning_rate,
         "scheduler_enabled": scheduler is not None,
         "gradient_bytes": gradient_bytes, "adamw_moment_bytes": optimizer_state_bytes,
+        "gradient_policy": "explicit_representative_storage_after_step",
     }
 
 
 def allocate_buffer_reserve(config, *, device, sequence_length: int):
     """Keep a conservative full optimizer batch of frozen outputs resident.
 
-    FIFO occupancy immediately before preparation is below 48 targets. Reserve
-    48 targets and 16 full source states anyway, independently of candidate size.
-    Also account for the previous optimizer_inputs tuple retained by the loop.
+    Preserve the historical probe's 48-target/16-source reserve plus 48 extra
+    latent slots for comparable capacity measurements. The extra storage is an
+    explicit safety margin; Trainer.step retains no previous-step GPU tensors.
     These tensors reserve storage only; they are never passed to a model.
     """
 
@@ -199,9 +202,9 @@ def allocate_buffer_reserve(config, *, device, sequence_length: int):
         device=device, dtype=latent_dtype,
     ))
     return reserve, {
-        "policy": "full_optimizer_batch_plus_previous_optimizer_latents",
-        "fifo_source_slots": source_slots, "fifo_target_slots": target_slots,
-        "previous_optimizer_target_slots": target_slots,
+        "policy": "full_optimizer_batch_plus_additional_latents",
+        "source_slots": source_slots, "target_slots": target_slots,
+        "additional_latent_target_slots": target_slots,
         "source_length": sequence_length,
         "hidden_dtype": str(hidden_dtype), "latent_dtype": str(latent_dtype),
         "hidden_bytes": hidden_bytes, "latent_bytes": _tensor_bytes(reserve[-1]),
@@ -256,7 +259,7 @@ def run_candidate(args) -> dict:
         config = _load_config(args.config)
         result["config"] = asdict(config)
         result["environment"] = _environment_metadata()
-        device = prepare_single_gpu_device(config)
+        device = prepare_device(config)
         properties = torch.cuda.get_device_properties(device)
         result["gpu"] = {
             "name": properties.name, "total_memory_bytes": properties.total_memory,
@@ -272,9 +275,9 @@ def run_candidate(args) -> dict:
             ) if path.is_file()
         }
         _write_json(result_path, result)
-        seed_single_gpu_process(config.seed)
-        models = load_single_gpu_models(config, device=device)
-        optimizer = build_flux_optimizer(config, transformer=models.transformer)
+        seed_process(config.seed)
+        models = load_models(config, device=device)
+        optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
         result["initialization"] = initialize_training_memory(
             config, models, optimizer, device=device,
         )
@@ -297,7 +300,7 @@ def run_candidate(args) -> dict:
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
             started = time.perf_counter()
-            output = models.nvarc_runner(input_ids, offsets)
+            output = models.nvarc_encoder(input_ids, offsets)
             torch.cuda.synchronize(device)
             seconds = time.perf_counter() - started
             memory = _memory(device)

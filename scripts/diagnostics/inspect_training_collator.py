@@ -28,8 +28,8 @@ from diffusion_arc.arc_data import (  # noqa: E402
     render_training_prompt,
     tokenize_nvarc_training_sample,
 )
-from diffusion_arc.model import validate_packed_training_batch  # noqa: E402
-from diffusion_arc.training import CollatedTrainingBatch, TrainingCollator  # noqa: E402
+from diffusion_arc.training.data import validate_packed_training_batch  # noqa: E402
+from diffusion_arc.training.data import CollatedTrainingBatch, TrainingCollator  # noqa: E402
 from _nvarc_tokenizer import make_nvarc_tokenizer  # noqa: E402
 
 

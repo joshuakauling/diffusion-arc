@@ -21,9 +21,9 @@ VOLUME_ROOT = Path("/mnt/diffusion-arc-models")
 
 
 def _ignore_data(path: Path) -> bool:
-    """Include legacy profiling inputs and the B0 bundle, but not data archives."""
+    """Include the shared B3 benchmark bundle without unrelated data archives."""
 
-    included = (Path("splits"), Path("raw/arc-agi-2/training"), Path("benchmarks/single_gpu_b0"))
+    included = (Path("benchmarks/single_gpu_b0"),)
     return not any(path.is_relative_to(root) or root.is_relative_to(path) for root in included)
 
 
@@ -95,12 +95,12 @@ def profile_single_gpu(config: str) -> str:
     if str(REMOTE_REPOSITORY_ROOT) not in sys.path:
         sys.path.insert(0, str(REMOTE_REPOSITORY_ROOT))
 
-    from scripts import train_single_gpu
+    from scripts import profile_single_gpu
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     profiler_output_root = VOLUME_ROOT / "results" / "torch-profiler" / run_id
-    train_single_gpu.PROFILER_OUTPUT_ROOT = profiler_output_root
-    train_single_gpu.train_from_config(remote_config)
+    profile_single_gpu.PROFILER_OUTPUT_ROOT = profiler_output_root
+    profile_single_gpu.profile_from_config(remote_config)
 
     trace_path = profiler_output_root / remote_config.stem / "trace.json"
     if not trace_path.is_file():

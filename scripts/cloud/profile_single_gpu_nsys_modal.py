@@ -38,16 +38,15 @@ def validate_config(repository: Path, config: str) -> Path:
     path = (repository / config).resolve()
     if Path(config).is_absolute() or not path.is_relative_to(repository.resolve()):
         raise ValueError("config must be a repository-relative path")
-    from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
+    from diffusion_arc.training.config import load_training_config
 
-    validated = load_single_gpu_training_config(path)
+    validated = load_training_config(path, expected_type="baseline")
     payload = json.loads(path.read_text())
     expected = {
-        "seed": 167, "device": "cuda:0",
+        "seed": 167, "device": "cuda:0", "nvarc_max_tokens": 134400,
         "loop": {"max_optimizer_steps": 7, "optimizer_batch_size": 48,
-                 "flux_microbatch_size": None, "min_context_pairs_before_target": 2,
-                 "nvarc_source_batch_size": 16, "vae_microbatch_size": 48},
-        "padding": {"flux_bucket_boundaries": None}, "flux_scheduling": None,
+                 "min_context_pairs_before_target": 2,
+                 "vae_microbatch_size": 48},
         "flux_packing": {"max_tokens": 12288}, "benchmark": None,
         "optimizer": {"learning_rate": 1e-5, "beta1": 0.9, "beta2": 0.999,
                       "epsilon": 1e-8, "weight_decay": 0.01},
@@ -88,7 +87,7 @@ def profile_command(config: Path, output: Path) -> list[str]:
             "--gpu-metrics-devices=cuda-visible", "--gpu-metrics-frequency=10000",
             "--capture-range=cudaProfilerApi", "--capture-range-end=stop", "--kill=none",
             f"--output={output / 'trace'}", sys.executable, "-B",
-            str(REMOTE_REPOSITORY_ROOT / "scripts/train_single_gpu.py"),
+            str(REMOTE_REPOSITORY_ROOT / "scripts/profile_single_gpu.py"),
             "--config", str(config), "--profiler", "nsys"]
 
 

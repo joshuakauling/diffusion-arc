@@ -1,13 +1,14 @@
 # NVARC Batch Runner
 
-The training encoder uses **FlashAttention-3 Varlen without padding**. One
-forward processes all eligible sources in the current preparation window
-(normally 16). Each source retains independent causal attention and position
-IDs starting at zero. Sources are not sorted or scheduled into length buckets.
+The training encoder uses **FlashAttention-3 Varlen without padding**. Training preparation groups whole sources under a configurable total-token
+budget, defaulting to **134,400 tokens** (8,400 × 16). Consecutive sources are
+packed until the next source would exceed that budget. Each source retains
+independent causal attention and position IDs starting at zero; sources are not
+sorted or scheduled into length buckets.
 
 ## Interface and data flow
 
-`NvarcBatchRunner` accepts validated CPU tensors: flat `input_ids` of shape
+`NvarcEncoder` accepts validated CPU tensors: flat `input_ids` of shape
 `[T]` and `sequence_offsets` of shape `[S + 1]`, both int64. Offsets start at
 zero and end at the total token count. The interface contains no target metadata.
 
@@ -23,7 +24,8 @@ flat IDs + source offsets
 The cumulative lengths prevent attention between sources. `causal=True`
 prevents attention to later tokens within a source. Reset positions preserve
 per-source RoPE semantics. There are no padding tokens between sources or at
-the end of the packed stream, and no fixed total-token budget.
+the end of the packed stream. `encode_training_batch` enforces the call
+budget before invoking the model, separately from the 8,400-token source limit.
 
 The encoder calls the original Qwen embedding, rotary-position module and first
 27 decoder blocks directly. It retains only the states after blocks 9, 18 and
@@ -41,9 +43,10 @@ model or its backend after construction.
 Each returned source tensor owns compact storage. Targets share an
 `NvarcSequenceState` and their exact prefix ends; after its last prefix is
 copied into a FLUX microbatch, the full source state can be released independently.
-VAE encoding follows the packed forward and spans the window's targets in
-source-major order. FIFO optimizer membership and per-target loss weighting
-are unchanged.
+VAE encoding follows the NVARC packs and spans the supplied step's targets in
+source-major order. Its image batch size is independent of NVARC grouping.
+`EncodedTrainingBatch` returns inputs and CPU metadata describing the actual
+NVARC groups and VAE call count. No source is moved to another optimizer step.
 
 ## Runtime contract
 

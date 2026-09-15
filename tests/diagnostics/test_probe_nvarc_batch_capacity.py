@@ -15,15 +15,16 @@ import torch
 from torch import nn
 
 from diffusion_arc.model.contracts import NVARC_CONTEXT_WIDTH, NvarcBatchOutput
-from diffusion_arc.training.single_gpu_config import load_single_gpu_training_config
+from diffusion_arc.training.config import load_training_config
+from diffusion_arc.training.setup import TrainingModels
 from scripts.diagnostics import probe_nvarc_batch_capacity as probe
 from scripts.diagnostics._nvarc_tokenizer import make_nvarc_tokenizer
 
 
 def _config():
-    return load_single_gpu_training_config(
+    return load_training_config(
         probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b3.json"
-    )
+    , expected_type="baseline")
 
 
 class CapacitySearchTests(unittest.TestCase):
@@ -92,7 +93,7 @@ class WorkloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected 8192"):
             probe.make_probe_inputs(self.tokenizer, seed=167, batch_size=1, sequence_length=8192)
 
-    def test_reserve_counts_full_fifo_and_previous_optimizer_latents(self):
+    def test_reserve_preserves_conservative_storage_without_cross_step_retention(self):
         with (
             patch.object(probe, "NVARC_CONTEXT_WIDTH", 4),
             patch.object(probe, "TARGET_LATENT_TOKEN_COUNT", 2),
@@ -101,9 +102,9 @@ class WorkloadTests(unittest.TestCase):
             tensors, metadata = probe.allocate_buffer_reserve(
                 _config(), device=torch.device("cpu"), sequence_length=2,
             )
-        self.assertEqual(metadata["fifo_source_slots"], 16)
-        self.assertEqual(metadata["fifo_target_slots"], 48)
-        self.assertEqual(metadata["previous_optimizer_target_slots"], 48)
+        self.assertEqual(metadata["source_slots"], 16)
+        self.assertEqual(metadata["target_slots"], 48)
+        self.assertEqual(metadata["additional_latent_target_slots"], 48)
         self.assertEqual(len(tensors), 17)
         self.assertEqual(tensors[0].dtype, torch.bfloat16)
         self.assertEqual(tensors[-1].dtype, torch.float32)
@@ -111,7 +112,7 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(metadata["latent_bytes"], 96 * 2 * 3 * 4)
         self.assertEqual(metadata["total_bytes"], sum(probe._tensor_bytes(t) for t in tensors))
 
-    def test_initialization_retains_real_gradients_across_training_cleanup(self):
+    def test_initialization_allocates_representative_gradients_after_training_cleanup(self):
         class Nvarc(nn.Module):
             def forward(self, ids, offsets):
                 return NvarcBatchOutput((torch.ones(len(ids), 4),))
@@ -128,46 +129,51 @@ class WorkloadTests(unittest.TestCase):
             def forward(self, *, hidden_states, **kwargs):
                 return SimpleNamespace(sample=hidden_states * self.weight)
 
-        models = SimpleNamespace(
-            tokenizer=self.tokenizer, nvarc_runner=Nvarc(), vae_encoder=Vae(),
-            transformer=Flux(), flux_compute_dtype=torch.bfloat16,
+        models = TrainingModels(vae_decoder=object(), flux_packing_backend=object(),
+            tokenizer=self.tokenizer, nvarc_encoder=Nvarc(), vae_encoder=Vae(),
+            flux_transformer=Flux(), flux_compute_dtype=torch.bfloat16,
         )
         config = _config()
-        optimizer = probe.build_flux_optimizer(config, transformer=models.transformer)
+        optimizer = probe.build_optimizer(config, flux_transformer=models.flux_transformer)
         cleared_gradients = []
         zero_grad = optimizer.zero_grad
 
         def clear_gradients(**kwargs):
             zero_grad(**kwargs)
-            cleared_gradients.append(models.transformer.weight.grad)
+            cleared_gradients.append(models.flux_transformer.weight.grad)
 
-        with patch.object(optimizer, "zero_grad", side_effect=clear_gradients):
+        def packed_forward(transformer, noisy, *args, **kwargs):
+            return noisy * transformer.weight
+
+        with patch.object(optimizer, "zero_grad", side_effect=clear_gradients), \
+             patch("diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity", side_effect=packed_forward):
             metadata = probe.initialize_training_memory(
                 config, models, optimizer, device=torch.device("cpu"),
             )
         self.assertEqual(cleared_gradients, [None, None])
-        parameter = models.transformer.weight
+        parameter = models.flux_transformer.weight
         self.assertIsNotNone(parameter.grad)
         self.assertTrue(torch.isfinite(parameter.grad))
-        self.assertNotEqual(parameter.grad.item(), 0)
-        self.assertEqual(parameter.item(), 0.5)  # B0's first scheduled LR is zero.
+        self.assertEqual(parameter.grad.item(), 0)
+        self.assertEqual(parameter.item(), 0.5)  # B3's first scheduled LR is zero.
         self.assertEqual(optimizer.state[parameter]["step"].item(), 1)
         self.assertEqual(metadata["gradient_bytes"], 4)
         self.assertEqual(metadata["adamw_moment_bytes"], 8)
         self.assertEqual(metadata["initialization_targets"], 1)
         self.assertEqual(metadata["learning_rate"], 0)
 
-    def test_initialization_rejects_missing_gradients_and_optimizer_state(self):
-        models = SimpleNamespace(tokenizer=self.tokenizer, transformer=nn.Linear(1, 1))
-        models.nvarc_runner = models.vae_encoder = object()
+    def test_initialization_rejects_retained_gradients_and_missing_optimizer_state(self):
+        models = SimpleNamespace(tokenizer=self.tokenizer, flux_transformer=nn.Linear(1, 1),
+                                 flux_packing_backend=object())
+        models.nvarc_encoder = models.vae_encoder = object()
         models.flux_compute_dtype = torch.bfloat16
-        optimizer = probe.build_flux_optimizer(_config(), transformer=models.transformer)
-        with patch.object(probe, "run_single_gpu_training"):
-            with self.assertRaisesRegex(RuntimeError, "every FLUX gradient"):
-                probe.initialize_training_memory(_config(), models, optimizer, device=torch.device("cpu"))
-            for parameter in models.transformer.parameters():
-                parameter.grad = torch.ones_like(parameter)
+        optimizer = probe.build_optimizer(_config(), flux_transformer=models.flux_transformer)
+        with patch.object(probe, "Trainer"):
             with self.assertRaisesRegex(RuntimeError, "AdamW exp_avg"):
+                probe.initialize_training_memory(_config(), models, optimizer, device=torch.device("cpu"))
+            for parameter in models.flux_transformer.parameters():
+                parameter.grad = torch.ones_like(parameter)
+            with self.assertRaisesRegex(RuntimeError, "release every FLUX gradient"):
                 probe.initialize_training_memory(_config(), models, optimizer, device=torch.device("cpu"))
 
 
@@ -177,13 +183,13 @@ class CandidateTests(unittest.TestCase):
             config=Path("unused.json"), output_dir=directory / "candidate",
             sequence_length=2, repetitions=3, candidate_batch_size=1,
         )
-        models = SimpleNamespace(tokenizer=object(), transformer=object(), nvarc_runner=runner)
+        models = SimpleNamespace(tokenizer=object(), flux_transformer=object(), nvarc_encoder=runner)
         reserve = [torch.zeros(1)]
         for name, result in {
             "_load_config": _config(), "_environment_metadata": {},
-            "prepare_single_gpu_device": torch.device("cpu"),
-            "seed_single_gpu_process": None, "load_single_gpu_models": models,
-            "build_flux_optimizer": object(), "initialize_training_memory": {"optimizer_steps": 1},
+            "prepare_device": torch.device("cpu"),
+            "seed_process": None, "load_models": models,
+            "build_optimizer": object(), "initialize_training_memory": {"optimizer_steps": 1},
             "allocate_buffer_reserve": (reserve, {"total_bytes": 4}),
             "make_probe_inputs": (torch.tensor([1, 2]), torch.tensor([0, 2])),
         }.items():
@@ -402,7 +408,7 @@ class OrchestrationTests(unittest.TestCase):
                 config.models, nvarc_checkpoint=root / "missing", flux_checkpoint=root / "missing2",
             ))
             with (
-                patch.object(probe, "load_single_gpu_training_config", return_value=config),
+                patch.object(probe, "load_training_config", return_value=config),
                 patch.object(probe.subprocess, "run") as run,
             ):
                 with self.assertRaises(FileNotFoundError):
@@ -420,13 +426,13 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_cli_defaults_and_invalid_arguments(self):
         parser = probe.build_parser()
-        args = parser.parse_args(["--config", "b0.json"])
+        args = parser.parse_args(["--config", "b3.json"])
         self.assertEqual((args.sequence_length, args.max_batch_size, args.repetitions), (8400, 64, 3))
         for arguments in (
             ["--sequence-length", "8192"], ["--max-batch-size", "0"], ["--repetitions", "0"],
         ):
             with self.subTest(arguments=arguments), patch("sys.stderr"), self.assertRaises(SystemExit):
-                parser.parse_args(["--config", "b0.json", *arguments])
+                parser.parse_args(["--config", "b3.json", *arguments])
 
 
 if __name__ == "__main__":

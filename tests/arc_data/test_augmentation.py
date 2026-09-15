@@ -204,6 +204,26 @@ class ArcAugmentationSamplingTest(unittest.TestCase):
 
         self.assertEqual(sampled.pair_indices, (0, 1))
 
+    def test_uniform_geometry_covers_d4_without_changing_pairs_or_colors(self) -> None:
+        task = ArcTrainingTask(
+            task_id="training-task", pairs=tuple(make_pair(index) for index in range(8)),
+        )
+        geometries = set()
+        for seed in range(128):
+            options = {"augmentation_index": 0, "max_pairs": 5, "max_cells": 10}
+            historical = sample_training_augmentation(task, rng=Random(seed), **options)
+            sampled = sample_training_augmentation(
+                task, rng=Random(seed), geometry_sampling="uniform", **options,
+            )
+            repeated = sample_training_augmentation(
+                task, rng=Random(seed), geometry_sampling="uniform", **options,
+            )
+            self.assertEqual(sampled, repeated)
+            self.assertEqual(sampled.pair_indices, historical.pair_indices)
+            self.assertEqual(sampled.color_mapping, historical.color_mapping)
+            geometries.add(sampled.geometry)
+        self.assertEqual(geometries, set(ArcGeometry))
+
     def test_sampling_fails_when_fewer_than_two_pairs_fit(self) -> None:
         task = ArcTrainingTask(
             task_id="training-task",

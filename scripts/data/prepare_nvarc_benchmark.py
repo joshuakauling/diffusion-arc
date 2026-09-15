@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from diffusion_arc.arc_data import (
     NVARC_MAX_TOKENS,
     TARGET_PALETTE_ID,
     generate_augmented_key_files,
+    parse_augmentation_key,
 )
 from scripts.data.build_nvarc_arc_agi_1_training_only import (
     DERIVED_GROUP,
@@ -78,20 +80,50 @@ def prepare_benchmark(
     source_count: int = 960,
     seed: int = 167,
 ) -> dict:
+    """Preserve the historical identity-geometry benchmark preparation."""
+
+    return prepare_nvarc_bundle(
+        archive_path=source_root / "nvarc-all-classified.tar.gz",
+        index_path=source_root / f"{DERIVED_GROUP}_tasks.jsonl",
+        official_keys_path=source_root / "arc_agi_1_training_keys.json",
+        output_directory=output_directory,
+        source_count=source_count,
+        seed=seed,
+    )
+
+
+def prepare_nvarc_bundle(
+    *,
+    archive_path: Path,
+    index_path: Path,
+    official_keys_path: Path,
+    output_directory: Path,
+    source_count: int,
+    seed: int,
+    geometry_sampling: str = "cycle",
+    require_full_pool: bool = False,
+    view_name: str = "train",
+    split_name: str = "train",
+    preparation_metadata: Mapping[str, object] | None = None,
+) -> dict:
     """Build a new bundle atomically, preserving all existing output directories."""
 
     if isinstance(source_count, bool) or not isinstance(source_count, int) or source_count <= 0:
         raise ValueError("source_count must be a positive integer")
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**64:
         raise ValueError("seed must be an integer in [0, 2**64)")
+    if geometry_sampling not in ("cycle", "uniform"):
+        raise ValueError("geometry_sampling must be 'cycle' or 'uniform'")
+    for name, value in (("view_name", view_name), ("split_name", split_name)):
+        if not isinstance(value, str) or not value or value in (".", "..") or Path(value).name != value:
+            raise ValueError(f"{name} must be a single path component")
     output_directory = output_directory.resolve()
     if output_directory.exists():
-        raise FileExistsError(f"Refusing to overwrite benchmark bundle: {output_directory}")
-    archive_path = source_root / "nvarc-all-classified.tar.gz"
-    index_path = source_root / f"{DERIVED_GROUP}_tasks.jsonl"
-    official_keys_path = source_root / "arc_agi_1_training_keys.json"
+        raise FileExistsError(f"Refusing to overwrite NVARC bundle: {output_directory}")
     official_keys, _ = load_official_keys(official_keys_path)
     records = _load_index(index_path, official_keys)
+    if require_full_pool and source_count != len(records):
+        raise ValueError(f"Expected the complete pool of {source_count} tasks; found {len(records)}")
     if source_count > len(records):
         raise ValueError(f"Requested {source_count} tasks from a pool of {len(records)}")
     # This RNG selects task membership/order only. The existing key generator
@@ -100,8 +132,11 @@ def prepare_benchmark(
     selected = records[:source_count]
     remaining = {record["archive_path"]: record for record in selected}
     input_hashes = {
-        path.name: sha256_file(path)
-        for path in (archive_path, index_path, official_keys_path)
+        role if require_full_pool else path.name: sha256_file(path)
+        for role, path in (
+            ("source_archive", archive_path), ("task_index", index_path),
+            ("official_training_keys", official_keys_path),
+        )
     }
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=f".{output_directory.name}-", dir=output_directory.parent) as temporary:
@@ -134,7 +169,13 @@ def prepare_benchmark(
         if remaining:
             raise FileNotFoundError(f"Selected task files missing from archive: {sorted(remaining)}")
 
-        split = bundle / "splits/train"
+        split = bundle / "splits" / split_name
+        view = {
+            "task_split": "train", "output": f"augmented_keys/{view_name}.json",
+            "mode": "sampled", "seed": seed, "augmentations_per_task": 1, "exclude": [],
+        }
+        if geometry_sampling != "cycle":
+            view["geometry_sampling"] = geometry_sampling
         _write_json(split / "config.json", {
             "schema_version": ARC_SPLIT_SCHEMA_VERSION,
             "generator_version": ARC_AUGMENTATION_GENERATOR_VERSION,
@@ -142,40 +183,47 @@ def prepare_benchmark(
             "palette": TARGET_PALETTE_ID,
             "limits": {"max_pairs": 5, "max_cells": 9000, "max_tokens": NVARC_MAX_TOKENS},
             "task_splits": {"train": "train.json", "validation": "validation.json"},
-            "views": {"train": {
-                "task_split": "train", "output": "augmented_keys/train.json",
-                "mode": "sampled", "seed": seed, "augmentations_per_task": 1, "exclude": [],
-            }},
+            "views": {view_name: view},
         })
         _write_json(split / "train.json", [record["task_key"] for record in selected])
         _write_json(split / "validation.json", [])
         # Existing generation validates the selected grids and samples five
         # pairs without size exclusions: 5 * 2 * 30 * 30 = 9000 cells.
-        keys = generate_augmented_key_files(split)["train"]
+        keys = generate_augmented_key_files(split)[view_name]
+        if len(keys) != source_count or any(
+            len(parse_augmentation_key(key).augmentation.pair_indices) != 5 for key in keys
+        ):
+            raise ValueError("Every selected task must produce exactly one five-pair sequence")
         manifest = {
             "schema_version": 1,
-            "purpose": "performance_benchmark_only",
+            "purpose": "training_epoch" if require_full_pool else "performance_benchmark_only",
             "dataset": DERIVED_GROUP,
             "eligible_task_count": len(records),
             "source_count": len(keys),
             "target_count": 3 * len(keys),
             "seed": seed,
-            "selection": "sort task IDs, seeded shuffle, take first source_count",
+            "selection": (
+                "sort task IDs, seeded shuffle, use complete pool"
+                if require_full_pool else "sort task IDs, seeded shuffle, take first source_count"
+            ),
             "augmentation": {
-                "variants_per_task": 1, "pairs": 5, "geometry": "ID",
+                "variants_per_task": 1, "pairs": 5,
+                "geometry": "uniform_D4" if geometry_sampling == "uniform" else "ID",
                 "colors": "random_permutation", "generator_version": ARC_AUGMENTATION_GENERATOR_VERSION,
             },
             "command": sys.argv,
             "preparation_script_sha256": sha256_file(Path(__file__)),
             "python": sys.version,
             "inputs_sha256": input_hashes,
-            "keys_sha256": sha256_file(split / "augmented_keys/train.json"),
+            "keys_sha256": sha256_file(split / f"augmented_keys/{view_name}.json"),
             "sources": [{**record, "converted_sha256": converted_hashes[record["task_key"]]}
                         for record in selected],
         }
+        if preparation_metadata is not None:
+            manifest["preparation"] = dict(preparation_metadata)
         _write_json(split / "manifest.json", manifest)
         if output_directory.exists():
-            raise FileExistsError(f"Benchmark bundle appeared during preparation: {output_directory}")
+            raise FileExistsError(f"NVARC bundle appeared during preparation: {output_directory}")
         bundle.rename(output_directory)
     return manifest
 

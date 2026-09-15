@@ -29,7 +29,7 @@ def _module_input_device(module: nn.Module) -> torch.device:
     return weight.device
 
 
-class NvarcBatchRunner(nn.Module):
+class NvarcEncoder(nn.Module):
     """Encode sources concatenated end to end in one frozen NVARC forward.
 
     The input contains all tokens of source 1, followed by source 2, and so on,
@@ -45,13 +45,13 @@ class NvarcBatchRunner(nn.Module):
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
         if getattr(model.config, "_attn_implementation", None) != NVARC_ATTENTION_IMPLEMENTATION:
-            raise ValueError("NvarcBatchRunner requires the explicit nvarc_fa3 attention binding")
+            raise ValueError("NvarcEncoder requires the explicit nvarc_fa3 attention binding")
         self.model = model
         self.model.requires_grad_(False)
         self.train(False)
 
-    def train(self, mode: bool = True) -> NvarcBatchRunner:
-        """Keep both the runner and its frozen NVARC model in evaluation mode."""
+    def train(self, mode: bool = True) -> NvarcEncoder:
+        """Keep both the encoder and its frozen NVARC model in evaluation mode."""
 
         super().train(False)
         self.model.eval()
@@ -101,4 +101,4 @@ class NvarcBatchRunner(nn.Module):
         ))
 
 
-__all__ = ["NvarcBatchRunner"]
+__all__ = ["NvarcEncoder"]

@@ -17,12 +17,13 @@ remain available, including the original notebooks, runners, and configurations.
 ## Preflight
 
 - [`nvarc_batch_preflight_colab.ipynb`](preflight/nvarc_batch_preflight_colab.ipynb)
-- [`single-gpu-training-preflight-modal.ipynb`](preflight/single-gpu-training-preflight-modal.ipynb)
 
 ## Training
 
-- [`single-gpu-memory-footprint-modal.ipynb`](training/single-gpu-memory-footprint-modal.ipynb)
-- [`single-gpu-memory-footprint-gradient-checkpointing-modal.ipynb`](training/single-gpu-memory-footprint-gradient-checkpointing-modal.ipynb)
+The retired padded training/preflight and memory-footprint notebooks were
+removed with that execution path. Use the current
+[B3 smoke configuration](../configs/training/benchmarks/single_gpu_b3_smoke.json)
+and [profiling entrypoints](../docs/training/profiling.md) for packed training.
 
 ## Inference and evaluation
 

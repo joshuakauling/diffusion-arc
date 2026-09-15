@@ -31,8 +31,9 @@ class NsightModalTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.validate_config(self.root, value)
         with self.assertRaises(ValueError):
-            m.validate_config(self.root, "configs/training/single_gpu.json")
+            m.validate_config(self.root, "configs/training/benchmarks/single_gpu_b3.json")
         command = m.profile_command(config, Path("/tmp/output"))
+        self.assertIn(str(m.REMOTE_REPOSITORY_ROOT / "scripts/profile_single_gpu.py"), command)
         self.assertIn("--capture-range=cudaProfilerApi", command)
         self.assertIn("--kill=none", command)
         for option in ("--trace=cuda,nvtx", "--sample=none",
@@ -66,6 +67,10 @@ class NsightModalTests(unittest.TestCase):
                     self.module.validate_config(root, self.module.DEFAULT_CONFIG)
             config.write_text(json.dumps(original))
             with self.assertRaises(FileNotFoundError):
+                self.module.validate_config(root, self.module.DEFAULT_CONFIG)
+            original["nvarc_max_tokens"] = 8400
+            config.write_text(json.dumps(original))
+            with self.assertRaisesRegex(ValueError, "seven-update B3"):
                 self.module.validate_config(root, self.module.DEFAULT_CONFIG)
 
     def test_persists_success_missing_report_and_process_failure(self):
