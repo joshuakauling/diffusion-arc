@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "steps": 3,
+  "loss_rtol": 0.001,
+  "gradient_relative_l2_max": 0.05,
+  "chunk_elements": 1048576
+}

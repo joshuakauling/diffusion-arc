@@ -273,7 +273,8 @@ def _parse_baseline(
             raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
 
     section = _object(payload["flux_packing"], name="flux_packing")
-    _fields(section, {"max_tokens"}, name="flux_packing")
+    section = {"max_spread_tokens": 1_000, **section}
+    _fields(section, {"max_tokens", "max_spread_tokens"}, name="flux_packing")
     flux_packing = FluxPackingPolicy(**section)
 
     return TrainingConfig(
@@ -550,6 +551,7 @@ _RECIPE_SCHEMA = {
         "nvarc_early_exit_layer": 27, "nvarc_hidden_state_normalization": "none",
         "nvarc_max_tokens": _positive_integer,
         "flux_attention_backend": "fa3_packed", "flux_max_joint_tokens": _positive_integer,
+        "flux_max_spread_tokens": _natural,
         "activation_checkpointing": False, "profiler": None,
     },
     "data": {
@@ -680,6 +682,8 @@ _RECIPE_SCHEMA = {
 
 def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingConfig:
     """Normalize a finite run directly through the shared component readers."""
+    if isinstance(payload.get("execution"), Mapping):
+        payload = {**payload, "execution": {"flux_max_spread_tokens": 1_000, **payload["execution"]}}
     recipe = _validate(payload, _RECIPE_SCHEMA, name="config")
     models = _parse_models(recipe["models"], base_directory=config_path.parent)
     # Data preparation already froze the seeded task order for this epoch.
@@ -688,7 +692,10 @@ def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingC
     loop = _parse_loop(recipe["loop"])
     optimizer = _parse_optimizer(recipe["optimizer"])
     device = _device(recipe["execution"]["device"])
-    packing = FluxPackingPolicy(max_tokens=recipe["execution"]["flux_max_joint_tokens"])
+    packing = FluxPackingPolicy(
+        max_tokens=recipe["execution"]["flux_max_joint_tokens"],
+        max_spread_tokens=recipe["execution"]["flux_max_spread_tokens"],
+    )
     _validate_relationships(recipe)
     for section, field in (
         ("models", "nvarc_checkpoint"), ("models", "flux_checkpoint"), ("models", "resume_from"),

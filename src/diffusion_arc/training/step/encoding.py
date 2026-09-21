@@ -14,6 +14,7 @@ from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.arc_data.types import Grid
 from diffusion_arc.model.vae import FluxVaeEncoder
 from diffusion_arc.model.nvarc.encoder import NvarcEncoder
+from ..profiling import training_range
 
 
 # Benchmark metadata: source identities and the physical batches used to prepare them.
@@ -343,10 +344,11 @@ def encode_training_batch(
         for index in batch_indices:
             packed_input_ids.extend(eligible_sequences[index].input_ids)
             sequence_offsets.append(len(packed_input_ids))
-        nvarc_output = nvarc_encoder(
-            torch.tensor(packed_input_ids, dtype=torch.int64),
-            torch.tensor(sequence_offsets, dtype=torch.int64),
-        )
+        with training_range("prepare/nvarc"):
+            nvarc_output = nvarc_encoder(
+                torch.tensor(packed_input_ids, dtype=torch.int64),
+                torch.tensor(sequence_offsets, dtype=torch.int64),
+            )
         if len(nvarc_output.sequence_hidden_states) != len(batch_indices):
             raise RuntimeError("batched preparation requires one NVARC output per eligible source")
         sequence_states.extend(
@@ -379,7 +381,8 @@ def encode_training_batch(
                 for target_grid in target_grids[start : start + physical_vae_batch_size]
             )
         )
-        latent_batch = vae_encoder(image_batch)
+        with training_range("prepare/vae"):
+            latent_batch = vae_encoder(image_batch)
         vae_calls += 1
         if latent_batch.shape[0] != image_batch.shape[0]:
             raise RuntimeError("VAE output count does not match its target image batch")

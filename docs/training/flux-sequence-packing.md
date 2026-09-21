@@ -8,13 +8,17 @@ training path does not import diagnostic scripts.
 ## Scheduling and execution
 
 Each target costs its valid NVARC prefix length **plus 900 image tokens**.
-Within the fixed FIFO optimizer batch, best-fit-decreasing processes larger
-targets first and places each in the tightest remaining space. Ties retain
-deterministic source order. Targets are neither split nor moved across optimizer
-boundaries. This is a fast call-count heuristic, not an exact bin-packing solver.
+Within the fixed FIFO optimizer batch, bounded deterministic search starts from
+best-fit-decreasing, tries fewer calls, and balances their token counts. At that
+fixed call count, target moves/swaps and pack reordering favor earlier source
+release, weighted by retained NVARC bytes. The largest pack runs first. The
+release optimization allows at most 1,000 tokens between the largest and smallest
+pack (`execution.flux_max_spread_tokens` in recipes); otherwise the balanced
+reference is retained. Targets are neither split nor moved across optimizer
+boundaries. The bounded search does not guarantee a global optimum.
 
-Replaying the four recorded 48-target windows in the
-[archived fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_packing.json) gives:
+The original best-fit-decreasing replay of the four recorded 48-target windows in
+the [archived fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_packing.json) gave:
 
 | Window | B2 calls | Packed calls | Token-sum lower bound |
 | --- | ---: | ---: | ---: |
@@ -51,7 +55,8 @@ next physical batch is constructed.
 ## Configuration and runtime
 
 Baseline schema v10 requires NVARC and FLUX packing. B3 sets
-`"flux_packing": {"max_tokens": 12288}`. The retired `flux_scheduling`,
+`"flux_packing": {"max_tokens": 12288}`; optional `max_spread_tokens` defaults to
+1,000. The retired `flux_scheduling`,
 `loop.flux_microbatch_size`, `loop.nvarc_source_batch_size` and `padding` fields are rejected, including null values.
 FA3 and FP32 modulation sums are mandatory in this packed training path.
 Older schemas are rejected. Recorded B0/B1/B2 recipes and diagnostic code are

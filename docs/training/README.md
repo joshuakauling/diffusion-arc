@@ -93,6 +93,7 @@ is reduced in FP32.
 | `TargetMetrics` | One target's loss, flow time, demonstration count and regional measurements, before logging aggregation. |
 | `StepDiagnostics` | CPU-only preparation details, physical FLUX packs and logical target prefix lengths. |
 | `FluxMicrobatch` | Exact text prefixes, attention-segment boundaries and image positions for one packed FLUX call; flow tensors are supplied separately. |
+| `PackedFluxForward` | A normal module forward for one physical FLUX pack, sharing the original transformer's parameters; optionally wrapped in DDP. |
 
 The shared hidden-state tensor is released after its last target prefix has been
 copied into a physical microbatch. Python later collects the small
@@ -153,6 +154,144 @@ only public execution method is `step`; it does not own epochs or stop criteria.
 Logging and checkpoints serialize the recipe through `TrainingConfig.recipe_dict()`.
 Training and validation share `plan_nvarc_batches` from `step.encoding`.
 
+For controlled distributed steps, pass `DDP(PackedFluxForward(...))` to
+`Trainer` as `flux_transformer`, with `forward_sync_buffers=False` and
+`static_graph=False`. The adapter and trainer must share the same compute dtype
+and backend. Keep the original transformer for inference and checkpoint access.
+The caller initializes the process group, assigns complete sources and supplies
+a flow sampler with globally consistent draws and endpoint quotas. Every rank
+must enter the same updates; empty ranks are rejected collectively.
+
+The trainer counts global targets before encoding, then uses `no_sync()` around
+all but the final local forward/backward. Pack losses are weighted by
+`world_size * pack_targets / global_targets`. After gradient synchronization,
+loss-finiteness is checked collectively before clipping and updating. This path
+uses standard DDP averaging without custom communication hooks or `join()`.
+Returned losses, targets, timings and workload counters describe the local rank;
+the outer caller owns aggregation. Gradient norms describe synchronized gradients.
+
+### Bounded DDP runner
+
+[`scripts/train_ddp.py`](../../scripts/train_ddp.py) starts a training-only
+experiment from the existing recipe. Run it with `torchrun`; `--max-steps`
+defaults to three global updates:
+
+```bash
+torchrun --standalone --nproc-per-node=2 scripts/train_ddp.py \
+  --config configs/training/arc_agi_1_epoch.json --max-steps 3
+```
+
+Use `--nproc-per-node=1` for the same execution path on one GPU. The runtime
+selects `cuda:LOCAL_RANK`, initializes NCCL, wraps `PackedFluxForward` in DDP
+and destroys the process group on exit. Existing Hopper/FA3 requirements apply.
+
+[`distributed_data.py`](../../src/diffusion_arc/training/distributed_data.py)
+plans global target batches from the ordered dataset keys and divides whole
+sources between ranks. Each rank loads only its assigned sequences. The global
+batch size, source order and final partial batch are preserved; sources are
+never repeated or dropped to balance ranks. A batch with fewer sources than
+ranks is rejected during preflight, including an undersized epoch tail.
+
+[`step/distributed_flow.py`](../../src/diffusion_arc/training/step/distributed_flow.py)
+assigns times and the exact endpoint quota globally, then generates only local
+noise tensors. Seeds depend on the global step and target position, so target
+draws agree across rank layouts on the same device type and package versions.
+This is a new seed assignment, not a reproduction of the existing single-GPU
+runner's stateful RNG stream. The step limit preserves the recipe's full-epoch
+learning-rate schedule and endpoint policy.
+
+[`ddp_runner.py`](../../src/diffusion_arc/training/ddp_runner.py) emits JSON on
+rank zero: input recipe, effective training settings, runtime/source identity,
+and target-weighted global loss with per-rank counts, times and peak allocation
+and reservation. Rank and CUDA synchronization precede each timed step; CUDA
+completion precedes its end timestamp. The maximum rank duration includes data
+retrieval and `Trainer.step`, including its communication, but excludes the outer
+barrier, diagnostic-record collective and output. CPU prefetch starts before the
+loop, as in the single-GPU benchmark.
+This entrypoint explicitly omits validation, sampling, W&B and checkpoint saves;
+resume requests are rejected. It does not change the existing single-GPU runner.
+
+### Prepared smoke and benchmark runs
+
+[`benchmarks/ddp_training.json`](../../configs/training/benchmarks/ddp_training.json)
+combines the 960 prepared B3 sources with the current epoch recipe. It inherits
+the regional loss, four global endpoint targets per full batch, gradient clipping
+and the 50-update learning-rate warmup followed by constant LR. Only the data
+view changes; the benchmark does not alter the training schedule. The input
+recipe's full-epoch counts remain provenance, while the benchmark config requires
+exactly 60 full batches from its selected view.
+
+`--mode smoke` runs the first three updates. `--mode benchmark` runs ten training
+updates excluded from statistics, followed by 50 measured updates. Both modes
+start fresh from the base checkpoint and share their initial data/noise sequence.
+Each command is one run; repetitions are not launched automatically. Start with
+the two smoke runs, inspect their counts and finite global losses, then run the
+benchmarks. One GPU uses the same DDP path with `world_size=1`.
+
+```bash
+python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --gpus 1 --mode smoke
+python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --gpus 2 --mode smoke
+```
+
+After successful smoke runs, on the same GPU type and software environment:
+
+```bash
+python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --gpus 1 --mode benchmark
+python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --gpus 2 --mode benchmark
+```
+
+The Modal launcher uploads the prepared local B3 bundle, reuses the pinned FA3
+image and mounts `diffusion-arc-models` for cached checkpoints and results. It
+requests H200 GPUs with eight CPU cores and 64 GiB host RAM per GPU, sets
+`OMP_NUM_THREADS=8` and `MKL_NUM_THREADS=8`, and starts `torchrun` inside one remote
+function. Each training process explicitly sets eight PyTorch CPU threads. Function
+timeouts are ten minutes for smoke and thirty for benchmark, with no retries.
+DataLoader workers remain per rank: two on one GPU, four in total on two GPUs.
+Each run creates `results/ddp/<run-id>-<mode>-<gpus>gpu/` on the volume, containing
+`launch.json` and a `training/` directory. Data and model downloads and profiling
+remain separate. Rank zero writes `manifest.json`, flushed `steps.jsonl` and `summary.json` on
+success. Python failures retain completed rows and write `failure.json`; abrupt
+process termination may leave only the partial files. No summary means the run
+did not finish successfully.
+
+The summary excludes warmup from latency, throughput and memory statistics.
+It reports median and linearly interpolated p95 of maximum rank step duration,
+total measured targets divided by total measured time, and maximum per-GPU
+allocated/reserved memory across measured steps. The rows preserve source keys,
+prefix lengths, global target positions, learning rates, losses and endpoint
+counts for matched comparisons. The manifest records effective settings, data
+fingerprint, source-content hash, package versions and the FA3 binding. This is
+a new reference under the current recipe, not an exact repeat of historical B3.
+
+### Numerical comparison
+
+`--mode numerics --gpus 2` runs three updates without a DDP wrapper, then three
+fresh updates with two DDP ranks, using the same current Trainer and first 48
+benchmark sources. Both paths use the real NVARC/VAE preparation and independently
+pack their local FLUX targets. Initial model states, actual inputs, noise and
+timesteps must match. The checks are fixed before execution in
+[`ddp_numerics.json`](../../configs/training/benchmarks/ddp_numerics.json): at most
+0.1% relative global-loss difference in each step and 5% full-gradient relative
+L2 difference in step one, measured before clipping. These are experiment
+criteria, not universal floating-point correctness bounds.
+
+```bash
+python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --gpus 2 --mode numerics
+```
+
+The single allocation is limited to two H200s and 30 minutes total, with no
+retries. CPU gradient chunks use temporary local scratch, never the mounted
+volume. The job also checks identical DDP gradient/parameter fingerprints and
+unchanged frozen modules. `training/{reference,ddp}/` retains manifests and step
+records; `training/summary.json` reports `passed` or `failed`, including per-block
+gradient diagnostics. A completed job can fail its numerical criteria. This
+instrumented run is not a throughput benchmark or a long-run convergence test.
+
 ## Further reading
 
 | Document | Details |
@@ -179,9 +318,31 @@ The local tests cover tensor contracts, hidden-state ownership, loss weighting,
 step limits, and tail handling. Real checkpoints and backend-specific behavior
 remain explicit smoke or preflight tests.
 
+[`test_ddp_trainer.py`](../../tests/training/test_ddp_trainer.py) first compares
+the single-process trainer with an independent global-loss reference, then runs
+two CPU/Gloo ranks. It uses a tiny FP32 FLUX transformer, explicit CPU attention,
+frozen encoder doubles and prescribed packs with fixed global flow draws.
+Three updates cover unequal target/pack counts with plain and regional losses,
+comparing gradients, parameters, clipping, AdamW and scheduler state. Separate
+checks exercise coordinated empty-rank and non-finite failures. These tests do
+not measure GPU precision, memory, communication cost or throughput.
+
+[`test_ddp_runner.py`](../../tests/training/test_ddp_runner.py) compares a plain
+Trainer reference with the new runner on one and two CPU/Gloo ranks. The real
+batch planner, indexed flow sampler, packing, gradient averaging and metric
+aggregation execute over three updates, including a partial batch with unequal
+rank target counts. Model loading and the CUDA runtime are replaced by small
+local fixtures. Separate tests cover data ownership, endpoint quotas, rank
+configuration, cleanup and CLI validation. Benchmark tests additionally check
+the fixed-view override, measured/warmup phase boundaries, slowest-rank timing,
+numerical agreement and warmup exclusion from summaries.
+
 ## Current boundaries
 
-- Training is single-process and single-GPU; DDP and FSDP2 are not implemented.
+- `Trainer.step` and the bounded DDP runner support distributed source/flow
+  planning and metric aggregation. Validation, sampling, W&B, checkpoint/resume
+  orchestration remain available only in the single-GPU runner.
+  GPU/NCCL/FA3 validation, distributed profiling and FSDP2 remain pending.
 - Baseline JSON uses schema v10; the finite epoch recipe uses schema v1 with
   `config_type="training_run"`. Both normalize to `TrainingConfig`; entrypoints
   explicitly restrict the supported type. Older baseline schemas and NVARC

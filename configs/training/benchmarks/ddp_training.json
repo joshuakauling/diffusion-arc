@@ -1,0 +1,14 @@
+{
+  "config_type": "ddp_benchmark",
+  "schema_version": 1,
+  "training_recipe": "../arc_agi_1_epoch.json",
+  "data": {
+    "split_directory": "../../../data/benchmarks/single_gpu_b0/splits/train",
+    "view_name": "train",
+    "expected_source_count": 960
+  },
+  "repetitions": 3,
+  "smoke_steps": 3,
+  "warmup_steps": 10,
+  "measured_steps": 50
+}

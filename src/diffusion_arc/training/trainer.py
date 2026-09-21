@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 import math
 import time
 
 import torch
+import torch.distributed as dist
 from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -16,6 +19,7 @@ from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS
 from diffusion_arc.arc_data.image.canvas import CANVAS_SIZE
 from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.contracts import TARGET_LATENT_TOKEN_COUNT
+from diffusion_arc.model.flux.packing import PackedFluxForward
 from diffusion_arc.model.flux.velocity import flux_transformer_device
 
 from .step.encoding import FluxInput, PreparationMetrics, encode_training_batch
@@ -70,7 +74,9 @@ class StepDiagnostics:
 class TrainStepResult:
     """Measurements returned after one optimizer update.
 
-    All counters and timings describe this step only. Learning rates are the
+    Loss, target measurements, counters and timings describe the local rank's
+    work in this step. DDP callers aggregate these in the outer loop; the
+    gradient norm describes the synchronized gradients. Learning rates are the
     values used for the update; the gradient norm is measured before clipping.
     ``targets`` contains individual measurements in input sequence order, then
     target order within each sequence. Its tuple position is the target index.
@@ -167,6 +173,14 @@ class Trainer:
     execution limits. NVARC and VAE remain frozen; only FLUX is trained.
     The outer loop selects data, logs returned measurements and handles
     validation, sampling and checkpoints.
+
+    DDP callers pass DDP(PackedFluxForward(...)) as ``flux_transformer`` with
+    forward_sync_buffers=False and static_graph=False, using normal gradient
+    averaging without custom communication hooks or join(). Every rank calls
+    step for the same global update and must supply at least one eligible
+    target. Source assignment and globally consistent flow draws/endpoint
+    quotas belong to the caller; the sampler receives only local latents.
+    The production runner does not yet provide this distributed planning.
     """
 
     def __init__(
@@ -184,8 +198,10 @@ class Trainer:
         nvarc_max_tokens: int = DEFAULT_NVARC_MAX_TOKENS,
         vae_microbatch_size: int | None = None,
         flux_max_joint_tokens: int = 12_288,
+        flux_max_spread_tokens: int = 1_000,
         min_context_pairs_before_target: int = 1,
         max_grad_norm: float | None = None,
+        trace: Callable[[str, dict], None] | None = None,
     ) -> None:
         """Check the supplied components and prepare them for training.
 
@@ -212,7 +228,25 @@ class Trainer:
             raise TypeError("flow_sampler and loss_function must be callable")
         if any(p.requires_grad for model in (nvarc_encoder, vae_encoder) for p in model.parameters()):
             raise ValueError("NVARC and VAE must already be frozen")
-        self.packing = FluxPackingPolicy(flux_max_joint_tokens)
+        self.distributed = isinstance(flux_transformer, DDP)
+        packed = flux_transformer.module if self.distributed else flux_transformer
+        if self.distributed:
+            if not isinstance(packed, PackedFluxForward):
+                raise TypeError("DDP must wrap PackedFluxForward for packed training")
+            if flux_transformer.forward_sync_buffers or flux_transformer.static_graph:
+                raise ValueError("packed DDP requires forward_sync_buffers=False and static_graph=False")
+        if isinstance(packed, PackedFluxForward):
+            if packed.compute_dtype != flux_compute_dtype or packed.backend is not flux_packing_backend:
+                raise ValueError("packed forward precision/backend must match the trainer")
+            self.flux_forward = flux_transformer
+        else:
+            self.flux_forward = PackedFluxForward(
+                flux_transformer, compute_dtype=flux_compute_dtype, backend=flux_packing_backend,
+            )
+        self.process_group = flux_transformer.process_group if self.distributed else None
+        self.world_size = dist.get_world_size(self.process_group) if self.distributed else 1
+        self._set_grad_to_none = not (self.distributed and flux_transformer.gradient_as_bucket_view)
+        self.packing = FluxPackingPolicy(flux_max_joint_tokens, flux_max_spread_tokens)
         self.nvarc_encoder, self.vae_encoder, self.flux_transformer = nvarc_encoder, vae_encoder, flux_transformer
         self.optimizer, self.scheduler = optimizer, scheduler
         self.flow_sampler, self.loss_function = flow_sampler, loss_function
@@ -221,26 +255,45 @@ class Trainer:
         self.min_context_pairs_before_target, self.max_grad_norm = min_context_pairs_before_target, max_grad_norm
         self.parameters = tuple(p for p in flux_transformer.parameters() if p.requires_grad)
         self.device = flux_transformer_device(flux_transformer)
+        self.trace = trace
         nvarc_encoder.eval()
         vae_encoder.eval()
         flux_transformer.train()
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=self._set_grad_to_none)
+
+    def _trace(self, stage: str, **details) -> None:
+        if self.trace is not None:
+            self.trace(stage, details)
 
     def step(self, sequences: Sequence[ArcTokenizedTrainingSample]) -> TrainStepResult:
         """Train on the supplied sequences with one optimizer update.
 
         Encode sequences with frozen NVARC and target images with frozen VAE.
-        Sample flow times and noise for eligible targets, then pack them into
-        FLUX microbatches. Accumulate gradients with equal weight per target,
+        Sample flow times and noise for local targets, then pack them into
+        FLUX microbatches. Accumulate gradients with equal weight per global target,
         optionally clip them, update parameters once and advance the supplied
         scheduler once.
 
-        Clear gradients after the update, then return the step's total loss,
+        DDP synchronizes accumulated gradients during the last local backward.
+        It also reduces target counts before encoding and loss-finiteness afterward.
+        Non-finite losses/gradients abort every rank before the update. Other
+        failures require the caller's process supervision; this is not a
+        distributed recovery loop.
+
+        Clear gradients after the update, then return the local step's loss,
         workload counters, individual target measurements and batch diagnostics
         as Python values for the outer loop. Errors propagate to the caller.
         """
         started = self._time()
         learning_rates = tuple(float(group["lr"]) for group in self.optimizer.param_groups)
+        # Plan from CPU metadata so even an empty rank joins this preflight.
+        local_target_count = sum(
+            max(0, len(sequence.target_grids) - self.min_context_pairs_before_target + 1)
+            for sequence in sequences
+        )
+        with training_range("train/target_count"):
+            global_target_count = self._global_target_count(local_target_count)
+        self._trace("prepare_start")
         # Frozen preparation includes token-bounded NVARC and image-bounded VAE calls.
         with training_range("prepare/sources"):
             encoded = encode_training_batch(
@@ -249,42 +302,75 @@ class Trainer:
                 nvarc_max_tokens=self.nvarc_max_tokens, vae_microbatch_size=self.vae_microbatch_size,
             )
         targets = encoded.inputs
-        if not targets:
-            raise ValueError("step requires at least one eligible training target")
         prefixes = tuple(target.prefix_end for target in targets)
         # Assign time and noise to each target before grouping targets into microbatches.
         flows = self.flow_sampler(tuple(target.clean_latent for target in targets))
-        batches = plan_flux_batches(prefixes, self.packing)
+        owners = dict.fromkeys(target.nvarc_sequence_state for target in targets)
+        source_ids = {owner: index for index, owner in enumerate(owners)}
+        batches = plan_flux_batches(
+            prefixes, self.packing,
+            source_ids=tuple(source_ids[target.nvarc_sequence_state] for target in targets),
+            source_bytes=tuple(owner.allocated_bytes for owner in owners),
+        )
         losses = _StepLosses(len(targets), self.device)
+        self._trace("prepare_end", pack_count=len(batches), target_count=len(targets))
 
         # Run FLUX microbatches and accumulate gradients for one optimizer update.
-        for batch in batches:
+        for index, batch in enumerate(batches):
             inputs = tuple(targets[index] for index in batch.target_indices)
             flow = select_flow_batch(flows, batch.target_indices)
-            result = compute_flux_microbatch_loss(
-                inputs, flow, transformer=self.flux_transformer, compute_dtype=self.flux_compute_dtype,
-                packing_backend=self.flux_packing_backend, max_joint_tokens=self.packing.max_tokens,
-                loss_function=self.loss_function,
-            )
-            if not bool(torch.isfinite(result.loss.detach()).item()):
-                raise FloatingPointError("FLUX microbatch loss is non-finite")
-            losses.record(batch.target_indices, result)
-            with training_range("train/flux_backward"):
-                (result.loss * (len(batch.target_indices) / len(targets))).backward()
+            sync = (self.flux_forward.no_sync()
+                    if self.distributed and index < len(batches) - 1 else nullcontext())
+            # DDP prepares backward during forward, so both belong in no_sync.
+            with sync:
+                if self.trace is not None:
+                    self._trace("flux_forward_start", pack=index + 1, pack_count=len(batches),
+                                sync=index == len(batches) - 1, joint_tokens=batch.joint_tokens,
+                                target_indices=batch.target_indices,
+                                prefix_tokens=tuple(prefixes[i] for i in batch.target_indices))
+                result = compute_flux_microbatch_loss(
+                    inputs, flow, transformer=self.flux_forward,
+                    max_joint_tokens=self.packing.max_tokens, loss_function=self.loss_function,
+                )
+                self._trace("flux_forward_end")
+                if not self.distributed and not bool(torch.isfinite(result.loss.detach()).item()):
+                    raise FloatingPointError("FLUX microbatch loss is non-finite")
+                losses.record(batch.target_indices, result)
+                with training_range("train/flux_backward"):
+                    # DDP averages rank gradients; this recovers the global target mean.
+                    weight = self.world_size * len(batch.target_indices) / global_target_count
+                    self._trace("flux_backward_start")
+                    (result.loss * weight).backward()
+                    self._trace("flux_backward_end")
             del result, flow, inputs
 
+        if self.distributed:
+            self._trace("loss_check_start")
+            # All ranks must finish their backward before any rejects a local loss.
+            with training_range("train/loss_check"):
+                finite = torch.isfinite(losses.total).to(torch.int32)
+                dist.all_reduce(finite, op=dist.ReduceOp.MIN, group=self.process_group)
+                if not bool(finite.item()):
+                    raise FloatingPointError("FLUX loss is non-finite on a DDP rank")
+
         # Capture the pre-clip norm and used LR, then advance exactly one update.
-        norm = torch.nn.utils.clip_grad_norm_(
-            self.parameters, max_norm=math.inf if self.max_grad_norm is None else self.max_grad_norm,
-            error_if_nonfinite=True, foreach=False,
-        )
-        gradient_norm = float(norm)
+        self._trace("clip_start")
+        with training_range("train/clip_grad"):
+            norm = torch.nn.utils.clip_grad_norm_(
+                self.parameters, max_norm=math.inf if self.max_grad_norm is None else self.max_grad_norm,
+                error_if_nonfinite=True, foreach=False,
+            )
+            gradient_norm = float(norm)
         with training_range("train/adamw"):
+            self._trace("optimizer_start")
             self.optimizer.step()
+            self._trace("optimizer_end")
         if self.scheduler is not None:
             self.scheduler.step()
-        # Release gradient storage before validation, sampling or the next encoding.
-        self.optimizer.zero_grad(set_to_none=True)
+        # Keep DDP bucket views for the next accumulation; release other gradient storage.
+        with training_range("train/zero_grad"):
+            self.optimizer.zero_grad(set_to_none=self._set_grad_to_none)
+        self._trace("zero_grad_end")
 
         target_metrics = losses.target_metrics(targets, flows)
         loss = float(losses.total)
@@ -304,6 +390,19 @@ class Trainer:
             targets=target_metrics,
             diagnostics=StepDiagnostics(preparation, batches, prefixes),
         )
+
+    def _global_target_count(self, local_count: int) -> int:
+        """Count the global batch and reject empty ranks before any FLUX forward."""
+        if self.distributed:
+            counts = torch.tensor((local_count, int(local_count == 0)), device=self.device)
+            dist.all_reduce(counts, group=self.process_group)
+            total, empty_ranks = counts.tolist()
+            if empty_ranks:
+                raise ValueError("each DDP rank requires at least one eligible training target")
+            return total
+        if not local_count:
+            raise ValueError("step requires at least one eligible training target")
+        return local_count
 
     def _time(self) -> float:
         """Read the step timer after waiting for any pending CUDA work."""

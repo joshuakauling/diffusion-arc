@@ -236,6 +236,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(supplied["nvarc_max_tokens"], 134400)
         self.assertEqual(supplied["vae_microbatch_size"], 48)
         self.assertEqual(supplied["flux_max_joint_tokens"], 12288)
+        self.assertEqual(supplied["flux_max_spread_tokens"], self.config.flux_packing.max_spread_tokens)
         self.assertEqual(supplied["min_context_pairs_before_target"], 2)
         self.assertEqual(supplied["max_grad_norm"], 1.0)
         self.optimizer.step.assert_not_called()

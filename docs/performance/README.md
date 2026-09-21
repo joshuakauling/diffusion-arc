@@ -10,6 +10,11 @@ The variant reports contain the implementation changes and profiler findings.
 The B3 investigations are summarized separately for [NVARC](b3-nvarc.md) and
 [FLUX](b3-flux.md).
 
+The [two-GPU DDP report](ddp.md) covers the current Trainer-based benchmark,
+its separate Torch Profiler capture, and the OOM comparison with expandable
+segments. The shared setup and B0–B3 table below describe the historical
+single-GPU series.
+
 ## Shared benchmark setup
 
 ### Dataset

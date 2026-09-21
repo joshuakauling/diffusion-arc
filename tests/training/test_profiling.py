@@ -3,6 +3,7 @@
 from contextlib import ExitStack
 from dataclasses import replace
 import json
+import gzip
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -12,10 +13,48 @@ from unittest.mock import patch
 from scripts import profile_single_gpu
 import torch
 
-from diffusion_arc.training.profiling import nsight_capture, training_range
+from diffusion_arc.training.profiling import nsight_capture, torch_capture, training_range
 
 from tests.training.test_profile_single_gpu_script import _AcceptAnyModule, _config
 from diffusion_arc.training.setup import TrainingModels
+
+
+class TorchCaptureTests(unittest.TestCase):
+    def test_only_update_eleven_is_exported_and_annotations_are_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with torch_capture(Path(directory), 1, torch.device("cpu"), warmup_steps=10) as profiler:
+                for step in range(1, 12):
+                    with training_range(f"optimizer_step/{step}"):
+                        value = torch.ones(2, requires_grad=True)
+                        value.square().sum().backward()
+                    profiler.step()
+            with gzip.open(Path(directory) / "rank-1.trace.json.gz", "rt") as handle:
+                trace = json.load(handle)
+            names = {event["name"] for event in trace["traceEvents"]}
+            self.assertEqual({name for name in names if name.startswith("optimizer_step/")}, {"optimizer_step/11"})
+            self.assertIn("aten::square", names)
+            self.assertEqual(trace["training_capture"]["rank"], 1)
+            with patch("torch.profiler.record_function") as record:
+                with training_range("outside_profile"):
+                    pass
+                record.assert_not_called()
+            with self.assertRaises(FileExistsError):
+                with torch_capture(Path(directory), 1, torch.device("cpu"), warmup_steps=10):
+                    pass
+
+    def test_incomplete_capture_and_failure_restore_annotation_state(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(RuntimeError, "training failed" if fail else "capture window"):
+                    with torch_capture(Path(directory), 0, torch.device("cpu"), warmup_steps=2) as profiler:
+                        torch.ones(2).sum()
+                        profiler.step()
+                        if fail:
+                            raise RuntimeError("training failed")
+                with patch("torch.profiler.record_function") as record:
+                    with training_range("outside_profile"):
+                        pass
+                    record.assert_not_called()
 
 
 class NsightCaptureTests(unittest.TestCase):

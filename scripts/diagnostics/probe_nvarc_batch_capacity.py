@@ -150,6 +150,7 @@ def initialize_training_memory(config, models, optimizer, *, device):
         flux_packing_backend=models.flux_packing_backend,
         nvarc_max_tokens=config.nvarc_max_tokens,
         vae_microbatch_size=1, flux_max_joint_tokens=config.flux_packing.max_tokens,
+        flux_max_spread_tokens=config.flux_packing.max_spread_tokens,
         min_context_pairs_before_target=1, max_grad_norm=config.optimizer.max_grad_norm,
     ).step((sample,))
     gradient_bytes = optimizer_state_bytes = 0

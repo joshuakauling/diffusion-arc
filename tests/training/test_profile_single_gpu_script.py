@@ -193,6 +193,7 @@ class ProfileSingleGpuScriptTests(unittest.TestCase):
         self.assertIs(training_kwargs["flux_transformer"], models.flux_transformer)
         self.assertIs(training_kwargs["flux_packing_backend"], models.flux_packing_backend)
         self.assertEqual(training_kwargs["nvarc_max_tokens"], config.nvarc_max_tokens)
+        self.assertEqual(training_kwargs["flux_max_spread_tokens"], config.flux_packing.max_spread_tokens)
         self.assertNotIn("config", training_kwargs)
         self.assertFalse(any(name.startswith("on_") for name in training_kwargs))
         for name, range_name in (("nvarc_encoder", "prepare/nvarc"), ("vae_encoder", "prepare/vae")):

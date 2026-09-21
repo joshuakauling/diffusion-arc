@@ -281,3 +281,24 @@ def predict_packed_flux_velocity(
     if output.shape != latents.shape:
         raise RuntimeError("packed FLUX output shape disagrees with input latents")
     return output
+
+
+class PackedFluxForward(torch.nn.Module):
+    """Expose one packed velocity prediction through the normal module call.
+
+    The caller supplies a preflighted transformer and attention backend. Keep
+    the original transformer for checkpointing and inference; this adapter
+    registers the same parameters and can be wrapped in DDP for training.
+    """
+
+    def __init__(self, transformer, *, compute_dtype, backend):
+        super().__init__()
+        self.transformer = transformer
+        self.compute_dtype = compute_dtype
+        self.backend = backend
+
+    def forward(self, latents, text, image_positions, timesteps, layout):
+        return predict_packed_flux_velocity(
+            self.transformer, latents, text, image_positions, timesteps, layout,
+            compute_dtype=self.compute_dtype, backend=self.backend,
+        )

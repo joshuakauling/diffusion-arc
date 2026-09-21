@@ -63,6 +63,19 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 class BaselineConfigTests(unittest.TestCase):
+    def test_packing_spread_has_a_default_and_accepts_an_explicit_bound(self):
+        payload = _payload()
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_training_config(_write_config(Path(directory), payload))
+            self.assertEqual(config.flux_packing.max_spread_tokens, 1000)
+            payload["flux_packing"]["max_spread_tokens"] = 500
+            config = load_training_config(_write_config(Path(directory), payload))
+            self.assertEqual(config.flux_packing.max_spread_tokens, 500)
+            for invalid in (True, -1, 1.5):
+                payload["flux_packing"]["max_spread_tokens"] = invalid
+                with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                    load_training_config(_write_config(Path(directory), payload))
+
     def test_b3_recipes_preserve_workload_and_change_only_duration(self):
         root = Path(__file__).resolve().parents[2] / "configs/training"
         benchmark = load_training_config(root / "benchmarks/single_gpu_b3.json")
@@ -329,6 +342,19 @@ class TrainingRunConfigTests(unittest.TestCase):
     def load(self, payload=None):
         self.path.write_text(json.dumps(self.payload if payload is None else payload))
         return load_training_config(self.path)
+
+    def test_recipe_records_effective_spread_and_preserves_explicit_override(self):
+        config = self.load()
+        self.assertEqual(config.flux_packing.max_spread_tokens, 1000)
+        self.assertEqual(config.recipe["execution"]["flux_max_spread_tokens"], 1000)
+        self.payload["execution"]["flux_max_spread_tokens"] = 0
+        config = self.load()
+        self.assertEqual(config.flux_packing.max_spread_tokens, 0)
+        self.assertEqual(config.recipe["execution"]["flux_max_spread_tokens"], 0)
+        for invalid in (True, -1, 1.5):
+            self.payload["execution"]["flux_max_spread_tokens"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                self.load()
 
     def test_recipe_reuses_b3_components_and_retains_complete_epoch(self):
         config = load_training_config(RECIPE)

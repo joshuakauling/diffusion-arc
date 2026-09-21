@@ -155,7 +155,7 @@ class RecordingLoss:
     def __call__(self, inputs, flow, *, transformer, max_joint_tokens, **kwargs):
         self.owners.extend(weakref.ref(item.nvarc_sequence_state) for item in inputs)
         build_flux_microbatch(inputs, max_joint_tokens=max_joint_tokens)
-        values = transformer.weight * torch.stack(tuple(item.clean_latent[0, 0] for item in inputs))
+        values = transformer.transformer.weight * torch.stack(tuple(item.clean_latent[0, 0] for item in inputs))
         return LossResult(values.mean(), values)
 
 
@@ -300,7 +300,7 @@ class PackedTrainerTests(unittest.TestCase):
                     loss_function=RegionVelocityLoss(RegionLossWeights()) if regional else velocity_mse,
                 )
                 with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
-                     patch('diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
+                     patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
                     metrics = [trainer.step(_samples(3)[:2]), trainer.step(_samples(3)[2:])]
                 self.assertEqual([sum(t.timestep == 1 for t in m.targets) for m in metrics],
                                  [2,1] if endpoint else [0,0])
@@ -352,7 +352,7 @@ class TrainingRecipeTests(unittest.TestCase):
         )
         with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
              patch('diffusion_arc.training.trainer.compute_flux_microbatch_loss', side_effect=record_loss), \
-             patch('diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
+             patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
             for sources in (self.samples[:16], self.samples[16:]):
                 step = trainer.step(sources)
                 metrics.append(step)
