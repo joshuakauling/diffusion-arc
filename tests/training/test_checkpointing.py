@@ -37,6 +37,37 @@ class TinyTransformer(ModelMixin, ConfigMixin):
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_new_optimizer_at_global_epoch_three_restores_warmup_and_exact_next_update(self):
+        payload = self.config.recipe_dict()
+        source = json.loads((ROOT / "configs/training/arc_agi_1_epoch3_high_noise.json").read_text())
+        payload["models"].update({key: source["models"][key] for key in (
+            "initialization", "completed_epochs", "transformer_source")})
+        payload["models"]["transformer_checkpoint"] = str(self.directory / "initial")
+        payload["logging"].update(parent_run_id="existing-run", resume_parent_run=True)
+        self.config.path.write_text(json.dumps(payload))
+        self.config = load_training_config(self.config.path)
+        self.identity = checkpointing.checkpoint_identity(self.config, data_fingerprint="a" * 64,
+                                                          validation_manifest={})
+        components = self._components()
+        self._advance(components, 2)
+        progress = RunProgress(optimizer_step=10, sources_seen=148, targets_seen=444,
+                               epoch=3, optimizer_start_step=8)
+        model, optimizer, scheduler, generator = components
+        metrics = checkpointing.save_checkpoint(
+            progress, config=self.config, transformer=model, optimizer=optimizer, scheduler=scheduler,
+            flow_generator=generator, device=self.device, identity=self.identity, wandb_run=self.wandb_run)
+        path = Path(metrics["checkpoint/path"])
+        expected = self._advance(components)
+        restored = self._components(TinyTransformer.from_pretrained(path / "transformer", local_files_only=True))
+        self._restore(path, restored)
+        self.assertEqual(restored[2].last_epoch, 2)
+        actual = self._advance(restored)
+        self.assertNestedEqual(expected, actual)
+        self.assertNestedEqual(components[0].state_dict(), restored[0].state_dict())
+        self._rewrite_metadata(path, lambda m: m["progress"].update(optimizer_start_step=0))
+        with self.assertRaisesRegex(ValueError, "optimizer start"):
+            checkpointing.read_checkpoint(path, self.config)
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -206,6 +237,79 @@ class CheckpointTests(unittest.TestCase):
         recipe["loss"]["region_weights"]["grid"] = .7
         with self.assertRaisesRegex(ValueError, "recipe differs"):
             checkpointing.read_checkpoint(path, continuation)
+
+    def test_second_epoch_roundtrip_preserves_adamw_rng_and_constant_lr_without_new_warmup(self):
+        components = self._components()
+        self._advance(components, 4)
+        parent, _ = self._save(components)
+        checkpoint = checkpointing.read_checkpoint(parent, self.config)
+        loaded = self._components(TinyTransformer.from_pretrained(parent / "transformer", local_files_only=True))
+        self._restore(parent, loaded)
+        self.assertEqual(loaded[1].param_groups[0]["lr"], .001)
+        # First step of epoch two is global step five, despite epoch one's partial final batch.
+        self._advance(loaded)
+        progress = RunProgress(5, 74, 222, {}, epoch=2)
+        metrics = checkpointing.save_checkpoint(
+            progress, config=self.config, transformer=loaded[0], optimizer=loaded[1], scheduler=loaded[2],
+            flow_generator=loaded[3], device=self.device, identity=self.identity, wandb_run=self.wandb_run)
+        path = Path(metrics["checkpoint/path"])
+        saved = checkpointing.read_checkpoint(path, self.config)
+        self.assertEqual(saved.metadata["progress"]["targets_seen"], 174 + 48)
+        self.assertEqual(saved.metadata["progress"]["epoch"], 2)
+        expected = self._advance(loaded, 3)
+        resumed = self._components(TinyTransformer.from_pretrained(path / "transformer", local_files_only=True))
+        self._restore(path, resumed)
+        self.assertNestedEqual(self._advance(resumed, 3), expected)
+        self.assertNestedEqual(resumed[1].state_dict(), loaded[1].state_dict())
+        self.assertEqual(resumed[2].last_epoch, 8)
+        # Old checkpoints without an epoch field still load as epoch one.
+        self._rewrite_metadata(parent, lambda item: item["progress"].pop("epoch"))
+        checkpointing.read_checkpoint(parent, self.config)
+
+    def test_second_epoch_cursor_rejects_full_batch_arithmetic_across_partial_epoch_boundary(self):
+        components = self._components()
+        self._advance(components)
+        path, _ = self._save(components)
+        for update in ({"epoch": 0}, {"epoch": True}, {"epoch": 2},
+                       {"epoch": 2, "optimizer_step": 5, "targets_seen": 240, "sources_seen": 80}):
+            with self.subTest(update=update):
+                self._rewrite_metadata(path, lambda item: item.update(progress={
+                    "optimizer_step": 1, "targets_seen": 48, "sources_seen": 16,
+                    "workload_totals": {}, **update}))
+                with self.assertRaises(ValueError):
+                    checkpointing.read_checkpoint(path, self.config)
+
+    def test_removing_training_state_keeps_loadable_weights_and_requires_explicit_weights_only_reads(self):
+        components = self._components()
+        self._advance(components)
+        path, _ = self._save(components)
+        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        before_weights = {file.name: file.read_bytes() for file in (path / "transformer").iterdir()}
+        expected_bytes = (path / "training_state.pt").stat().st_size
+        self.assertEqual(checkpointing.remove_training_state(checkpoint), expected_bytes)
+        self.assertFalse((path / "training_state.pt").exists())
+        self.assertEqual(before_weights, {file.name: file.read_bytes() for file in (path / "transformer").iterdir()})
+        retained = checkpointing.read_checkpoint(path, self.config, require_training_state=False)
+        self.assertTrue(retained.metadata["weights_only"])
+        self.assertNotIn("training_state.pt", retained.metadata["files"])
+        self.assertEqual(checkpointing.remove_training_state(retained), 0)
+        with self.assertRaisesRegex(ValueError, "training state was removed"):
+            checkpointing.read_checkpoint(path, self.config)
+        restored_model = TinyTransformer.from_pretrained(path / "transformer", local_files_only=True)
+        self.assertNestedEqual(restored_model.state_dict(), components[0].state_dict())
+
+    def test_failed_pruning_metadata_publication_restores_full_checkpoint(self):
+        components = self._components()
+        self._advance(components)
+        path, _ = self._save(components)
+        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        before = {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()}
+        with patch.object(Path, "replace", side_effect=OSError("publication failed")):
+            with self.assertRaisesRegex(OSError, "publication failed"):
+                checkpointing.remove_training_state(checkpoint)
+        self.assertEqual(before, {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()})
+        self.assertEqual(list(path.parent.iterdir()), [path])
+        checkpointing.read_checkpoint(path, self.config)
 
     def test_read_rejects_missing_truncated_or_unlisted_files_before_loading_tensors(self):
         components = self._components()

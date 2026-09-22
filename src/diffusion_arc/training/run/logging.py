@@ -59,6 +59,11 @@ def build_training_metrics(
         **{f"demos_{count}": [target.loss for target in result.targets
                              if target.context_pair_count == count] for count in (2, 3, 4)},
     }
+    if "high_noise_min" in config.recipe["flow"]:
+        threshold = config.recipe["flow"]["high_noise_min"]
+        groups.pop("uniform")
+        groups["high_noise"] = [target.loss for target in result.targets if threshold < target.timestep < 1]
+        groups["lower_noise"] = [target.loss for target in result.targets if target.timestep <= threshold]
     for name, losses in groups.items():
         metrics[f"train/targets_{name}"] = len(losses)
         if losses:
@@ -77,7 +82,7 @@ def build_validation_metrics(
     """Map one fixed-time evaluation to the configured W&B names.
 
     The five inner probes approximate the uniform-time loss; the combined loss
-    uses the recipe's training-time mixture. Regional means already have their
+    uses the fixed evaluation mixture, even if training times change. Regional means have their
     correct target denominators. Missing boundary means stay absent.
     """
     logging = config.recipe["logging"]
@@ -253,7 +258,10 @@ class WandbLogger:
             pynvml.nvmlInit()
             resources.callback(pynvml.nvmlShutdown)
             # UUID respects CUDA_VISIBLE_DEVICES; logical CUDA and NVML indices can differ.
-            uuid = torch.cuda.get_device_properties(self.device).uuid
+            # PyTorch's CUuuid string lacks the prefix expected by NVML.
+            uuid = str(torch.cuda.get_device_properties(self.device).uuid)
+            if not uuid.startswith(("GPU-", "MIG-")):
+                uuid = "GPU-" + uuid
             handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
             gpu_readers = {
                 "system/gpu_utilization_percent": lambda: pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,

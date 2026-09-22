@@ -140,7 +140,7 @@ def load_models(
         trust_remote_code=False,
         use_safetensors=True,
         low_cpu_mem_usage=True,
-        torch_dtype=nvarc_dtype,
+        dtype=nvarc_dtype,
         device_map=device_map,
         attn_implementation=NVARC_ATTENTION_IMPLEMENTATION,
     )

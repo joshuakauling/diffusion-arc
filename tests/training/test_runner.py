@@ -29,7 +29,8 @@ class _Samples(list):
             task_id=f"task-{index}", augmentation=SimpleNamespace(pair_indices=(0, 1, 2, 3, 4)),
         ) for index in range(count))
         super().__init__(SimpleNamespace(key=key, target_grids=(None,) * 4) for key in keys)
-        self.dataset = SimpleNamespace(keys=keys, fingerprint="test-data-identity")
+        self.dataset = SimpleNamespace(keys=keys, fingerprint="test-data-identity",
+                                       fingerprint_for=lambda expected: "test-data-identity")
 
 
 def _step_result(sources):
@@ -50,6 +51,33 @@ def _step_result(sources):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_weights_only_initialization_keeps_global_progress_but_builds_fresh_optimizer(self):
+        with ExitStack() as stack:
+            bindings = self._setup(stack)
+            recipe = self.config.recipe_dict()
+            source = json.loads((ROOT / "configs/training/arc_agi_1_epoch3_high_noise.json").read_text())
+            recipe["models"].update({key: source["models"][key] for key in (
+                "initialization", "completed_epochs", "transformer_source")})
+            recipe["models"]["transformer_checkpoint"] = "/downloaded/transformer"
+            recipe["logging"].update(parent_run_id="test-run", resume_parent_run=True)
+            self.config.path.write_text(json.dumps(recipe))
+            config = load_training_config(self.config.path)
+            parent = {"wandb_run": self.logger.run_identity, "workload_totals": {"train/nvarc_tokens": 500}}
+            restore = stack.enter_context(patch.object(runner, "restore_training_state"))
+            progress = runner.run_training(config, weights_parent=parent)
+        self.assertEqual((progress.epoch, progress.optimizer_step, progress.optimizer_start_step), (3, 6, 4))
+        self.assertEqual((progress.sources_seen, progress.targets_seen), (78, 234))
+        self.assertEqual(progress.workload_totals["train/nvarc_tokens"], 3100)
+        restore.assert_not_called()
+        bindings["build_optimizer"].assert_called_once()
+        bindings["build_lr_scheduler"].assert_called_once()
+        self.assertEqual(bindings["load_models"].call_args.kwargs["transformer_checkpoint"], Path("/downloaded/transformer"))
+        self.assertEqual(bindings["build_dataloader"].call_args.kwargs["start_index"], 0)
+        self.assertEqual(bindings["WandbLogger"].call_args.kwargs["resume_run"], self.logger.run_identity)
+        self.assertEqual([call.args[0]["progress/optimizer_step"] for call in self.logger.log.call_args_list], [5, 6])
+        self.assertEqual(self.evaluate.call_count, 1)
+        self.assertTrue(self.logger.run.config.update.call_args.args[0]["epoch_3"]["optimizer_reset"])
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -359,6 +387,75 @@ class RunnerTests(unittest.TestCase):
                     bindings["load_models"].assert_not_called()
                 if fault == "data":
                     bindings["build_optimizer"].assert_not_called()
+
+    def _next_epoch(self, stack):
+        bindings = self._setup(stack)
+        parent = SimpleNamespace(path=Path("/test/parent/step-000002"), metadata={
+            "progress": asdict(runner.RunProgress(2, 26, 78, {"train/flux_forward_calls": 12})),
+            "wandb_run": self.logger.run_identity,
+            "identity": runner.checkpoint_identity(
+                self.config, data_fingerprint="parent-view",
+                validation_manifest=bindings["validate_validation_bundle"].return_value),
+        })
+        payload = self.config.recipe_dict()
+        payload["seed"] += 1
+        payload["data"]["prepared_split_directory"] = "/test/next/data/splits/train"
+        path = self.config.path.parent / "next.json"
+        path.write_text(json.dumps(payload))
+        config = load_training_config(path, expected_type="training_run")
+        self.logger.run.step = 3
+        restore = stack.enter_context(patch.object(runner, "restore_training_state"))
+        return config, parent, bindings, restore
+
+    def test_next_epoch_keeps_global_counters_and_resets_only_the_data_cursor(self):
+        with ExitStack() as stack:
+            config, parent, bindings, restore = self._next_epoch(stack)
+            progress = runner.run_training(config, previous_epoch=parent)
+        self.assertEqual((progress.epoch, progress.optimizer_step, progress.sources_seen, progress.targets_seen),
+                         (2, 4, 52, 156))
+        bindings["build_dataloader"].assert_called_once_with(config, tokenizer=self.models.tokenizer, start_index=0)
+        bindings["load_models"].assert_called_once_with(
+            config, device=torch.device("cpu"), transformer_checkpoint=parent.path / "transformer")
+        bindings["WandbLogger"].assert_called_once_with(
+            config, device=torch.device("cpu"), resume_run=parent.metadata["wandb_run"])
+        self.assertIs(restore.call_args.args[0], parent)
+        self.assertIs(restore.call_args.kwargs["optimizer"], self.optimizer)
+        records = [call.args[0] for call in self.logger.log.call_args_list]
+        self.assertEqual([row["progress/optimizer_step"] for row in records], [3, 4])
+        self.assertEqual([row["train/targets"] for row in records], [48, 30])
+        self.assertEqual(records[-1]["progress/epoch_fraction"], 2.)
+        self.assertEqual(records[-1]["train/flux_forward_calls_total"], 24)
+        self.evaluate.assert_called_once()
+        self.generate.assert_called_once()
+        self.save.assert_called_once()
+        self.assertEqual(self.save.call_args.args[0].optimizer_step, 4)
+        self.logger.run.config.update.assert_called_once()
+
+    def test_next_epoch_rejects_changes_to_experiment_or_validation(self):
+        for fault in ("loss", "validation", "seed", "incomplete"):
+            with self.subTest(fault=fault), ExitStack() as stack:
+                config, parent, bindings, restore = self._next_epoch(stack)
+                if fault == "loss":
+                    parent.metadata["identity"]["recipe"]["optimizer"]["learning_rate"] *= 2
+                elif fault == "validation":
+                    parent.metadata["identity"]["validation_sha256"] = "changed"
+                elif fault == "seed":
+                    parent.metadata["identity"]["recipe"]["seed"] = config.seed
+                else:
+                    parent.metadata["progress"]["optimizer_step"] = 1
+                with self.assertRaises(ValueError):
+                    runner.run_training(config, previous_epoch=parent)
+                restore.assert_not_called()
+                self.step.assert_not_called()
+
+    def test_resume_inside_second_epoch_uses_local_data_cursor_and_global_step(self):
+        with ExitStack() as stack:
+            config, checkpoint, bindings, read, restore = self._resume(stack)
+            checkpoint.metadata["progress"].update(epoch=2, optimizer_step=3, sources_seen=42, targets_seen=126)
+            progress = runner.run_training(config)
+        bindings["build_dataloader"].assert_called_once_with(config, tokenizer=self.models.tokenizer, start_index=16)
+        self.assertEqual((progress.optimizer_step, progress.sources_seen, progress.targets_seen), (4, 52, 156))
+        self.assertEqual(self.logger.log.call_args.args[0]["progress/optimizer_step"], 4)
 
     def test_checkpoint_failure_cannot_log_a_successful_save(self):
         with ExitStack() as stack:

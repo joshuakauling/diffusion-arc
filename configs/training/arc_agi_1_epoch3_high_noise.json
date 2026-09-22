@@ -1,0 +1,346 @@
+{
+  "config_type": "training_run",
+  "schema_version": 1,
+  "name": "arc_agi_1_epoch3_high_noise",
+  "seed": 169,
+  "deployment": {
+    "provider": "runpod",
+    "gpu_type": "H200",
+    "gpu_count": 1,
+    "output_directory": null
+  },
+  "models": {
+    "nvarc_checkpoint": "../../checkpoints/nvarc-qwen3-4b-grids15-sft139",
+    "flux_checkpoint": "../../checkpoints/flux2-klein-base-4b",
+    "initialization": "transformer_weights",
+    "resume_from": null,
+    "trainable_modules": [
+      "flux_transformer"
+    ],
+    "nvarc_dtype": "bfloat16",
+    "vae_dtype": "float32",
+    "flux_parameter_dtype": "float32",
+    "flux_compute_dtype": "bfloat16",
+    "transformer_checkpoint": null,
+    "completed_epochs": 2,
+    "transformer_source": {
+      "repo_id": "flipchip167/diffusion-arc-weights",
+      "revision": "1126da2fc1a43c210d102f75d385f17279003460",
+      "subfolder": "m7y2mfn2/step-001812/transformer"
+    }
+  },
+  "execution": {
+    "device": "cuda:0",
+    "distributed_strategy": "single_process",
+    "nvarc_attention_backend": "fa3_packed",
+    "nvarc_hidden_layers": [
+      9,
+      18,
+      27
+    ],
+    "nvarc_early_exit_layer": 27,
+    "nvarc_hidden_state_normalization": "none",
+    "flux_attention_backend": "fa3_packed",
+    "flux_max_joint_tokens": 12288,
+    "activation_checkpointing": false,
+    "profiler": null,
+    "nvarc_max_tokens": 134400
+  },
+  "data": {
+    "pool": "nvarc_train_arc_agi_1_training_only",
+    "task_index": "../../data/nvarc_data/nvarc_train_arc_agi_1_training_only_tasks.jsonl",
+    "source_archive": "../../data/nvarc_data/nvarc-all-classified.tar.gz",
+    "official_training_keys": "../../data/nvarc_data/arc_agi_1_training_keys.json",
+    "prepared_split_directory": "../../data/training/arc_agi_1_epoch3_high_noise/splits/train",
+    "view_name": "train",
+    "require_both_parents_in_official_training": true,
+    "expected_task_count": 14490,
+    "task_order": "seeded_shuffle_of_sorted_task_ids",
+    "views_per_task_per_epoch": 1,
+    "pairs_per_sequence": 5,
+    "pair_selection": "random_without_replacement",
+    "color_permutation": "uniform_all_10_colors",
+    "geometry_sampling": "uniform",
+    "geometries": [
+      "ID",
+      "R90",
+      "R180",
+      "R270",
+      "FH",
+      "FV",
+      "FD1",
+      "FD2"
+    ],
+    "shared_augmentation_across_sequence": true,
+    "vae_safety_filter": false,
+    "max_cells_per_sequence": 9000,
+    "max_tokens": 8400,
+    "overlength_policy": "error",
+    "num_workers": 2,
+    "prefetch_factor": 8
+  },
+  "canvas": {
+    "height": 30,
+    "width": 30,
+    "cell_size": 16,
+    "alignment": "top_left",
+    "palette": "greedy_rgb_maximin_v1",
+    "padding": "white_sentinel"
+  },
+  "loop": {
+    "epochs": 1,
+    "max_optimizer_steps": 906,
+    "optimizer_batch_size": 48,
+    "min_context_pairs_before_target": 2,
+    "vae_microbatch_size": 48,
+    "drop_last": false,
+    "expected_target_count": 43470,
+    "expected_final_batch_target_count": 30
+  },
+  "loss": {
+    "type": "region_weighted_velocity_mse",
+    "reduction_dtype": "float32",
+    "region_weights": {
+      "canvas": 0.1,
+      "grid": 0.8,
+      "boundary": 0.1
+    },
+    "canvas_region": "all_tokens",
+    "boundary_region": "adjacent_bottom_right_including_corner",
+    "empty_boundary_policy": "renormalize_remaining_weights",
+    "target_reduction": "equal_target_mean",
+    "microbatch_reduction": "actual_target_count_weighted"
+  },
+  "flow": {
+    "interpolation": "data_to_noise",
+    "velocity_target": "noise_minus_data",
+    "time_distribution": "uniform_with_fixed_endpoint_and_high_noise_counts",
+    "uniform_min": 0.0,
+    "uniform_max": 1.0,
+    "uniform_bounds": "open",
+    "endpoint_time": 1.0,
+    "endpoint_targets_per_full_batch": 24,
+    "endpoint_targets_in_final_batch": 15,
+    "endpoint_selection": "random_without_replacement",
+    "noise_distribution": "independent_standard_normal_per_target",
+    "randomness_assignment": "logical_target_order_before_packing",
+    "high_noise_min": 0.8,
+    "high_noise_max": 1.0,
+    "high_noise_targets_per_full_batch": 12,
+    "high_noise_targets_in_final_batch": 8
+  },
+  "optimizer": {
+    "type": "adamw",
+    "learning_rate": 1e-05,
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "epsilon": 1e-08,
+    "weight_decay": 0.01,
+    "state_dtype": "float32",
+    "max_grad_norm": 1.0
+  },
+  "scheduler": {
+    "type": "linear_warmup_constant",
+    "warmup_steps": 50,
+    "first_update_warmup_fraction": 0.02,
+    "reset_on_resume": false
+  },
+  "validation": {
+    "bundle": "../../data/benchmarks/arc_agi_1_validation",
+    "split_seed": 167,
+    "expected_task_count": 100,
+    "expected_query_count": 104,
+    "cache_device": "cpu",
+    "context": "all_original_demonstrations",
+    "augmentation": false,
+    "loss": {
+      "every_optimizer_steps": 100,
+      "at_start": true,
+      "at_end": true,
+      "replace_last_periodic_with_final": true,
+      "timesteps": [
+        0.1,
+        0.3,
+        0.5,
+        0.7,
+        0.9,
+        1.0
+      ],
+      "noise_seed": 10167,
+      "uniform_proxy_weight": 0.9166666666666666,
+      "endpoint_weight": 0.08333333333333333
+    },
+    "sampling": {
+      "every_optimizer_steps": 300,
+      "at_start": true,
+      "at_end": true,
+      "replace_last_periodic_with_final": true,
+      "expected_task_count": 32,
+      "expected_query_count": 33,
+      "seeds": [
+        20167,
+        20168
+      ],
+      "steps": 40,
+      "solver": "euler",
+      "time_schedule": "linear",
+      "trajectory_dtype": "float32",
+      "use_target_shape": false,
+      "test_time_training": false,
+      "test_time_augmentation": false,
+      "voting": false,
+      "task_success": "one_sample_index_solves_all_queries",
+      "cell_accuracy_scope": "shape_correct_predictions"
+    }
+  },
+  "logging": {
+    "backend": "wandb",
+    "entity": null,
+    "project": null,
+    "mode": "online",
+    "api_key_environment_variable": "WANDB_API_KEY",
+    "step_metric": "progress/optimizer_step",
+    "every_optimizer_steps": 1,
+    "aggregate_across_optimizer_steps": false,
+    "batch_scalars_per_step": true,
+    "automatic_system_metrics": false,
+    "console_capture": false,
+    "model_watch": false,
+    "histograms": false,
+    "train_metrics": [
+      "train/loss",
+      "train/mse_canvas",
+      "train/mse_grid",
+      "train/mse_boundary",
+      "train/contribution_canvas",
+      "train/contribution_grid",
+      "train/contribution_boundary",
+      "train/loss_t1",
+      "train/loss_demos_2",
+      "train/loss_demos_3",
+      "train/loss_demos_4",
+      "train/targets_t1",
+      "train/targets_demos_2",
+      "train/targets_demos_3",
+      "train/targets_demos_4",
+      "train/boundary_target_count",
+      "train/learning_rate",
+      "train/grad_norm",
+      "train/grad_clipped",
+      "train/step_seconds",
+      "train/targets_per_second",
+      "train/targets",
+      "progress/optimizer_step",
+      "progress/epoch_fraction",
+      "progress/targets_seen",
+      "train/loss_high_noise",
+      "train/loss_lower_noise",
+      "train/targets_high_noise",
+      "train/targets_lower_noise"
+    ],
+    "workload_counters": {
+      "phases": [
+        "train",
+        "val",
+        "sample"
+      ],
+      "names": [
+        "nvarc_tokens",
+        "flux_text_tokens",
+        "flux_image_tokens",
+        "flux_joint_tokens",
+        "flux_forward_calls"
+      ],
+      "cumulative_suffix": "_total"
+    },
+    "validation_metrics": [
+      "val/loss",
+      "val/loss_uniform_proxy",
+      "val/target_count",
+      "val/boundary_target_count",
+      "val/seconds"
+    ],
+    "validation_time_metrics": {
+      "names": [
+        "loss",
+        "mse_canvas",
+        "mse_grid",
+        "mse_boundary"
+      ],
+      "suffixes": [
+        "t_0_1",
+        "t_0_3",
+        "t_0_5",
+        "t_0_7",
+        "t_0_9",
+        "t1"
+      ]
+    },
+    "sampling_metrics": [
+      "sample/pass_at_1",
+      "sample/pass_at_2",
+      "sample/solved_tasks_at_1",
+      "sample/solved_tasks_at_2",
+      "sample/task_count",
+      "sample/shape_accuracy",
+      "sample/cell_accuracy",
+      "sample/invalid_grid_rate",
+      "sample/shape_correct_count",
+      "sample/prediction_count",
+      "sample/seconds"
+    ],
+    "checkpoint_metrics": [
+      "checkpoint/seconds",
+      "checkpoint/size_bytes",
+      "checkpoint/path"
+    ],
+    "hardware": {
+      "per_step_metrics": [
+        "system/gpu_allocated_bytes",
+        "system/gpu_reserved_bytes",
+        "system/gpu_peak_allocated_bytes"
+      ],
+      "sample_interval_seconds": 30,
+      "sampled_metrics": [
+        "system/gpu_utilization_percent",
+        "system/gpu_power_watts",
+        "system/gpu_temperature_celsius",
+        "system/cpu_utilization_percent",
+        "system/ram_rss_bytes"
+      ]
+    },
+    "predictions": {
+      "key": "sample/predictions",
+      "cadence": "sampling_checks",
+      "columns": [
+        "task_id",
+        "query_index",
+        "comparison",
+        "sample_1_exact",
+        "sample_2_exact"
+      ],
+      "image_panels": [
+        "input",
+        "expected_output",
+        "sample_1",
+        "sample_2"
+      ],
+      "show_full_generated_canvas": true
+    },
+    "parent_run_id": "m7y2mfn2",
+    "resume_parent_run": true
+  },
+  "checkpointing": {
+    "every_optimizer_steps": 300,
+    "at_start": false,
+    "at_end": true,
+    "replace_last_periodic_with_final": true,
+    "save_full_state": true,
+    "keep_last": null,
+    "upload_weights_to_wandb": false
+  },
+  "final_test": {
+    "enabled": false,
+    "checkpoint_selection": null
+  }
+}

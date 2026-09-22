@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -11,10 +12,13 @@ import torch
 from diffusion_arc.model import TARGET_LATENT_SHAPE
 from diffusion_arc.training.step.flow_sampling import (
     EndpointFlowPolicy,
+    EndpointFlowSampler,
     FlowMatchingBatch,
+    build_flow_sampler,
     sample_endpoint_flow_batches,
     sample_flow_matching_batch,
     sample_stratified_flow_matching_batch,
+    select_flow_batch,
 )
 from diffusion_arc.training.step.loss import flow_matching_loss
 
@@ -78,6 +82,128 @@ class EndpointFlowSamplingTests(unittest.TestCase):
                              ((torch.zeros(2, 128),), True)):
             with self.subTest(quota=quota), self.assertRaises(ValueError):
                 sample_endpoint_flow_batches(clean, endpoint_count=quota)
+
+
+class HighNoiseFlowSamplingTests(unittest.TestCase):
+    def test_full_and_tail_quotas_assign_three_groups_before_packing(self):
+        policy = EndpointFlowPolicy(48, 24, 30, 15, 12, 8)
+        randint = torch.randint
+
+        def draw_times(low, high, shape, **kwargs):
+            # Make the broad uniform group identifiable even though its support
+            # normally overlaps with the dedicated high-noise group.
+            if low == 1 and high == 2**24:
+                return torch.full(shape, 2**22, dtype=torch.int64, device=kwargs["device"])
+            return randint(low, high, shape, **kwargs)
+
+        for count, endpoint, high_noise, uniform in ((48, 24, 12, 12), (30, 15, 8, 7)):
+            with self.subTest(count=count):
+                clean = tuple(torch.full((2, 128), index / 100) for index in range(count))
+                sampler = EndpointFlowSampler(torch.Generator().manual_seed(169), policy)
+                with patch("diffusion_arc.training.step.flow_sampling.torch.randint", side_effect=draw_times):
+                    flows = sampler(clean)
+                times = torch.cat([flow.timesteps for flow in flows])
+                self.assertEqual(int((times == 1).sum()), endpoint)
+                self.assertEqual(int(((times > 0.8) & (times < 1)).sum()), high_noise)
+                self.assertEqual(int((times == 0.25).sum()), uniform)
+                self.assertFalse(bool((times[:endpoint] == 1).all()))
+                for latent, flow in zip(clean, flows):
+                    noise = flow.target_velocity[0] + latent
+                    torch.testing.assert_close(
+                        flow.noisy_latents[0], (1 - flow.timesteps) * latent + flow.timesteps * noise,
+                    )
+                    self.assertEqual(flow.noisy_latents.dtype, torch.float32)
+
+                # A different physical order selects the same logical draws.
+                indices = (count - 1, 0, count // 2)
+                packed = select_flow_batch(flows, indices)
+                torch.testing.assert_close(packed.timesteps, times[list(indices)], rtol=0, atol=0)
+                for slot, index in enumerate(indices):
+                    torch.testing.assert_close(packed.noisy_latents[slot], flows[index].noisy_latents[0])
+
+    def test_high_noise_interval_excludes_both_boundaries_in_float32(self):
+        def edge_draws(low, high, shape, **kwargs):
+            return torch.tensor([low, high - 1], device=kwargs["device"])
+
+        with patch("diffusion_arc.training.step.flow_sampling.torch.randint", side_effect=edge_draws):
+            flows = sample_endpoint_flow_batches(
+                (torch.zeros(1, 128),) * 2, endpoint_count=0, high_noise_count=2,
+                generator=torch.Generator().manual_seed(9),
+            )
+        times = torch.cat([flow.timesteps for flow in flows]).sort().values
+        expected = torch.stack((
+            torch.nextafter(torch.tensor(0.8), torch.tensor(1.0)),
+            torch.nextafter(torch.tensor(1.0), torch.tensor(0.8)),
+        ))
+        torch.testing.assert_close(times, expected, rtol=0, atol=0)
+        self.assertTrue(bool(((times > 0.8) & (times < 1)).all()))
+
+    def test_restoring_generator_replays_mixture_and_independent_noise(self):
+        generator = torch.Generator().manual_seed(169)
+        sampler = EndpointFlowSampler(generator, EndpointFlowPolicy(48, 24, 30, 15, 12, 8))
+        clean = (torch.zeros(2, 128),) * 48
+        state = generator.get_state()
+        first = sampler(clean)
+        after_first = generator.get_state()
+        generator.set_state(state)
+        replay = sampler(clean)
+        for a, b in zip(first, replay):
+            torch.testing.assert_close(a.timesteps, b.timesteps, rtol=0, atol=0)
+            torch.testing.assert_close(a.noisy_latents, b.noisy_latents, rtol=0, atol=0)
+            torch.testing.assert_close(a.target_velocity, b.target_velocity, rtol=0, atol=0)
+        torch.testing.assert_close(generator.get_state(), after_first, rtol=0, atol=0)
+        self.assertFalse(torch.equal(first[0].target_velocity, first[1].target_velocity))
+        next_times = torch.cat([flow.timesteps for flow in sampler(clean)])
+        first_times = torch.cat([flow.timesteps for flow in first])
+        self.assertFalse(torch.equal(first_times == 1, next_times == 1))
+
+    def test_quota_policy_rejects_overlap_invalid_bounds_and_inconsistent_tail(self):
+        for kwargs in (
+            {"high_noise_targets_per_full_batch": 25},
+            {"high_noise_targets_in_final_batch": 16},
+            {"high_noise_targets_per_full_batch": True},
+            {"high_noise_min": -0.1},
+            {"high_noise_max": 1.1},
+            {"high_noise_min": 1.0},
+            {"high_noise_min": float("nan")},
+            {"high_noise_max": float("inf")},
+            {"high_noise_min": 1.0 - 2**-24},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                EndpointFlowPolicy(48, 24, 30, 15, **kwargs)
+        with self.assertRaisesRegex(ValueError, "full-batch high-noise"):
+            EndpointFlowPolicy(48, 24, 48, 24, 12, 8)
+        with self.assertRaisesRegex(ValueError, "unexpected"):
+            EndpointFlowPolicy(48, 24, 30, 15, 12, 8).high_noise_count(29)
+        for count in (-1, True, 2):
+            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "high_noise_count"):
+                sample_endpoint_flow_batches((torch.zeros(2, 128),) * 2,
+                                             endpoint_count=1, high_noise_count=count)
+
+    def test_build_sampler_resolves_new_and_existing_recipe(self):
+        for high_noise in (False, True):
+            with self.subTest(high_noise=high_noise):
+                flow = {
+                    "time_distribution": "uniform_with_fixed_endpoint_count",
+                    "endpoint_targets_per_full_batch": 4,
+                    "endpoint_targets_in_final_batch": 3,
+                }
+                if high_noise:
+                    flow.update(
+                        time_distribution="uniform_with_fixed_endpoint_and_high_noise_counts",
+                        endpoint_targets_per_full_batch=24, endpoint_targets_in_final_batch=15,
+                        high_noise_targets_per_full_batch=12, high_noise_targets_in_final_batch=8,
+                        high_noise_min=0.8, high_noise_max=1.0,
+                    )
+                config = SimpleNamespace(
+                    config_type="recipe", recipe={"flow": flow},
+                    loop=SimpleNamespace(optimizer_batch_size=48), final_batch_target_count=30,
+                )
+                sampler = build_flow_sampler(config, generator=torch.Generator().manual_seed(169))
+                self.assertIsInstance(sampler, EndpointFlowSampler)
+                self.assertEqual(sampler.policy.endpoint_count(48), 24 if high_noise else 4)
+                self.assertEqual(sampler.policy.high_noise_count(48), 12 if high_noise else 0)
+                self.assertEqual(sampler.policy.high_noise_count(30), 8 if high_noise else 0)
 
 
 def _clean_latents(

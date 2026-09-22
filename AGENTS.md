@@ -51,6 +51,14 @@ For substantial implementations, architectural changes, or unclear scope:
 - Validate external inputs, configuration, and checkpoint contracts at ingestion
   or explicit preflight. Make frozen/trainable boundaries testable. Trust
   validated internal objects instead of repeating checks in every forward.
+- Trust prepared datasets and pinned model snapshots. Do not rescan, rehash,
+  parse, or check every source file at startup, resume, Dataset construction,
+  or epoch transitions. Reuse preparation manifests and recorded hashes;
+  read individual tasks when consumed and regenerate only augmentation keys.
+  Full integrity audits belong to initial CPU preparation or explicitly
+  requested diagnostics, never automatic GPU startup or a hidden fallback.
+  Retain lightweight configuration, split-boundary, and checkpoint-metadata
+  checks without traversing the dataset or rereading model weights.
 - Keep hot-path checks for changing conditions that matter to correctness.
   Put expensive tensor scans in tests, diagnostics, or justified debug modes;
   run stable preflights explicitly rather than hiding them in first-forward

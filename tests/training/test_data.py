@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -16,6 +17,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerFast
 
+from diffusion_arc.arc_data import load_training_task
 from diffusion_arc.arc_data.augmentation import ArcAugmentationKey, ArcAugmentationSpec, ArcGeometry
 from diffusion_arc.arc_data.image.canvas import render_grid_canvas
 from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
@@ -121,6 +123,103 @@ def build_layout(
         make_task_payload(((1, 2), (3, 4), (5, 6), (7, 8))),
     )
     return split_root, data_root
+
+
+def write_prepared_manifest(split_root: Path, data_root: Path) -> None:
+    source_root = data_root / "raw/arc-agi-2/training"
+    write_json(split_root / "manifest.json", {
+        "schema_version": 1,
+        "dataset": "arc-agi-2",
+        "keys_sha256": hashlib.sha256(
+            (split_root / "augmented_keys/train.json").read_bytes()
+        ).hexdigest(),
+        "sources": [
+            {"task_key": path.stem, "converted_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for path in sorted(source_root.glob("*.json"))
+        ],
+    })
+
+
+class PreparedArcTrainingDatasetTest(unittest.TestCase):
+    def test_startup_and_current_resume_do_not_read_source_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            split_root, data_root = build_layout(Path(directory))
+            tokenizer = make_nvarc_tokenizer()
+            original_samples = list(ArcTrainingDataset(split_root, "train", tokenizer))
+            write_prepared_manifest(split_root, data_root)
+            with patch("diffusion_arc.training.data.load_training_task",
+                       side_effect=AssertionError("startup must not read source tasks")):
+                dataset = ArcTrainingDataset(split_root, "train", tokenizer)
+                self.assertEqual(dataset.fingerprint_for(dataset.fingerprint), dataset.fingerprint)
+                self.assertEqual(dataset.fingerprint_for("malformed"), dataset.fingerprint)
+            with patch("diffusion_arc.training.data.load_training_task",
+                       wraps=load_training_task) as load:
+                self.assertEqual(dataset[0], original_samples[0])
+                self.assertEqual(load.call_count, 1)
+                self.assertEqual(load.call_args.args[0].name, "task-b.json")
+                self.assertEqual(dataset[1], original_samples[1])
+                self.assertEqual(load.call_count, 2)
+
+    def test_missing_sources_and_invalid_pairs_fail_only_when_consumed(self) -> None:
+        for missing in (False, True):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                key = TASK_A_KEY if missing else "task-a_ID_0123456789_0,99"
+                split_root, data_root = build_layout(Path(directory), keys=[key])
+                write_prepared_manifest(split_root, data_root)
+                if missing:
+                    (data_root / "raw/arc-agi-2/training/task-a.json").unlink()
+                dataset = ArcTrainingDataset(split_root, "train", make_nvarc_tokenizer())
+                error = FileNotFoundError if missing else ValueError
+                with self.assertRaisesRegex(error, "task-a" if missing else "out of range"):
+                    dataset[0]
+
+    def test_identity_tracks_manifest_source_hashes_and_ordered_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            split_root, data_root = build_layout(Path(directory))
+            tokenizer = make_nvarc_tokenizer()
+            write_prepared_manifest(split_root, data_root)
+            original = ArcTrainingDataset(split_root, "train", tokenizer).fingerprint
+            source = data_root / "raw/arc-agi-2/training/task-b.json"
+            write_json(source, make_task_payload(((1, 2), (3, 9), (5, 6), (7, 8))))
+            # A prepared bundle is immutable: startup trusts its recorded hashes.
+            self.assertEqual(original, ArcTrainingDataset(split_root, "train", tokenizer).fingerprint)
+            write_prepared_manifest(split_root, data_root)
+            changed = ArcTrainingDataset(split_root, "train", tokenizer).fingerprint
+            self.assertNotEqual(original, changed)
+            write_json(split_root / "augmented_keys/train.json", [TASK_A_KEY, TASK_B_KEY])
+            write_prepared_manifest(split_root, data_root)
+            self.assertNotEqual(changed, ArcTrainingDataset(split_root, "train", tokenizer).fingerprint)
+
+    def test_legacy_checkpoint_identity_is_checked_explicitly_and_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            split_root, data_root = build_layout(Path(directory))
+            tokenizer = make_nvarc_tokenizer()
+            legacy = ArcTrainingDataset(split_root, "train", tokenizer).fingerprint
+            write_prepared_manifest(split_root, data_root)
+            dataset = ArcTrainingDataset(split_root, "train", tokenizer)
+            self.assertNotEqual(legacy, dataset.fingerprint)
+            with patch("diffusion_arc.training.data.load_training_task",
+                       wraps=load_training_task) as load:
+                self.assertEqual(dataset.fingerprint_for(legacy), legacy)
+                self.assertEqual(load.call_count, 2)
+                self.assertEqual(dataset.fingerprint_for(legacy), legacy)
+                self.assertEqual(load.call_count, 2)
+                self.assertNotEqual(dataset.fingerprint_for("incorrect"), "incorrect")
+
+    def test_prepared_metadata_still_rejects_changed_keys_and_missing_membership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            split_root, data_root = build_layout(Path(directory))
+            write_prepared_manifest(split_root, data_root)
+            write_json(split_root / "augmented_keys/train.json", [TASK_A_KEY, TASK_B_KEY])
+            with self.assertRaisesRegex(ValueError, "keys differ"):
+                ArcTrainingDataset(split_root, "train", make_nvarc_tokenizer())
+            write_prepared_manifest(split_root, data_root)
+            manifest_path = split_root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["sources"] = manifest["sources"][:1]
+            write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(ValueError, "missing referenced source tasks"):
+                ArcTrainingDataset(split_root, "train", make_nvarc_tokenizer())
 
 
 class ArcTrainingDatasetTest(unittest.TestCase):

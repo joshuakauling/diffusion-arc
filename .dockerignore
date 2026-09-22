@@ -1,0 +1,9 @@
+# Only the image recipe and build-time model downloader enter the build context.
+**
+!Dockerfile
+!.dockerignore
+!scripts/
+scripts/*
+!scripts/cloud/
+scripts/cloud/*
+!scripts/cloud/build_image_models.py

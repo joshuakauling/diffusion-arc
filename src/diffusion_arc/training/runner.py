@@ -9,7 +9,10 @@ import time
 import torch
 
 from .config import TrainingConfig
-from .run.checkpointing import checkpoint_identity, read_checkpoint, restore_training_state, save_checkpoint
+from .run.checkpointing import (
+    Checkpoint, checkpoint_identity, read_checkpoint, restore_training_state, save_checkpoint,
+    validate_epoch_continuation,
+)
 from .data import build_dataloader, iter_optimizer_batches
 from .step.flow_sampling import build_flow_generator, build_flow_sampler
 from .run.logging import WandbLogger, build_sampling_metrics, build_training_metrics, build_validation_metrics
@@ -26,15 +29,18 @@ from .run.validation import (
 
 @dataclass
 class RunProgress:
-    """Cumulative counts of successfully completed optimizer updates."""
+    """Global training counts and the step at which the current optimizer was created."""
 
     optimizer_step: int = 0
     sources_seen: int = 0
     targets_seen: int = 0
     workload_totals: dict[str, int] = field(default_factory=dict)
+    epoch: int = 1
+    optimizer_start_step: int = 0
 
 
-def run_training(config: TrainingConfig) -> RunProgress:
+def run_training(config: TrainingConfig, *, previous_epoch: Checkpoint | None = None,
+                 weights_parent: dict | None = None) -> RunProgress:
     """Construct training components and consume the recipe's complete epoch.
 
     The caller loads and validates the configuration before calling this function.
@@ -43,6 +49,10 @@ def run_training(config: TrainingConfig) -> RunProgress:
 
     Validation and sampling reuse fixed CPU-cached queries and contribute to the
     same W&B record as training. Full-state checkpoints follow the sampling events.
+    A previous_epoch checkpoint starts a fresh data view while retaining global
+    counters and optimizer/RNG state. Ordinary resume stays inside the saved epoch.
+    A weights-only initialization retains global epoch numbering but creates fresh
+    optimizer/scheduler/RNG state; weights_parent supplies verified W&B lineage.
     """
     if config.config_type != "training_run" or config.recipe is None:
         raise ValueError("run_training requires a training_run config")
@@ -53,9 +63,30 @@ def run_training(config: TrainingConfig) -> RunProgress:
     sampling_steps = config.sampling_steps
     checkpoint_steps = config.checkpoint_steps
     resume_from = recipe["models"]["resume_from"]
-    checkpoint = read_checkpoint(resume_from, config) if resume_from else None
+    if previous_epoch is not None:
+        if resume_from is not None:
+            raise ValueError("choose either an in-epoch resume or a new epoch")
+        validate_epoch_continuation(previous_epoch, config)
+    checkpoint = read_checkpoint(resume_from, config) if resume_from else previous_epoch
     progress = RunProgress(**checkpoint.metadata["progress"]) if checkpoint else RunProgress()
-    if progress.optimizer_step == config.loop.max_optimizer_steps:
+    weights_start = recipe["models"]["initialization"] == "transformer_weights"
+    if weights_start and not checkpoint:
+        if recipe["models"]["transformer_checkpoint"] is None:
+            raise ValueError("prepare the initial transformer checkpoint before training")
+        completed = recipe["models"]["completed_epochs"]
+        progress = RunProgress(
+            optimizer_step=completed * config.loop.max_optimizer_steps,
+            sources_seen=completed * expected_sources, targets_seen=completed * expected_targets,
+            epoch=completed + 1, optimizer_start_step=completed * config.loop.max_optimizer_steps,
+            workload_totals=dict(weights_parent["workload_totals"]) if weights_parent else {},
+        )
+        if recipe["logging"]["resume_parent_run"] and weights_parent is None:
+            raise ValueError("verify the parent W&B run before continuing its history")
+    if previous_epoch is not None:
+        progress.epoch += 1
+    step_offset = (progress.epoch - 1) * config.loop.max_optimizer_steps
+    source_offset = (progress.epoch - 1) * expected_sources
+    if progress.optimizer_step == step_offset + config.loop.max_optimizer_steps:
         raise ValueError("checkpoint already completed this epoch")
 
     # Reject incompatible or changed validation data before allocating models.
@@ -71,12 +102,15 @@ def run_training(config: TrainingConfig) -> RunProgress:
 
     # Reuse the same model preparation and training components as the B3 baseline.
     device = prepare_device(config)
-    logger = WandbLogger(config, device=device,
-                         resume_run=checkpoint.metadata["wandb_run"] if checkpoint else None)
+    resume_run = checkpoint.metadata["wandb_run"] if checkpoint else (
+        weights_parent["wandb_run"] if weights_start and recipe["logging"]["resume_parent_run"] else None)
+    logger = WandbLogger(config, device=device, resume_run=resume_run)
     seed_process(config.seed)
     models = load_models(config, device=device,
-                         transformer_checkpoint=checkpoint.path / "transformer" if checkpoint else None)
-    training_samples = build_dataloader(config, tokenizer=models.tokenizer, start_index=progress.sources_seen)
+                         transformer_checkpoint=checkpoint.path / "transformer" if checkpoint else
+                         recipe["models"].get("transformer_checkpoint"))
+    training_samples = build_dataloader(config, tokenizer=models.tokenizer,
+                                        start_index=progress.sources_seen - source_offset)
 
     # Check the prepared view against this epoch before any optimizer update.
     keys = training_samples.dataset.keys
@@ -84,10 +118,20 @@ def run_training(config: TrainingConfig) -> RunProgress:
         raise ValueError(f"training view must contain exactly {expected_sources} distinct tasks")
     if any(len(key.augmentation.pair_indices) != recipe["data"]["pairs_per_sequence"] for key in keys):
         raise ValueError("training view pair counts do not match the run recipe")
-    identity = checkpoint_identity(config, data_fingerprint=training_samples.dataset.fingerprint,
+    data_fingerprint = training_samples.dataset.fingerprint
+    if checkpoint and previous_epoch is None:
+        expected_fingerprint = checkpoint.metadata["identity"]["data_sha256"]
+        if data_fingerprint != expected_fingerprint:
+            data_fingerprint = training_samples.dataset.fingerprint_for(expected_fingerprint)
+    identity = checkpoint_identity(config, data_fingerprint=data_fingerprint,
                                    validation_manifest=manifest)
-    if checkpoint and checkpoint.metadata["identity"] != identity:
-        raise ValueError("checkpoint data content or validation split differs from this run")
+    if checkpoint:
+        saved_identity = checkpoint.metadata["identity"]
+        if previous_epoch is not None:
+            if saved_identity["validation_sha256"] != identity["validation_sha256"]:
+                raise ValueError("the validation split must remain unchanged between epochs")
+        elif saved_identity != identity:
+            raise ValueError("checkpoint data content or validation split differs from this run")
 
     optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
     scheduler = build_lr_scheduler(config, optimizer=optimizer)
@@ -111,6 +155,16 @@ def run_training(config: TrainingConfig) -> RunProgress:
         max_grad_norm=config.optimizer.max_grad_norm,
     )
     with logger:
+        if weights_start and not checkpoint:
+            logger.run.config.update({f"epoch_{progress.epoch}": {
+                "recipe": config.recipe_dict(), "optimizer_reset": True,
+                "start_step": progress.optimizer_step, "data_sha256": identity["data_sha256"],
+            }}, allow_val_change=True)
+        if previous_epoch is not None:
+            logger.run.config.update({f"epoch_{progress.epoch}": {
+                "augmentation_seed": config.seed, "parent_checkpoint": str(previous_epoch.path),
+                "data_sha256": identity["data_sha256"], "start_step": progress.optimizer_step,
+            }}, allow_val_change=True)
         # Frozen encoders run once; all later checks reuse detached CPU tensors.
         samples, grids = tokenize_validation_targets(validation["bundle"], manifest, models.tokenizer)
         validation_targets = prepare_validation_cache(
@@ -150,10 +204,10 @@ def run_training(config: TrainingConfig) -> RunProgress:
                 flow_generator=flow_generator, device=device,
             )
         initial_metrics = {}
-        if not checkpoint and 0 in validation_steps:
+        if not checkpoint and resume_run is None and 0 in validation_steps:
             initial_metrics.update(validate(preparation_tokens=preparation_tokens))
             preparation_tokens = 0
-        if not checkpoint and 0 in sampling_steps:
+        if not checkpoint and resume_run is None and 0 in sampling_steps:
             initial_metrics.update(sample())
         if initial_metrics:
             logger.log(initial_metrics)
@@ -163,7 +217,7 @@ def run_training(config: TrainingConfig) -> RunProgress:
             training_samples,
             optimizer_batch_size=config.loop.optimizer_batch_size,
             min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
-            max_optimizer_steps=config.loop.max_optimizer_steps - progress.optimizer_step,
+            max_optimizer_steps=step_offset + config.loop.max_optimizer_steps - progress.optimizer_step,
         ):
             logger.begin_step()
             result = trainer.step(sequences)
@@ -178,16 +232,18 @@ def run_training(config: TrainingConfig) -> RunProgress:
             metrics = build_training_metrics(result, progress, config)
             metrics.update(hardware_metrics)
 
-            if progress.optimizer_step in validation_steps:
+            epoch_step = progress.optimizer_step - step_offset
+            if epoch_step in validation_steps:
                 metrics.update(validate(preparation_tokens=preparation_tokens))
                 preparation_tokens = 0
-            if progress.optimizer_step in sampling_steps:
+            if epoch_step in sampling_steps:
                 metrics.update(sample())
-            if progress.optimizer_step in checkpoint_steps:
+            if epoch_step in checkpoint_steps:
                 metrics.update(save(progress))
             logger.log(metrics)
 
-        expected = (config.loop.max_optimizer_steps, expected_sources, expected_targets)
+        expected = tuple(progress.epoch * count for count in
+                         (config.loop.max_optimizer_steps, expected_sources, expected_targets))
         actual = (progress.optimizer_step, progress.sources_seen, progress.targets_seen)
         if actual != expected:
             raise RuntimeError(f"training epoch counts differ from the recipe: expected {expected}, got {actual}")

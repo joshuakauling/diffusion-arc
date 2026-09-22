@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from copy import deepcopy
 import json
 import math
 from pathlib import Path
@@ -508,6 +509,12 @@ def _nullable(parser):
     return lambda value, *, name: None if value is None else parser(value, name=name)
 
 
+def _deployment_provider(value: Any, *, name: str) -> str:
+    if value not in ("runpod", "modal"):
+        raise ValueError(f"{name} must be runpod or modal")
+    return value
+
+
 def _names(allowed: str):
     """Allow explicit subsets of a finite metric vocabulary, never per-task keys."""
     allowed_names = frozenset(allowed.split())
@@ -534,7 +541,7 @@ _RECIPE_SCHEMA = {
     "config_type": "training_run", "schema_version": 1,
     "name": _string, "seed": _seed,
     "deployment": {
-        "provider": "runpod", "gpu_type": _string, "gpu_count": 1,
+        "provider": _deployment_provider, "gpu_type": _string, "gpu_count": 1,
         "output_directory": _nullable(_string),
     },
     "models": {
@@ -636,6 +643,7 @@ _RECIPE_SCHEMA = {
             "train/loss_t1 train/loss_uniform train/loss_demos_2 train/loss_demos_3 train/loss_demos_4 "
             "train/targets_t1 train/targets_uniform train/targets_demos_2 train/targets_demos_3 "
             "train/targets_demos_4 train/boundary_target_count train/learning_rate train/grad_norm "
+            "train/loss_high_noise train/loss_lower_noise train/targets_high_noise train/targets_lower_noise "
             "train/grad_clipped train/step_seconds train/targets_per_second train/targets "
             "progress/optimizer_step progress/epoch_fraction progress/targets_seen"
         ),
@@ -680,7 +688,23 @@ _RECIPE_SCHEMA = {
 
 def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingConfig:
     """Normalize a finite run directly through the shared component readers."""
-    recipe = _validate(payload, _RECIPE_SCHEMA, name="config")
+    schema = deepcopy(_RECIPE_SCHEMA)
+    if isinstance(payload.get("models"), Mapping) and payload["models"].get("initialization") == "transformer_weights":
+        schema["models"].update(
+            initialization="transformer_weights", transformer_checkpoint=_nullable(_string),
+            completed_epochs=_natural,
+            transformer_source={"repo_id": _string, "revision": _string, "subfolder": _string},
+        )
+        schema["logging"].update(parent_run_id=_string, resume_parent_run=bool)
+    if (isinstance(payload.get("flow"), Mapping)
+            and payload["flow"].get("time_distribution") == "uniform_with_fixed_endpoint_and_high_noise_counts"):
+        schema["flow"].update(
+            time_distribution="uniform_with_fixed_endpoint_and_high_noise_counts",
+            high_noise_min=_unit, high_noise_max=1.0,
+            high_noise_targets_per_full_batch=_natural,
+            high_noise_targets_in_final_batch=_natural,
+        )
+    recipe = _validate(payload, schema, name="config")
     models = _parse_models(recipe["models"], base_directory=config_path.parent)
     # Data preparation already froze the seeded task order for this epoch.
     data = _parse_data(recipe["data"], base_directory=config_path.parent,
@@ -690,12 +714,15 @@ def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingC
     device = _device(recipe["execution"]["device"])
     packing = FluxPackingPolicy(max_tokens=recipe["execution"]["flux_max_joint_tokens"])
     _validate_relationships(recipe)
-    for section, field in (
+    paths = [
         ("models", "nvarc_checkpoint"), ("models", "flux_checkpoint"), ("models", "resume_from"),
         ("deployment", "output_directory"), ("data", "task_index"),
         ("data", "source_archive"), ("data", "official_training_keys"),
         ("data", "prepared_split_directory"), ("validation", "bundle"),
-    ):
+    ]
+    if recipe["models"]["initialization"] == "transformer_weights":
+        paths.append(("models", "transformer_checkpoint"))
+    for section, field in paths:
         value = recipe[section][field]
         if value is not None:
             recipe[section][field] = _path(value, base_directory=config_path.parent, name=f"{section}.{field}")
@@ -729,6 +756,26 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
             raise ValueError(f"flow.{name} exceeds its batch target count")
     if final_count == batch and flow["endpoint_targets_in_final_batch"] != flow["endpoint_targets_per_full_batch"]:
         raise ValueError("a full final batch must use the full-batch endpoint count")
+    if "high_noise_min" in flow:
+        if not 0 < flow["high_noise_min"] < flow["high_noise_max"]:
+            raise ValueError("high-noise interval must lie strictly above zero and below one")
+        for suffix, count in (("per_full_batch", batch), ("in_final_batch", final_count)):
+            if flow[f"endpoint_targets_{suffix}"] + flow[f"high_noise_targets_{suffix}"] > count:
+                raise ValueError("endpoint and high-noise quotas exceed the batch target count")
+        if final_count == batch and flow["high_noise_targets_in_final_batch"] != flow["high_noise_targets_per_full_batch"]:
+            raise ValueError("a full final batch must use the full-batch high-noise count")
+    if recipe["models"]["initialization"] == "transformer_weights":
+        import re
+        source = recipe["models"]["transformer_source"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", source["repo_id"]):
+            raise ValueError("transformer_source.repo_id must be an owner/repository")
+        if not re.fullmatch(r"[0-9a-f]{40}", source["revision"]):
+            raise ValueError("transformer_source.revision must pin an immutable 40-character commit SHA")
+        if (not re.fullmatch(r"[A-Za-z0-9_./-]+", source["subfolder"])
+                or any(part in ("", ".", "..") for part in source["subfolder"].split("/"))):
+            raise ValueError("transformer_source.subfolder must be a safe relative path")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", recipe["logging"]["parent_run_id"]):
+            raise ValueError("logging.parent_run_id must identify a W&B run")
 
     weights = recipe["loss"]["region_weights"]
     if not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-12):
@@ -752,7 +799,11 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
     if len(set(sampling["seeds"])) != 2:
         raise ValueError("validation.sampling.seeds must be distinct")
     endpoint_fraction = flow["endpoint_targets_per_full_batch"] / batch
-    if not (math.isclose(loss["endpoint_weight"], endpoint_fraction, rel_tol=0, abs_tol=1e-12)
+    if "high_noise_min" in flow:
+        # Keep the original evaluation mixture when changing the training distribution.
+        if not math.isclose(loss["endpoint_weight"] + loss["uniform_proxy_weight"], 1.0, abs_tol=1e-12):
+            raise ValueError("validation.loss weights must sum to one")
+    elif not (math.isclose(loss["endpoint_weight"], endpoint_fraction, rel_tol=0, abs_tol=1e-12)
             and math.isclose(loss["uniform_proxy_weight"], 1 - endpoint_fraction, rel_tol=0, abs_tol=1e-12)):
         raise ValueError("validation.loss weights must match the full-batch flow mixture")
     for cadence in (loss, sampling, recipe["checkpointing"]):

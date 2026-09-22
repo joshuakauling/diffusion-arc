@@ -47,7 +47,7 @@ def checkpoint_identity(config: TrainingConfig, *, data_fingerprint: str, valida
             "validation_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def read_checkpoint(path: Path, config: TrainingConfig) -> Checkpoint:
+def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_state: bool = True) -> Checkpoint:
     """Reject incomplete inventories, incompatible recipes and invalid data cursors.
 
     File sizes detect missing/truncated writes, not arbitrary same-size bit rot.
@@ -57,8 +57,15 @@ def read_checkpoint(path: Path, config: TrainingConfig) -> Checkpoint:
     metadata = json.loads((path / "checkpoint.json").read_text())
     if metadata.get("schema_version") != 1:
         raise ValueError("unsupported checkpoint schema")
+    weights_only = metadata.get("weights_only", False)
+    if type(weights_only) is not bool:
+        raise ValueError("checkpoint weights_only must be boolean")
+    if weights_only and require_training_state:
+        raise ValueError("checkpoint retains model weights only; its training state was removed")
     inventory = metadata["files"]
-    required = {"training_state.pt", "transformer/config.json"}
+    required = {"transformer/config.json"} | (set() if weights_only else {"training_state.pt"})
+    if weights_only and "training_state.pt" in inventory:
+        raise ValueError("weights-only checkpoint must not inventory a training state")
     actual = {str(file.relative_to(path)) for file in path.rglob("*") if file.is_file()}
     if (not required <= inventory.keys() or actual != set(inventory) | {"checkpoint.json"}
             or not any(name.startswith("transformer/") and name.endswith(".safetensors") for name in inventory)):
@@ -75,9 +82,19 @@ def read_checkpoint(path: Path, config: TrainingConfig) -> Checkpoint:
         raise ValueError("checkpoint training recipe differs from this run")
     progress = metadata["progress"]
     step = progress["optimizer_step"]
-    if type(step) is not int or not 0 < step <= config.loop.max_optimizer_steps:
+    epoch = progress.get("epoch", 1)
+    if type(epoch) is not int or epoch < 1:
+        raise ValueError("checkpoint epoch must be a positive integer")
+    previous_steps = (epoch - 1) * config.loop.max_optimizer_steps
+    optimizer_start = progress.get("optimizer_start_step", 0)
+    expected_start = config.recipe["models"].get("completed_epochs", 0) * config.loop.max_optimizer_steps
+    if type(optimizer_start) is not int or optimizer_start != expected_start or optimizer_start > previous_steps:
+        raise ValueError("checkpoint optimizer start differs from its initialization recipe")
+    if type(step) is not int or not previous_steps < step <= previous_steps + config.loop.max_optimizer_steps:
         raise ValueError("checkpoint optimizer step is outside this epoch")
-    expected_targets = min(step * config.loop.optimizer_batch_size, config.recipe["loop"]["expected_target_count"])
+    epoch_targets = config.recipe["loop"]["expected_target_count"]
+    expected_targets = ((epoch - 1) * epoch_targets
+                        + min((step - previous_steps) * config.loop.optimizer_batch_size, epoch_targets))
     if (type(progress["targets_seen"]) is not int or type(progress["sources_seen"]) is not int
             or progress["targets_seen"] != expected_targets
             or progress["sources_seen"] * config.targets_per_sequence != expected_targets):
@@ -90,6 +107,63 @@ def read_checkpoint(path: Path, config: TrainingConfig) -> Checkpoint:
     if not run["id"].isascii() or not all(char.isalnum() or char in "-_" for char in run["id"]):
         raise ValueError("checkpoint W&B run ID is not a directory name")
     return Checkpoint(path, metadata)
+
+
+def remove_training_state(checkpoint: Checkpoint) -> int:
+    """Turn a verified full checkpoint into retained weights; caller must hold the workspace lock.
+
+    Move the state out of the inventory before publishing the weights-only marker.
+    If publication fails, restore it. Only delete the state after publication;
+    transformer files and their HF-compatible layout are never changed.
+    """
+    path = checkpoint.path
+    metadata_path = path / "checkpoint.json"
+    if json.loads(metadata_path.read_text()) != checkpoint.metadata:
+        raise ValueError("checkpoint metadata changed since verification")
+    if checkpoint.metadata.get("weights_only", False):
+        return 0
+    state = path / "training_state.pt"
+    size = checkpoint.metadata["files"][state.name]
+    if state.is_symlink() or state.stat().st_size != size:
+        raise ValueError("checkpoint training state changed since verification")
+    pending_state = path.parent / f".{path.name}-training-state-removal.pt"
+    pending_metadata = path.parent / f".{path.name}-weights-only.json"
+    if pending_state.exists() or pending_metadata.exists():
+        raise FileExistsError("an earlier checkpoint cleanup needs inspection")
+    metadata = dict(checkpoint.metadata, weights_only=True,
+                    files={name: size for name, size in checkpoint.metadata["files"].items()
+                           if name != "training_state.pt"})
+    try:
+        with pending_metadata.open("x") as handle:
+            json.dump(metadata, handle, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        state.rename(pending_state)
+        try:
+            pending_metadata.replace(metadata_path)
+        except BaseException:
+            pending_state.rename(state)
+            raise
+    finally:
+        pending_metadata.unlink(missing_ok=True)
+    pending_state.unlink()
+    return size
+
+
+def validate_epoch_continuation(checkpoint: Checkpoint, config: TrainingConfig) -> None:
+    """Allow a completed epoch to feed a new augmentation view of the same experiment."""
+    previous = json.loads(json.dumps(checkpoint.metadata["identity"]["recipe"]))
+    current = checkpoint_identity(config, data_fingerprint="", validation_manifest={})["recipe"]
+    if previous.pop("seed") == current.pop("seed"):
+        raise ValueError("the next epoch requires a different augmentation seed")
+    if previous["data"].pop("prepared_split_directory") == current["data"].pop("prepared_split_directory"):
+        raise ValueError("the next epoch requires a separate prepared data directory")
+    if previous != current:
+        raise ValueError("only the augmentation seed and prepared view may change between epochs")
+    progress = checkpoint.metadata["progress"]
+    if progress["optimizer_step"] != progress.get("epoch", 1) * config.loop.max_optimizer_steps:
+        raise ValueError("finish the previous epoch before starting the next one")
 
 
 def _capture_rng(flow_generator: torch.Generator, device: torch.device) -> dict:
@@ -126,7 +200,8 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
     state = torch.load(checkpoint.path / "training_state.pt", map_location="cpu", weights_only=True)
     if state["parameter_names"] != [name for name, _ in transformer.named_parameters()]:
         raise ValueError("checkpoint optimizer parameter order differs from the transformer")
-    step = checkpoint.metadata["progress"]["optimizer_step"]
+    progress = checkpoint.metadata["progress"]
+    step = progress["optimizer_step"] - progress.get("optimizer_start_step", 0)
     if state["scheduler"]["last_epoch"] != step:
         raise ValueError("checkpoint scheduler step differs from optimizer progress")
     for name in ("warmup_steps", "base_lrs"):
@@ -179,7 +254,7 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
         raise FileExistsError(f"checkpoint already exists: {destination}")
     if any(parameter.grad is not None for parameter in transformer.parameters()):
         raise ValueError("checkpoint requires cleared gradients at an optimizer boundary")
-    if scheduler.last_epoch != progress.optimizer_step:
+    if scheduler.last_epoch != progress.optimizer_step - progress.optimizer_start_step:
         raise ValueError("checkpoint scheduler is not at the completed optimizer step")
     rng = _capture_rng(flow_generator, device)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=directory))
@@ -230,7 +305,7 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
                 completed.append(path)
         for old in completed[:-keep_last]:
             # Refuse deletion of incompatible or incomplete saves, even inside our run directory.
-            saved = read_checkpoint(old, config)
+            saved = read_checkpoint(old, config, require_training_state=False)
             if saved.metadata["wandb_run"]["id"] != wandb_run["id"]:
                 raise ValueError("retention encountered a checkpoint from another run")
             shutil.rmtree(old)
@@ -239,4 +314,5 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
     return {name: values[name] for name in config.recipe["logging"]["checkpoint_metrics"]}
 
 
-__all__ = ["Checkpoint", "checkpoint_identity", "read_checkpoint", "restore_training_state", "save_checkpoint"]
+__all__ = ["Checkpoint", "checkpoint_identity", "read_checkpoint", "restore_training_state", "save_checkpoint",
+           "validate_epoch_continuation", "remove_training_state"]

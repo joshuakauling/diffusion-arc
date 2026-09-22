@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "training_config": "../training/benchmarks/single_gpu_b3.json",
+  "checkpoints": {
+    "step-004530": {
+      "repo_id": "flipchip167/diffusion-arc-weights",
+      "revision": "4a6603be840aaa7a3d29e84066d75f69a29116d1",
+      "subfolder": "m7y2mfn2/step-004530/transformer"
+    },
+    "step-004830": {
+      "repo_id": "flipchip167/diffusion-arc-weights",
+      "revision": "66698871c85ce7cbab84ddbc3ffdd4c458a794c7",
+      "subfolder": "m7y2mfn2/step-004830/transformer"
+    }
+  },
+  "task_pool": "validation",
+  "task_count": 100,
+  "split_seed": 167,
+  "generation_steps": [50, 4],
+  "sampling_seeds": [20167, 20168],
+  "max_runtime_seconds": 1200,
+  "max_setup_seconds": 1200,
+  "max_checkpoint_gib": 24
+}

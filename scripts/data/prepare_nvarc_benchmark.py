@@ -73,6 +73,44 @@ def _load_index(path: Path, official_keys: set[str]) -> list[dict]:
     return [records[task_id] for task_id in sorted(records)]
 
 
+def source_input_hashes(source_path: Path, index_path: Path, official_keys_path: Path) -> dict[str, str]:
+    """Identify inputs; an extracted tree is covered by the index's per-task content hashes."""
+    hashes = {"task_index": sha256_file(index_path),
+              "official_training_keys": sha256_file(official_keys_path)}
+    if not source_path.is_dir():
+        hashes["source_archive"] = sha256_file(source_path)
+    return hashes
+
+
+def _task_contents(source_path: Path, records: Mapping[str, dict]):
+    """Read only indexed regular files from a tar archive or its extracted directory."""
+    if source_path.is_dir():
+        root = source_path.resolve()
+        for name in records:
+            path = root / name
+            if path.is_symlink() or not path.resolve().is_relative_to(root):
+                raise ValueError(f"Task path escapes the source directory or is a symlink: {name}")
+            if not path.is_file():
+                raise FileNotFoundError(f"Selected task file missing: {name}")
+            yield name, path.read_bytes()
+        return
+    remaining = set(records)
+    # Read archive members as bytes; never extract arbitrary paths or links.
+    with tarfile.open(source_path, "r|gz") as archive:
+        for member in archive:
+            if member.name not in remaining:
+                continue
+            if not member.isfile():
+                raise ValueError(f"Expected a regular task file: {member.name}")
+            with archive.extractfile(member) as handle:
+                yield member.name, handle.read()
+            remaining.remove(member.name)
+            if not remaining:
+                break
+    if remaining:
+        raise FileNotFoundError(f"Selected task files missing from archive: {sorted(remaining)}")
+
+
 def prepare_benchmark(
     *,
     source_root: Path = DEFAULT_SOURCE_ROOT,
@@ -106,7 +144,7 @@ def prepare_nvarc_bundle(
     split_name: str = "train",
     preparation_metadata: Mapping[str, object] | None = None,
 ) -> dict:
-    """Build a new bundle atomically, preserving all existing output directories."""
+    """Build a bundle from a tar archive or extracted tree, validating each selected task."""
 
     if isinstance(source_count, bool) or not isinstance(source_count, int) or source_count <= 0:
         raise ValueError("source_count must be a positive integer")
@@ -130,44 +168,29 @@ def prepare_nvarc_bundle(
     # derives an independent augmentation RNG from the seed and each task ID.
     Random(seed).shuffle(records)
     selected = records[:source_count]
-    remaining = {record["archive_path"]: record for record in selected}
-    input_hashes = {
-        role if require_full_pool else path.name: sha256_file(path)
-        for role, path in (
-            ("source_archive", archive_path), ("task_index", index_path),
-            ("official_training_keys", official_keys_path),
-        )
-    }
+    selected_by_path = {record["archive_path"]: record for record in selected}
+    input_hashes = source_input_hashes(archive_path, index_path, official_keys_path)
+    if not require_full_pool:
+        paths = {"source_archive": archive_path, "task_index": index_path,
+                 "official_training_keys": official_keys_path}
+        input_hashes = {paths[role].name: digest for role, digest in input_hashes.items()}
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=f".{output_directory.name}-", dir=output_directory.parent) as temporary:
         bundle = Path(temporary) / "bundle"
         raw_directory = bundle / "raw" / DERIVED_GROUP / "training"
         converted_hashes = {}
         print(f"Reading {source_count} selected tasks from {archive_path.name}", flush=True)
-        # Read members as bytes, never extract arbitrary archive paths or links.
-        with tarfile.open(archive_path, "r|gz") as archive:
-            for member in archive:
-                record = remaining.get(member.name)
-                if record is None:
-                    continue
-                if not member.isfile():
-                    raise ValueError(f"Expected a regular task file: {member.name}")
-                with archive.extractfile(member) as handle:
-                    content = handle.read()
-                if hashlib.sha256(content).hexdigest() != record["sha256"]:
-                    raise ValueError(f"Task checksum mismatch: {member.name}")
-                pairs = json.loads(content)
-                if not isinstance(pairs, list) or len(pairs) != record["pair_count"]:
-                    raise ValueError(f"Task pair bank differs from its index: {member.name}")
-                destination = raw_directory / f"{record['task_key']}.json"
-                # These are synthetic labelled pair banks, not evaluation splits.
-                _write_json(destination, {"train": pairs, "test": []})
-                converted_hashes[record["task_key"]] = sha256_file(destination)
-                del remaining[member.name]
-                if not remaining:
-                    break
-        if remaining:
-            raise FileNotFoundError(f"Selected task files missing from archive: {sorted(remaining)}")
+        for name, content in _task_contents(archive_path, selected_by_path):
+            record = selected_by_path[name]
+            if hashlib.sha256(content).hexdigest() != record["sha256"]:
+                raise ValueError(f"Task checksum mismatch: {name}")
+            pairs = json.loads(content)
+            if not isinstance(pairs, list) or len(pairs) != record["pair_count"]:
+                raise ValueError(f"Task pair bank differs from its index: {name}")
+            destination = raw_directory / f"{record['task_key']}.json"
+            # These are synthetic labelled pair banks, not evaluation splits.
+            _write_json(destination, {"train": pairs, "test": []})
+            converted_hashes[record["task_key"]] = sha256_file(destination)
 
         split = bundle / "splits" / split_name
         view = {
@@ -215,6 +238,7 @@ def prepare_nvarc_bundle(
             "preparation_script_sha256": sha256_file(Path(__file__)),
             "python": sys.version,
             "inputs_sha256": input_hashes,
+            "source_format": "directory" if archive_path.is_dir() else "tar.gz",
             "keys_sha256": sha256_file(split / f"augmented_keys/{view_name}.json"),
             "sources": [{**record, "converted_sha256": converted_hashes[record["task_key"]]}
                         for record in selected],

@@ -79,30 +79,57 @@ class ValidationTarget:
         validate_arc_grid(self.expected_grid)
 
 
-def validate_validation_bundle(bundle: Path, *, split_seed: int = 167) -> dict:
-    """Verify the frozen identities and payload hashes without reading test payloads."""
+def validate_validation_bundle(
+    bundle: Path, *, split_seed: int = 167, verify_payloads: bool = True,
+) -> dict:
+    """Check frozen split metadata, optionally auditing validation payloads.
+
+    Prepared bundles can skip the directory scan and payload reads with
+    ``verify_payloads=False``; their recorded hashes and query counts are trusted.
+    """
 
     validate_sampling_seed(split_seed)
+    if type(verify_payloads) is not bool:
+        raise ValueError("verify_payloads must be a boolean")
     manifest = json.loads((bundle / "manifest.json").read_text())
+    if not isinstance(manifest, dict):
+        raise ValueError("validation bundle manifest must be an object")
+    if (type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1
+            or manifest.get("dataset") != "ARC-AGI-1" or manifest.get("release") != "v1.0.2"):
+        raise ValueError("validation bundle has an unsupported manifest schema or dataset release")
     if (manifest.get("archive_sha256") != ARC_AGI_1_ARCHIVE_SHA256
             or type(manifest.get("split_seed")) is not int or manifest["split_seed"] != split_seed):
         raise ValueError("validation bundle has an unexpected source or split seed")
-    validation = manifest["validation_task_ids"]
-    sampling = manifest["sampling_task_ids"]
-    final_test = manifest["final_test_task_ids"]
+    validation = manifest.get("validation_task_ids")
+    sampling = manifest.get("sampling_task_ids")
+    final_test = manifest.get("final_test_task_ids")
+    if any(not isinstance(ids, list) for ids in (validation, sampling, final_test)):
+        raise ValueError("validation, sampling, and final-test task identities must be lists")
+    if any(not isinstance(key, str) or len(key) != 8 or any(c not in "0123456789abcdef" for c in key)
+           for key in validation + sampling + final_test):
+        raise ValueError("task identities must be eight lowercase hexadecimal characters")
     if len(validation) != 100 or len(final_test) != 300 or len(set(validation + final_test)) != 400:
         raise ValueError("the split must contain 100/300 disjoint unique tasks")
     if sampling != validation[:32]:
         raise ValueError("sampling must use the fixed first 32 validation tasks")
-    if any(not isinstance(key, str) or len(key) != 8 or any(c not in "0123456789abcdef" for c in key)
-           for key in validation + final_test):
-        raise ValueError("task identities must be eight lowercase hexadecimal characters")
     ordered = sorted(validation + final_test)
     random.Random(manifest["split_seed"]).shuffle(ordered)
     if ordered != validation + final_test:
         raise ValueError("task partition differs from the seeded split")
-    if set(manifest["task_sha256"]) != set(validation):
+    hashes = manifest.get("task_sha256")
+    if not isinstance(hashes, dict) or set(hashes) != set(validation):
         raise ValueError("payload hash inventory must match validation tasks")
+    if any(not isinstance(digest, str) or len(digest) != 64
+           or any(c not in "0123456789abcdef" for c in digest) for digest in hashes.values()):
+        raise ValueError("payload hashes must be lowercase SHA256 digests")
+    validation_count = manifest.get("validation_output_count")
+    sampling_count = manifest.get("sampling_output_count")
+    if (type(validation_count) is not int or type(sampling_count) is not int
+            or sampling_count < len(sampling)
+            or validation_count - sampling_count < len(validation) - len(sampling)):
+        raise ValueError("query counts must cover every validation and sampling task")
+    if not verify_payloads:
+        return manifest
     if {p.name for p in (bundle / "tasks").iterdir()} != {f"{key}.json" for key in validation}:
         raise ValueError("only the 100 validation payloads may be mounted")
     counts = {}

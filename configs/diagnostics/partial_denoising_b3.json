@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "training_config": "../training/benchmarks/single_gpu_b3.json",
+  "checkpoint": {
+    "repo_id": "flipchip167/diffusion-arc-weights",
+    "revision": "main",
+    "subfolder": "m7y2mfn2/step-001812/transformer"
+  },
+  "task_count": 8,
+  "split_seed": 167,
+  "start_times": [1.0, 0.9, 0.7, 0.5, 0.3, 0.1],
+  "steps_per_unit": 40,
+  "sampling_seeds": [20167, 20168],
+  "max_runtime_seconds": 900,
+  "max_setup_seconds": 1800,
+  "max_checkpoint_gib": 24
+}

@@ -355,7 +355,7 @@ class SingleGpuSetupTests(unittest.TestCase):
             trust_remote_code=False,
             use_safetensors=True,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map={"": torch.device("cpu")},
             attn_implementation="nvarc_fa3",
         )

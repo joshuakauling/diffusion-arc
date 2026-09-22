@@ -6,14 +6,16 @@ import json
 from pathlib import Path
 from random import Random
 import tempfile
+import tarfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from diffusion_arc.arc_data import ArcGeometry, parse_augmentation_key
 from diffusion_arc.training.data import ArcTrainingDataset
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.data import build_dataloader
-from scripts.data.prepare_training_data import prepare_training_data, sha256_file
+from scripts.data.prepare_training_data import prepare_training_data, prepare_training_view, sha256_file
 from tests.arc_data.test_nvarc_benchmark import DERIVED_GROUP, _fixture, _write_index
 from tests.training.test_data import make_nvarc_tokenizer, write_json
 
@@ -40,6 +42,143 @@ def _config(root: Path, source: Path, *, name: str = "epoch", count: int = 26, s
 
 
 class TrainingDataPreparationTest(unittest.TestCase):
+    def test_metadata_only_next_view_matches_full_preparation_without_reading_tasks(self) -> None:
+        for pair_count, seed, geometry, view_name in (
+            (30, 168, "uniform", "train"), (5, 999, "uniform", "augmented"),
+            (30, 168, "cycle", "train"),
+        ):
+            with self.subTest(pair_count=pair_count, seed=seed, geometry=geometry), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                _fixture(source, task_count=26, pair_count=pair_count, large=pair_count == 5)
+                config_path = root / "recipe.json"
+                write_json(config_path, {"fixture": True})
+                parent = _config(root, source, name="parent")
+                prepare_training_data(parent, config_path=config_path)
+                original = {path: path.read_bytes() for path in (root / "parent").rglob("*.json")}
+                expected = _config(root, source, name="expected", seed=seed)
+                expected.recipe["data"]["geometry_sampling"] = geometry
+                expected.data.view_name = view_name
+                expected_manifest = prepare_training_data(expected, config_path=config_path)
+                actual = _config(root, source, name="actual", seed=seed)
+                actual.recipe["data"]["geometry_sampling"] = geometry
+                actual.data.view_name = view_name
+                actual.path = config_path
+                original_open = Path.open
+                original_stat = Path.stat
+
+                def reject_task_open(path, *args, **kwargs):
+                    if "/raw/" in str(path) or path.name == "nvarc-all-classified.tar.gz":
+                        raise AssertionError(f"Continuation reopened a task or archive: {path}")
+                    return original_open(path, *args, **kwargs)
+
+                def reject_task_stat(path, *args, **kwargs):
+                    if "/raw/" in str(path) and path.suffix == ".json":
+                        raise AssertionError(f"Continuation checked a task file: {path}")
+                    return original_stat(path, *args, **kwargs)
+
+                with patch.object(Path, "open", reject_task_open), patch.object(Path, "stat", reject_task_stat):
+                    actual_manifest = prepare_training_view(parent, actual)
+                self.assertEqual(actual_manifest["keys_sha256"], expected_manifest["keys_sha256"])
+                self.assertEqual(actual_manifest["sources"], expected_manifest["sources"])
+                self.assertEqual(actual_manifest["inputs_sha256"], expected_manifest["inputs_sha256"])
+                self.assertEqual(actual_manifest["target_count"], expected_manifest["target_count"])
+                for filename in ("config.json", "train.json", "validation.json", f"augmented_keys/{view_name}.json"):
+                    self.assertEqual((actual.data.split_directory / filename).read_bytes(),
+                                     (expected.data.split_directory / filename).read_bytes())
+                self.assertTrue((root / "actual/raw").is_symlink())
+                self.assertEqual((root / "actual/raw").resolve(), (root / "parent/raw").resolve())
+                self.assertEqual({path: path.read_bytes() for path in original}, original)
+                with self.assertRaises(FileExistsError):
+                    prepare_training_view(parent, actual)
+
+                # A later epoch points directly to the original raw directory, not a chain of views.
+                later = _config(root, source, name="later", seed=seed + 1)
+                later.path = config_path
+                prepare_training_view(actual, later)
+                self.assertEqual((root / "later/raw").readlink(), (root / "parent/raw").resolve())
+
+    def test_metadata_only_view_rejects_incompatible_limits_and_nontraining_parents(self) -> None:
+        for change in ("cell_limit", "parent", "pool_count"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                _fixture(source, task_count=26)
+                config_path = root / "recipe.json"
+                write_json(config_path, {"fixture": True})
+                parent = _config(root, source, name="parent")
+                prepare_training_data(parent, config_path=config_path)
+                if change == "cell_limit":
+                    path = parent.data.split_directory / "config.json"
+                    payload = json.loads(path.read_text())
+                    payload["limits"]["max_cells"] = 5000
+                else:
+                    path = parent.data.split_directory / "manifest.json"
+                    payload = json.loads(path.read_text())
+                    if change == "parent":
+                        payload["sources"][0]["parent2_arc_agi_1_split"] = "evaluation"
+                    else:
+                        payload["eligible_task_count"] += 1
+                write_json(path, payload)
+                config = _config(root, source, name="next", seed=168)
+                config.path = config_path
+                with self.assertRaises(ValueError):
+                    prepare_training_view(parent, config)
+                self.assertFalse((root / "next").exists())
+
+    def test_extracted_tree_matches_archive_tasks_order_and_augmentations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            _fixture(source, task_count=26)
+            config_path = root / "recipe.json"
+            write_json(config_path, {"fixture": True})
+            config = _config(root, source, name="archive")
+            archived = prepare_training_data(config, config_path=config_path)
+            tree = source / "extracted"
+            with tarfile.open(config.recipe["data"]["source_archive"]) as archive:
+                archive.extractall(tree, filter="data")
+            config = _config(root, source, name="directory")
+            config.recipe["data"]["source_archive"] = tree
+            extracted = prepare_training_data(config, config_path=config_path)
+            self.assertEqual(extracted["keys_sha256"], archived["keys_sha256"])
+            self.assertEqual(extracted["sources"], archived["sources"])
+            self.assertEqual(extracted["target_count"], archived["target_count"])
+            self.assertEqual(extracted["source_format"], "directory")
+            self.assertNotIn("source_archive", extracted["inputs_sha256"])
+            self.assertEqual(extracted["inputs_sha256"]["task_index"], archived["inputs_sha256"]["task_index"])
+            for path in (root / "archive/raw").rglob("*.json"):
+                self.assertEqual(path.read_bytes(), (root / "directory/raw" / path.relative_to(root / "archive/raw")).read_bytes())
+
+    def test_extracted_tree_rejects_missing_corrupt_and_escaping_tasks(self) -> None:
+        for error_case in ("missing", "checksum", "symlink", "parent_symlink"):
+            with self.subTest(error_case=error_case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"
+                records = _fixture(source, task_count=26)
+                tree = source / "extracted"
+                with tarfile.open(source / "nvarc-all-classified.tar.gz") as archive:
+                    archive.extractall(tree, filter="data")
+                task = tree / records[0]["archive_path"]
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / task.name).write_bytes(task.read_bytes())
+                task.unlink()
+                if error_case == "checksum":
+                    task.write_text("[]")
+                elif error_case == "symlink":
+                    task.symlink_to(outside / task.name)
+                elif error_case == "parent_symlink":
+                    task.parent.rmdir()
+                    task.parent.symlink_to(outside, target_is_directory=True)
+                config = _config(root, source)
+                config.recipe["data"]["source_archive"] = tree
+                config_path = root / "recipe.json"
+                write_json(config_path, {"fixture": True})
+                with self.assertRaises((ValueError, FileNotFoundError)):
+                    prepare_training_data(config, config_path=config_path)
+                self.assertFalse((root / "epoch").exists())
+
     def test_run_config_preparation_and_b3_loader_preserve_order_and_tail(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as temporary:

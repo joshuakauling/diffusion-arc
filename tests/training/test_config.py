@@ -320,6 +320,28 @@ RECIPE = ROOT / "configs/training/arc_agi_1_epoch.json"
 
 
 class TrainingRunConfigTests(unittest.TestCase):
+    def test_high_noise_recipe_preserves_evaluation_and_rejects_invalid_initialization(self):
+        payload = json.loads((ROOT / "configs/training/arc_agi_1_epoch3_high_noise.json").read_text())
+        config = self.load(payload)
+        self.assertEqual((config.seed, config.endpoint_target_count), (169, 21735))
+        self.assertEqual(config.recipe["validation"]["loss"], load_training_config(RECIPE).recipe["validation"]["loss"])
+        self.assertEqual(config.sampling_steps, (0, 300, 600, 906))
+        self.assertEqual(config.recipe["models"]["completed_epochs"], 2)
+        changes = (
+            lambda p: p["flow"].update(high_noise_targets_per_full_batch=25),
+            lambda p: p["flow"].update(high_noise_targets_in_final_batch=16),
+            lambda p: p["flow"].update(high_noise_min=1),
+            lambda p: p["models"]["transformer_source"].update(revision="main"),
+            lambda p: p["models"]["transformer_source"].update(subfolder="../transformer"),
+            lambda p: p["models"].update(completed_epochs=-1),
+            lambda p: p["validation"]["loss"].update(endpoint_weight=0.5),
+        )
+        for change in changes:
+            altered = copy.deepcopy(payload)
+            change(altered)
+            with self.assertRaises(ValueError):
+                self.load(altered)
+
     def setUp(self):
         self.payload = json.loads(RECIPE.read_text())
         self.temp = tempfile.TemporaryDirectory()

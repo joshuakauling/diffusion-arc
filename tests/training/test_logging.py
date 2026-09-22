@@ -2,11 +2,13 @@
 
 from contextlib import ExitStack
 from dataclasses import replace
+import ctypes
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from uuid import UUID
 from unittest.mock import Mock, patch
 
 import torch
@@ -36,6 +38,17 @@ class _Run:
 
 
 class LoggingTests(unittest.TestCase):
+    def test_high_noise_recipe_does_not_mislabel_nonuniform_draws_as_uniform(self):
+        config = load_training_config(RECIPE.with_name("arc_agi_1_epoch3_high_noise.json"))
+        targets = tuple(replace(target, timestep=t) for target, t in zip(self.result.targets, (1., .95, .5)))
+        metrics = logging.build_training_metrics(replace(self.result, targets=targets), self.progress, config)
+        self.assertEqual(metrics["train/targets_high_noise"], 1)
+        self.assertEqual(metrics["train/targets_lower_noise"], 1)
+        self.assertEqual(metrics["train/loss_high_noise"], 6)
+        self.assertEqual(metrics["train/loss_lower_noise"], 9)
+        self.assertNotIn("train/loss_uniform", metrics)
+        self.assertNotIn("train/targets_uniform", metrics)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -353,6 +366,27 @@ class LoggingTests(unittest.TestCase):
             self.process.cpu_percent.assert_not_called()
             for mock in self.cuda.values():
                 mock.assert_not_called()
+
+    def test_cuda_uuid_objects_are_converted_for_nvml_without_changing_device(self):
+        raw = "01234567-89ab-cdef-0123-456789abcdef"
+        for cuda_uuid, expected in ((UUID(raw), "GPU-" + raw), (raw, "GPU-" + raw),
+                                    ("GPU-" + raw, "GPU-" + raw), ("MIG-" + raw, "MIG-" + raw)):
+            with self.subTest(cuda_uuid=cuda_uuid), ExitStack() as stack:
+                self.fake_runtime(stack)
+                self.cuda["get_device_properties"].return_value = SimpleNamespace(uuid=cuda_uuid)
+
+                def lookup(value):
+                    # Match pynvml's string encoding and ctypes boundary, which rejects UUID objects.
+                    encoded = value.encode("utf-8") if isinstance(value, str) else value
+                    self.assertEqual(ctypes.c_char_p(encoded).value, expected.encode())
+                    return "physical-gpu-handle"
+
+                self.nvml.nvmlDeviceGetHandleByUUID.side_effect = lookup
+                device = torch.device("cuda:1")
+                with logging.WandbLogger(self.config, device=device):
+                    self.cuda["get_device_properties"].assert_called_once_with(device)
+                    self.nvml.nvmlDeviceGetPowerUsage.assert_called_once_with("physical-gpu-handle")
+                self.nvml.nvmlShutdown.assert_called_once()
 
     def test_training_error_finishes_run_as_failed_without_suppressing_it(self):
         with ExitStack() as stack:

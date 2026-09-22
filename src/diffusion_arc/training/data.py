@@ -48,10 +48,11 @@ from .config import TrainingConfig
 
 
 class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
-    """Materialize configured keys and fingerprint their validated source data.
+    """Load view metadata and read each source task when its item is requested.
 
-    ``fingerprint`` identifies the ordered view and source contents at setup;
-    training source files must remain unchanged while the loader is consumed.
+    Prepared bundles use the source hashes recorded in their manifest. Other
+    layouts retain the original source preflight and semantic fingerprint.
+    Source files and preparation metadata must remain unchanged during a run.
     """
 
     def __init__(
@@ -98,25 +99,7 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
                 f"{view.task_split!r} task split: {outside_split!r}"
             )
 
-        referenced_task_ids = tuple(dict.fromkeys(key.task_id for key in keys))
-        missing_task_ids = tuple(
-            task_id
-            for task_id in referenced_task_ids
-            if not (source_directory / f"{task_id}.json").is_file()
-        )
-        if missing_task_ids:
-            raise FileNotFoundError(
-                f"source task files do not exist under {source_directory}: "
-                f"{missing_task_ids!r}"
-            )
-
-        tasks = {
-            task_id: load_training_task(source_directory / f"{task_id}.json")
-            for task_id in referenced_task_ids
-        }
         for key in keys:
-            task = tasks[key.task_id]
-            validate_augmentation_for_task(key, task)
             if len(key.augmentation.pair_indices) < 2:
                 raise ValueError(
                     f"training key {key!s} must reference at least two pairs"
@@ -128,9 +111,7 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
         self.max_tokens = config.max_tokens
         self.keys = keys
         self._tokenizer = tokenizer
-        # Bind resumes to the ordered view and every pair in its source tasks.
-        # Tasks are already loaded for preflight; hashing adds no source reads.
-        identity = {
+        self._identity = {
             "dataset": config.dataset,
             "source_split": config.source_split,
             "palette": config.palette,
@@ -138,16 +119,67 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
             "view_name": view.name,
             "keys": serialized_keys,
         }
+        self._legacy_fingerprint: str | None = None
+        manifest_path = split_root / "manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("schema_version") != 1 or manifest.get("dataset") != config.dataset:
+                raise ValueError("prepared training manifest does not match its split configuration")
+            sources = {record["task_key"]: record["converted_sha256"]
+                       for record in manifest["sources"]}
+            if len(sources) != len(manifest["sources"]):
+                raise ValueError("prepared training manifest contains duplicate source tasks")
+            referenced_task_ids = sorted({key.task_id for key in keys})
+            if not set(referenced_task_ids).issubset(sources):
+                raise ValueError("prepared training manifest is missing referenced source tasks")
+            if hashlib.sha256(key_path.read_bytes()).hexdigest() != manifest["keys_sha256"]:
+                raise ValueError("prepared training keys differ from their manifest")
+            identity = {
+                **self._identity,
+                "source_identity": "prepared_sha256_v1",
+                "sources": [(task_id, sources[task_id]) for task_id in referenced_task_ids],
+            }
+            self.fingerprint = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        else:
+            self.fingerprint = self._source_fingerprint()
+
+    def fingerprint_for(self, expected: str) -> str:
+        """Check an old checkpoint identity only when metadata does not match.
+
+        Legacy checkpoints hashed parsed source tasks. Computing that identity
+        requires one full source read; ordinary manifest-based resumes do not.
+        The caller must still compare the returned fingerprint with ``expected``.
+        """
+        if expected == self.fingerprint:
+            return self.fingerprint
+        if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+            return self.fingerprint
+        if self._legacy_fingerprint is None:
+            print("Checking legacy checkpoint data identity; reading source tasks once.", flush=True)
+        return self._source_fingerprint()
+
+    def _source_fingerprint(self) -> str:
+        """Compute and cache the original semantic identity for legacy resumes."""
+        if self._legacy_fingerprint is not None:
+            return self._legacy_fingerprint
+        tasks = {
+            task_id: load_training_task(self.source_directory / f"{task_id}.json")
+            for task_id in sorted({key.task_id for key in self.keys})
+        }
+        for key in self.keys:
+            validate_augmentation_for_task(key, tasks[key.task_id])
         digest = hashlib.sha256(
-            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(self._identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
-        for task_id in sorted(tasks):
+        for task in tasks.values():
             digest.update(b"\n")
             digest.update(
-                json.dumps(asdict(tasks[task_id]), sort_keys=True,
-                           separators=(",", ":")).encode("utf-8")
+                json.dumps(asdict(task), sort_keys=True, separators=(",", ":")).encode("utf-8")
             )
-        self.fingerprint = digest.hexdigest()
+        self._legacy_fingerprint = digest.hexdigest()
+        return self._legacy_fingerprint
 
     def __len__(self) -> int:
         return len(self.keys)
