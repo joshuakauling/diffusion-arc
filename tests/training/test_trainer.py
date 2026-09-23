@@ -155,7 +155,7 @@ class RecordingLoss:
     def __call__(self, inputs, flow, *, transformer, max_joint_tokens, **kwargs):
         self.owners.extend(weakref.ref(item.nvarc_sequence_state) for item in inputs)
         build_flux_microbatch(inputs, max_joint_tokens=max_joint_tokens)
-        values = transformer.weight * torch.stack(tuple(item.clean_latent[0, 0] for item in inputs))
+        values = transformer.transformer.weight * torch.stack(tuple(item.clean_latent[0, 0] for item in inputs))
         return LossResult(values.mean(), values)
 
 
@@ -168,6 +168,7 @@ class PackedTrainerTests(unittest.TestCase):
             module.register_forward_pre_hook(lambda *_args: self.assertIsNone(model.weight.grad))
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         trainer = make_trainer(models, optimizer, nvarc_max_tokens=4, vae_microbatch_size=2)
+        self.assertTrue(trainer.completed_update)
         self.assertIsNone(model.weight.grad)
         self.assertTrue(model.training)
         self.assertFalse(models.nvarc_encoder.training)
@@ -176,6 +177,7 @@ class PackedTrainerTests(unittest.TestCase):
         with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
              patch('diffusion_arc.training.trainer.compute_flux_microbatch_loss', new=compute):
             first = trainer.step((_sample(2), _sample(1)))
+            self.assertTrue(trainer.completed_update)
             self.assertIsNone(model.weight.grad)
             self.assertAlmostEqual(float(model.weight.detach()), 0.8)
             second = trainer.step((_sample(2),))
@@ -248,6 +250,7 @@ class PackedTrainerTests(unittest.TestCase):
                     with self.assertRaisesRegex(error, 'non-finite'):
                         trainer.step((sample,))
                 self.assertEqual(float(model.weight.detach()), 1.0)
+                self.assertFalse(trainer.completed_update)
                 self.assertEqual(scheduler.last_epoch, 0)
                 if failure == 'loss':
                     self.assertEqual(len(calls), 2)
@@ -264,6 +267,33 @@ class PackedTrainerTests(unittest.TestCase):
         self.assertEqual(models.vae_encoder.calls, [])
         self.assertEqual(float(model.weight.detach()), 1.0)
         self.assertIsNone(model.weight.grad)
+
+    def test_single_execution_never_requires_a_process_group(self):
+        model = ScalarTransformer()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        with patch('torch.distributed.get_world_size', side_effect=AssertionError('process group used')), \
+             patch('torch.distributed.all_reduce', side_effect=AssertionError('collective used')), \
+             patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
+             patch('diffusion_arc.training.trainer.compute_flux_microbatch_loss', new=RecordingLoss()):
+            trainer = make_trainer(models_for(model), optimizer)
+            result = trainer.step((_sample(2),))
+        self.assertEqual(result.loss, 1.5)
+        self.assertAlmostEqual(float(model.weight.detach()), 0.85, places=6)
+
+    def test_completed_update_waits_for_scheduler_and_gradient_cleanup(self):
+        for failure in ('scheduler', 'cleanup'):
+            with self.subTest(failure=failure):
+                model = ScalarTransformer()
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+                scheduler = LinearWarmupConstantLR(optimizer, warmup_steps=2)
+                trainer = make_trainer(models_for(model), optimizer, scheduler=scheduler)
+                owner, method = (scheduler, 'step') if failure == 'scheduler' else (optimizer, 'zero_grad')
+                with patch.object(owner, method, side_effect=RuntimeError('update incomplete')), \
+                     patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
+                     patch('diffusion_arc.training.trainer.compute_flux_microbatch_loss', new=RecordingLoss()):
+                    with self.assertRaisesRegex(RuntimeError, 'update incomplete'):
+                        trainer.step((_sample(2),))
+                self.assertFalse(trainer.completed_update)
 
     def test_constructor_rejects_invalid_component_ownership_and_execution_limits(self):
         model = ScalarTransformer()
@@ -300,7 +330,7 @@ class PackedTrainerTests(unittest.TestCase):
                     loss_function=RegionVelocityLoss(RegionLossWeights()) if regional else velocity_mse,
                 )
                 with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
-                     patch('diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
+                     patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
                     metrics = [trainer.step(_samples(3)[:2]), trainer.step(_samples(3)[2:])]
                 self.assertEqual([sum(t.timestep == 1 for t in m.targets) for m in metrics],
                                  [2,1] if endpoint else [0,0])
@@ -352,7 +382,7 @@ class TrainingRecipeTests(unittest.TestCase):
         )
         with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
              patch('diffusion_arc.training.trainer.compute_flux_microbatch_loss', side_effect=record_loss), \
-             patch('diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
+             patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
             for sources in (self.samples[:16], self.samples[16:]):
                 step = trainer.step(sources)
                 metrics.append(step)

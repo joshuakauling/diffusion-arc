@@ -28,6 +28,8 @@ DEFAULT_CONFIG = ROOT / "configs/training/arc_agi_1_epoch3_high_noise.json"
 
 def check_parent_run(api, config) -> dict:
     """Read parent identity/counters and reject stale history before changing W&B."""
+    from diffusion_arc.training.run.checkpointing import normalize_checkpoint_recipe
+
     options = config.recipe["logging"]
     entity = options["entity"] or api.default_entity
     run = api.run(f"{entity}/{options['project']}/{options['parent_run_id']}")
@@ -38,11 +40,18 @@ def check_parent_run(api, config) -> dict:
         raise ValueError(f"Parent W&B history must end at step {expected_step}; found {run.lastHistoryStep}")
     # The source experiment's validation split and scientific settings must be retained.
     recipe = config.recipe_dict()
+    previous_recipe = normalize_checkpoint_recipe(dict(run.config))
     for key in ("loop", "loss", "optimizer", "scheduler", "execution", "canvas", "validation"):
-        previous, current = dict(run.config[key]), dict(recipe[key])
+        previous, current = dict(previous_recipe[key]), dict(recipe[key])
         if key == "validation":
             previous.pop("bundle")
             current.pop("bundle")
+        if key == "execution":
+            # A weights-only stage creates a new optimizer and may choose a new
+            # execution/packing version, recorded in that epoch's current recipe.
+            for name in ("distributed_strategy", "flux_packing_algorithm", "flux_max_spread_tokens"):
+                previous.pop(name)
+                current.pop(name)
         if previous != current:
             raise ValueError(f"Parent W&B {key} differs from the agreed recipe")
     counters = {}
@@ -170,6 +179,8 @@ def main(argv=None) -> int:
         pod.write_json(startup_path, {
             "transformer": str(transformer), "transformer_source": source,
             "parent_run": parent, "optimizer_reset": True, "output_repo": output_repo,
+            "execution": {"strategy": config.recipe["execution"]["distributed_strategy"],
+                          "gpu_count": config.recipe["deployment"]["gpu_count"]},
             "frozen_sources": {"nvarc": pod.NVARC_HANDLE, "flux_repo": pod.FLUX_REPO,
                                "flux_revision": pod.FLUX_REVISION},
             "source_snapshot": json.loads((ROOT / "_source.json").read_text())
@@ -184,8 +195,9 @@ def main(argv=None) -> int:
         if args.prepare_only:
             return 0
         pod.write_json(directory / "training-started.json", {"resume_from": config.recipe_dict()["models"]["resume_from"]})
-        subprocess.run([sys.executable, "-c", "from scripts.cloud.finetune_runpod import train; "
-                        "import sys; train(*sys.argv[1:])", str(config.path), str(startup_path)],
+        subprocess.run(pod.training_command(config, [
+            sys.executable, "-c", "from scripts.cloud.finetune_runpod import train; "
+            "import sys; train(*sys.argv[1:])", str(config.path), str(startup_path)]),
                        cwd=ROOT, check=True)
         pod.upload_weights(config, api=api, output_repo=output_repo)
         suffix = " The Pod remains running." if config.recipe["deployment"]["provider"] == "runpod" else ""

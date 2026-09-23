@@ -85,6 +85,25 @@ class EndpointFlowSamplingTests(unittest.TestCase):
 
 
 class HighNoiseFlowSamplingTests(unittest.TestCase):
+    def test_legacy_stream_preserves_recorded_main_draws_and_generator_position(self):
+        # Recorded from main 5f42682, before sharing quota draws with DDP.
+        generator = torch.Generator().manual_seed(169)
+        flows = sample_endpoint_flow_batches(
+            (torch.zeros(2, 128),) * 3, endpoint_count=1, high_noise_count=1, generator=generator,
+        )
+        torch.testing.assert_close(torch.cat([flow.timesteps for flow in flows]),
+                                   torch.tensor([1.0, 0.5035141706466675, 0.967369556427002]),
+                                   atol=0, rtol=0)
+        expected = torch.tensor([
+            [-0.19766007363796234, -0.12827102839946747, 1.310320496559143, -0.18620900809764862],
+            [-1.6903228759765625, -0.505885124206543, 0.27265220880508423, -1.2397191524505615],
+            [0.6370355486869812, 0.4552030861377716, 0.4129663109779358, 0.9227776527404785],
+        ])
+        torch.testing.assert_close(torch.stack([flow.target_velocity.flatten()[:4] for flow in flows]),
+                                   expected, atol=0, rtol=0)
+        self.assertEqual(torch.randint(0, 2**24, (3,), generator=generator).tolist(),
+                         [444962, 14300187, 4768179])
+
     def test_full_and_tail_quotas_assign_three_groups_before_packing(self):
         policy = EndpointFlowPolicy(48, 24, 30, 15, 12, 8)
         randint = torch.randint
@@ -204,6 +223,13 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
                 self.assertEqual(sampler.policy.endpoint_count(48), 24 if high_noise else 4)
                 self.assertEqual(sampler.policy.high_noise_count(48), 12 if high_noise else 0)
                 self.assertEqual(sampler.policy.high_noise_count(30), 8 if high_noise else 0)
+
+    def test_indexed_recipe_cannot_silently_use_the_legacy_stream(self):
+        config = SimpleNamespace(config_type="training_run", recipe={"flow": {
+            "rng_scheme": "global_step_target_v1",
+        }})
+        with self.assertRaisesRegex(ValueError, "global batch plan"):
+            build_flow_sampler(config, generator=torch.Generator())
 
 
 def _clean_latents(

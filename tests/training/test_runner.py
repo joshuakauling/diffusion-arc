@@ -221,7 +221,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIs(self.save.call_args.kwargs["scheduler"], self.scheduler)
         self.assertEqual(self.save.call_args.kwargs["wandb_run"], self.logger.run_identity)
         bindings["validate_validation_bundle"].assert_called_once_with(
-            self.config.recipe["validation"]["bundle"], split_seed=167,
+            self.config.recipe["validation"]["bundle"], split_seed=167, verify_payloads=False,
         )
         bindings["prepare_validation_cache"].assert_called_once()
         self.assertEqual(bindings["prepare_validation_cache"].call_args.kwargs, {
@@ -264,6 +264,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(supplied["nvarc_max_tokens"], 134400)
         self.assertEqual(supplied["vae_microbatch_size"], 48)
         self.assertEqual(supplied["flux_max_joint_tokens"], 12288)
+        self.assertEqual(supplied["flux_max_spread_tokens"], self.config.flux_packing.max_spread_tokens)
         self.assertEqual(supplied["min_context_pairs_before_target"], 2)
         self.assertEqual(supplied["max_grad_norm"], 1.0)
         self.optimizer.step.assert_not_called()
@@ -327,6 +328,7 @@ class RunnerTests(unittest.TestCase):
             "models": dict(self.config.recipe["models"]) | {"resume_from": path},
         })
         checkpoint = SimpleNamespace(path=path, metadata={
+            "schema_version": 1, "recipe": self.config.recipe_dict(),
             "progress": asdict(progress), "wandb_run": self.logger.run_identity,
             "identity": runner.checkpoint_identity(
                 config, data_fingerprint=self.samples.dataset.fingerprint,
@@ -391,6 +393,7 @@ class RunnerTests(unittest.TestCase):
     def _next_epoch(self, stack):
         bindings = self._setup(stack)
         parent = SimpleNamespace(path=Path("/test/parent/step-000002"), metadata={
+            "schema_version": 1, "recipe": self.config.recipe_dict(),
             "progress": asdict(runner.RunProgress(2, 26, 78, {"train/flux_forward_calls": 12})),
             "wandb_run": self.logger.run_identity,
             "identity": runner.checkpoint_identity(

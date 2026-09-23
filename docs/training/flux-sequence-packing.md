@@ -8,13 +8,22 @@ training path does not import diagnostic scripts.
 ## Scheduling and execution
 
 Each target costs its valid NVARC prefix length **plus 900 image tokens**.
-Within the fixed FIFO optimizer batch, best-fit-decreasing processes larger
-targets first and places each in the tightest remaining space. Ties retain
-deterministic source order. Targets are neither split nor moved across optimizer
-boundaries. This is a fast call-count heuristic, not an exact bin-packing solver.
+The versioned `legacy_bfd_v1` algorithm preserves historical single-GPU/B3
+best-fit-decreasing schedules. `balanced_release_v1`, the DDP default, adds
+bounded search and earlier source release; either algorithm can be selected
+for either execution strategy.
 
-Replaying the four recorded 48-target windows in the
-[archived fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_packing.json) gives:
+Within the fixed FIFO optimizer batch, the balanced algorithm starts from
+best-fit-decreasing, tries fewer calls, and balances their token counts. At that
+fixed call count, target moves/swaps and pack reordering favor earlier source
+release, weighted by retained NVARC bytes. The largest pack runs first. The
+release optimization allows at most 1,000 tokens between the largest and smallest
+pack (`execution.flux_max_spread_tokens` in recipes); otherwise the balanced
+reference is retained. Targets are neither split nor moved across optimizer
+boundaries. The bounded search does not guarantee a global optimum.
+
+The original best-fit-decreasing replay of the four recorded 48-target windows in
+the [archived fixture](https://github.com/joshuakauling/diffusion-arc/blob/2ff42764b06163fc1df855fc2529ae98a5cf2e2b/configs/diagnostics/flux_packing.json) gave:
 
 | Window | B2 calls | Packed calls | Token-sum lower bound |
 | --- | ---: | ---: | ---: |
@@ -51,7 +60,11 @@ next physical batch is constructed.
 ## Configuration and runtime
 
 Baseline schema v10 requires NVARC and FLUX packing. B3 sets
-`"flux_packing": {"max_tokens": 12288}`. The retired `flux_scheduling`,
+`"flux_packing": {"max_tokens": 12288}`; optional `max_spread_tokens` defaults to
+1,000 and `algorithm` defaults to `legacy_bfd_v1`. Training-run recipes select
+`execution.flux_packing_algorithm`; its default is legacy for native execution
+and balanced for DDP. Comparisons should select the same algorithm explicitly.
+The retired `flux_scheduling`,
 `loop.flux_microbatch_size`, `loop.nvarc_source_batch_size` and `padding` fields are rejected, including null values.
 FA3 and FP32 modulation sums are mandatory in this packed training path.
 Older schemas are rejected. Recorded B0/B1/B2 recipes and diagnostic code are
@@ -70,9 +83,10 @@ the packed training path.
 small BF16, head-128, unequal-segment forward/backward before loading the models.
 It then checks the FLUX architecture, trainable FP32 parameters and disabled
 checkpointing. Missing or incompatible FA3 is an error. Model parameter names
-and checkpoint formats remain unchanged. This implementation targets the
-current single-process trainer; distributed wrappers and gradient checkpointing
-require separate integration.
+and HF weight formats remain unchanged. Both native execution and DDP call the
+same `PackedFluxForward` adapter; DDP weights each pack by
+`world_size * local_pack_targets / global_targets` before gradient averaging.
+Activation checkpointing remains a future integration.
 
 The shared Modal image builds pinned FA3 revision
 `ce088ab9ce0fc0434dcd8afa0a791da9fcc3a820` with BF16 forward and backward,

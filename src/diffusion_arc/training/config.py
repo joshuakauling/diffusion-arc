@@ -274,7 +274,8 @@ def _parse_baseline(
             raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
 
     section = _object(payload["flux_packing"], name="flux_packing")
-    _fields(section, {"max_tokens"}, name="flux_packing")
+    section = {"max_spread_tokens": 1_000, "algorithm": "legacy_bfd_v1", **section}
+    _fields(section, {"max_tokens", "max_spread_tokens", "algorithm"}, name="flux_packing")
     flux_packing = FluxPackingPolicy(**section)
 
     return TrainingConfig(
@@ -515,6 +516,14 @@ def _deployment_provider(value: Any, *, name: str) -> str:
     return value
 
 
+def _choice(*choices: str):
+    def parse(value: Any, *, name: str) -> str:
+        if not isinstance(value, str) or value not in choices:
+            raise ValueError(f"{name} must be one of {choices!r}")
+        return value
+    return parse
+
+
 def _names(allowed: str):
     """Allow explicit subsets of a finite metric vocabulary, never per-task keys."""
     allowed_names = frozenset(allowed.split())
@@ -541,7 +550,7 @@ _RECIPE_SCHEMA = {
     "config_type": "training_run", "schema_version": 1,
     "name": _string, "seed": _seed,
     "deployment": {
-        "provider": _deployment_provider, "gpu_type": _string, "gpu_count": 1,
+        "provider": _deployment_provider, "gpu_type": _string, "gpu_count": _positive_integer,
         "output_directory": _nullable(_string),
     },
     "models": {
@@ -552,11 +561,13 @@ _RECIPE_SCHEMA = {
         "flux_parameter_dtype": "float32", "flux_compute_dtype": "bfloat16",
     },
     "execution": {
-        "device": _string, "distributed_strategy": "single_process",
+        "device": _string, "distributed_strategy": _choice("single_process", "ddp"),
         "nvarc_attention_backend": "fa3_packed", "nvarc_hidden_layers": [9, 18, 27],
         "nvarc_early_exit_layer": 27, "nvarc_hidden_state_normalization": "none",
         "nvarc_max_tokens": _positive_integer,
         "flux_attention_backend": "fa3_packed", "flux_max_joint_tokens": _positive_integer,
+        "flux_max_spread_tokens": _natural,
+        "flux_packing_algorithm": _choice("legacy_bfd_v1", "balanced_release_v1"),
         "activation_checkpointing": False, "profiler": None,
     },
     "data": {
@@ -594,6 +605,7 @@ _RECIPE_SCHEMA = {
         "microbatch_reduction": "actual_target_count_weighted",
     },
     "flow": {
+        "rng_scheme": _choice("legacy_stream_v1", "global_step_target_v1"),
         "interpolation": "data_to_noise", "velocity_target": "noise_minus_data",
         "time_distribution": "uniform_with_fixed_endpoint_count",
         "uniform_min": 0.0, "uniform_max": 1.0, "uniform_bounds": "open",
@@ -688,6 +700,19 @@ _RECIPE_SCHEMA = {
 
 def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingConfig:
     """Normalize a finite run directly through the shared component readers."""
+    execution = payload.get("execution")
+    distributed = isinstance(execution, Mapping) and execution.get("distributed_strategy") == "ddp"
+    if isinstance(execution, Mapping):
+        payload = {**payload, "execution": {
+            "flux_max_spread_tokens": 1_000,
+            "flux_packing_algorithm": "balanced_release_v1" if distributed else "legacy_bfd_v1",
+            **execution,
+        }}
+    if isinstance(payload.get("flow"), Mapping):
+        payload = {**payload, "flow": {
+            "rng_scheme": "global_step_target_v1" if distributed else "legacy_stream_v1",
+            **payload["flow"],
+        }}
     schema = deepcopy(_RECIPE_SCHEMA)
     if isinstance(payload.get("models"), Mapping) and payload["models"].get("initialization") == "transformer_weights":
         schema["models"].update(
@@ -712,7 +737,11 @@ def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingC
     loop = _parse_loop(recipe["loop"])
     optimizer = _parse_optimizer(recipe["optimizer"])
     device = _device(recipe["execution"]["device"])
-    packing = FluxPackingPolicy(max_tokens=recipe["execution"]["flux_max_joint_tokens"])
+    packing = FluxPackingPolicy(
+        max_tokens=recipe["execution"]["flux_max_joint_tokens"],
+        max_spread_tokens=recipe["execution"]["flux_max_spread_tokens"],
+        algorithm=recipe["execution"]["flux_packing_algorithm"],
+    )
     _validate_relationships(recipe)
     paths = [
         ("models", "nvarc_checkpoint"), ("models", "flux_checkpoint"), ("models", "resume_from"),
@@ -737,6 +766,11 @@ def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingC
 
 def _validate_relationships(recipe: dict[str, Any]) -> None:
     data, loop, flow = recipe["data"], recipe["loop"], recipe["flow"]
+    strategy = recipe["execution"]["distributed_strategy"]
+    if strategy == "single_process" and recipe["deployment"]["gpu_count"] != 1:
+        raise ValueError("single_process execution requires deployment.gpu_count=1")
+    if strategy == "ddp" and flow["rng_scheme"] != "global_step_target_v1":
+        raise ValueError("ddp execution requires flow.rng_scheme=global_step_target_v1")
     targets_per_sequence = data["pairs_per_sequence"] - loop["min_context_pairs_before_target"]
     total = data["expected_task_count"] * targets_per_sequence
     batch = loop["optimizer_batch_size"]

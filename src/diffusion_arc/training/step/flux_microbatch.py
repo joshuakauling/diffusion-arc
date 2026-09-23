@@ -9,7 +9,7 @@ import torch
 from torch import Tensor, nn
 
 from diffusion_arc.model.contracts import DEFAULT_FLUX_SPATIAL_SHAPE, FluxSpatialShape
-from diffusion_arc.model.flux.packing import PackingLayout, packing_layout, predict_packed_flux_velocity
+from diffusion_arc.model.flux.packing import PackingLayout, packing_layout
 from diffusion_arc.model.flux.velocity import build_flux_image_position_ids
 
 from .encoding import FluxInput, NvarcSequenceState
@@ -72,14 +72,13 @@ def compute_flux_microbatch_loss(
     flow_batch: FlowMatchingBatch,
     *,
     transformer: nn.Module,
-    compute_dtype: torch.dtype,
-    packing_backend: object,
     max_joint_tokens: int,
     loss_function: VelocityLoss,
     spatial_shape: FluxSpatialShape = DEFAULT_FLUX_SPATIAL_SHAPE,
 ) -> LossResult:
     """Build conditioning, run FLUX with the supplied flow batch and compute loss.
 
+    ``transformer`` is a PackedFluxForward module, optionally wrapped in DDP.
     The loss receives the predicted velocity, target velocity and grid shapes.
     Grid shapes are never passed to FLUX. Sampling, optimizer-batch weighting,
     backward and logging are handled by the caller.
@@ -88,9 +87,9 @@ def compute_flux_microbatch_loss(
         inputs, max_joint_tokens=max_joint_tokens, spatial_shape=spatial_shape,
     )
     with training_range("train/flux_forward", torch_range=True):
-        prediction = predict_packed_flux_velocity(
-            transformer, flow_batch.noisy_latents, microbatch.text, microbatch.image_position_ids,
-            flow_batch.timesteps, microbatch.layout, compute_dtype=compute_dtype, backend=packing_backend,
+        prediction = transformer(
+            flow_batch.noisy_latents, microbatch.text, microbatch.image_position_ids,
+            flow_batch.timesteps, microbatch.layout,
         )
     return loss_function(
         prediction, flow_batch.target_velocity.to(device=prediction.device),

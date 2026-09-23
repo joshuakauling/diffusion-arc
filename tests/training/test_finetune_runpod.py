@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import io
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -86,6 +87,32 @@ class FinetuneRunPodTests(unittest.TestCase):
                 self.assertIn("from scripts.cloud.finetune_runpod import train", command[2])
                 self.assertTrue((self.workspace / f"runs/run-{failed}/training-started.json").is_file())
 
+    def test_weights_only_start_can_move_from_legacy_single_parent_to_ddp(self):
+        payload = self.config.recipe_dict()
+        payload["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
+        payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        payload["deployment"]["gpu_count"] = 2
+        path = self.workspace / "ddp.json"
+        path.write_text(json.dumps(payload))
+        # Real parent W&B runs predate the explicitly versioned defaults.
+        for key in ("flux_packing_algorithm", "flux_max_spread_tokens"):
+            self.run.config["execution"].pop(key, None)
+        self.run.config["flow"].pop("rng_scheme", None)
+        with ExitStack() as stack:
+            mocks = self.mocks(stack)
+            self.assertEqual(launch.main(self.arguments("--config", str(path))), 0)
+        command = mocks["train"].call_args.args[0]
+        self.assertEqual(command[:3], [sys.executable, "-m", "torch.distributed.run"])
+        self.assertIn("--nproc-per-node=2", command)
+        self.assertIn("--max-restarts=0", command)
+        self.assertIn("from scripts.cloud.finetune_runpod import train", command[-3])
+        mocks["upload_weights"].assert_called_once()
+        receipt = json.loads((self.workspace / "runs/epoch3/startup.json").read_text())
+        self.assertEqual(receipt["execution"], {"strategy": "ddp", "gpu_count": 2})
+        self.run.config["execution"]["nvarc_attention_backend"] = "different"
+        with self.assertRaisesRegex(ValueError, "execution differs"):
+            launch.check_parent_run(self.wandb_api, load_training_config(path))
+
     def test_resume_uses_new_stage_checkpoint_without_downloading_or_resetting_again(self):
         with ExitStack() as stack:
             mocks = self.mocks(stack)
@@ -101,6 +128,7 @@ class FinetuneRunPodTests(unittest.TestCase):
                 path.write_bytes(content)
             launch.pod.write_json(checkpoint / "checkpoint.json", {
                 "schema_version": 1, "files": {name: len(value) for name, value in files.items()},
+                "recipe": config.recipe_dict(),
                 "identity": checkpoint_identity(config, data_fingerprint="data", validation_manifest={}),
                 "progress": {"optimizer_step": 2112, "epoch": 3, "optimizer_start_step": 1812,
                              "targets_seen": 101340, "sources_seen": 33780, "workload_totals": {}},

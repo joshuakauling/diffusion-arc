@@ -1,7 +1,8 @@
-"""Local full-state checkpoints at completed single-GPU optimizer updates."""
+"""Atomic full-state checkpoints at completed single-GPU or DDP updates."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 import hashlib
 from importlib.metadata import version
@@ -32,6 +33,43 @@ class Checkpoint:
     metadata: dict
 
 
+def normalize_checkpoint_recipe(recipe: dict) -> dict:
+    """Expand only defaults that preserve the pre-integration single-GPU behavior."""
+    recipe = deepcopy(recipe)
+    recipe["execution"].setdefault("flux_max_spread_tokens", 1_000)
+    recipe["execution"].setdefault("flux_packing_algorithm", "legacy_bfd_v1")
+    recipe["flow"].setdefault("rng_scheme", "legacy_stream_v1")
+    return recipe
+
+
+def checkpoint_identities_match(saved: dict, current: dict) -> bool:
+    """Compare complete identities with the explicit legacy recipe normalization."""
+    return ({**saved, "recipe": normalize_checkpoint_recipe(saved["recipe"])}
+            == {**current, "recipe": normalize_checkpoint_recipe(current["recipe"])})
+
+
+def _config_execution(config: TrainingConfig) -> dict:
+    return {"strategy": config.recipe["execution"]["distributed_strategy"],
+            "world_size": config.recipe["deployment"]["gpu_count"]}
+
+
+def _checkpoint_execution(metadata: dict) -> dict:
+    execution = metadata.get("execution")
+    if execution is None and metadata["schema_version"] == 1:
+        execution = {"strategy": "single_process", "world_size": 1}
+    if (not isinstance(execution, dict) or set(execution) != {"strategy", "world_size"}
+            or execution["strategy"] not in ("single_process", "ddp")
+            or type(execution["world_size"]) is not int or execution["world_size"] < 1
+            or (execution["strategy"] == "single_process" and execution["world_size"] != 1)):
+        raise ValueError("checkpoint execution strategy or world size is invalid")
+    return execution
+
+
+def _runtime_execution(runtime) -> dict:
+    return ({"strategy": "single_process", "world_size": 1} if runtime is None
+            else {"strategy": runtime.strategy, "world_size": runtime.world_size})
+
+
 def checkpoint_identity(config: TrainingConfig, *, data_fingerprint: str, validation_manifest: dict) -> dict:
     """Bind continuation to the recipe, ordered training content and validation split.
 
@@ -55,8 +93,15 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
     """
     path = Path(path).resolve()
     metadata = json.loads((path / "checkpoint.json").read_text())
-    if metadata.get("schema_version") != 1:
+    if type(metadata.get("schema_version")) is not int or metadata["schema_version"] not in (1, 2):
         raise ValueError("unsupported checkpoint schema")
+    execution = _checkpoint_execution(metadata)
+    if execution != _config_execution(config):
+        raise ValueError("checkpoint execution strategy or world size differs from this run")
+    saved_recipe = metadata["recipe"]
+    if execution != {"strategy": saved_recipe["execution"]["distributed_strategy"],
+                     "world_size": saved_recipe["deployment"]["gpu_count"]}:
+        raise ValueError("checkpoint execution metadata differs from its recipe")
     weights_only = metadata.get("weights_only", False)
     if type(weights_only) is not bool:
         raise ValueError("checkpoint weights_only must be boolean")
@@ -78,7 +123,7 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
             raise ValueError(f"checkpoint file size differs: {name}")
     saved = metadata["identity"]
     current = checkpoint_identity(config, data_fingerprint=saved["data_sha256"], validation_manifest={})
-    if saved["recipe"] != current["recipe"]:
+    if normalize_checkpoint_recipe(saved["recipe"]) != normalize_checkpoint_recipe(current["recipe"]):
         raise ValueError("checkpoint training recipe differs from this run")
     progress = metadata["progress"]
     step = progress["optimizer_step"]
@@ -153,8 +198,11 @@ def remove_training_state(checkpoint: Checkpoint) -> int:
 
 def validate_epoch_continuation(checkpoint: Checkpoint, config: TrainingConfig) -> None:
     """Allow a completed epoch to feed a new augmentation view of the same experiment."""
-    previous = json.loads(json.dumps(checkpoint.metadata["identity"]["recipe"]))
-    current = checkpoint_identity(config, data_fingerprint="", validation_manifest={})["recipe"]
+    if _checkpoint_execution(checkpoint.metadata) != _config_execution(config):
+        raise ValueError("checkpoint execution strategy or world size differs from this run")
+    previous = normalize_checkpoint_recipe(checkpoint.metadata["identity"]["recipe"])
+    current = normalize_checkpoint_recipe(
+        checkpoint_identity(config, data_fingerprint="", validation_manifest={})["recipe"])
     if previous.pop("seed") == current.pop("seed"):
         raise ValueError("the next epoch requires a different augmentation seed")
     if previous["data"].pop("prepared_split_directory") == current["data"].pop("prepared_split_directory"):
@@ -172,7 +220,9 @@ def _capture_rng(flow_generator: torch.Generator, device: torch.device) -> dict:
         "python": random.getstate(), "torch_cpu": torch.random.get_rng_state(),
         "torch_cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
         "flow": flow_generator.get_state(), "flow_device_type": flow_generator.device.type,
-        "numpy": (numpy_state[0], torch.from_numpy(numpy_state[1].copy()), *numpy_state[2:]),
+        # Object collectives cannot pickle UInt32Storage on every supported Torch
+        # build. Signed int64 preserves every NumPy uint32 key exactly.
+        "numpy": (numpy_state[0], torch.from_numpy(numpy_state[1].astype(np.int64)), *numpy_state[2:]),
     }
 
 
@@ -185,11 +235,11 @@ def _restore_rng(state: dict, flow_generator: torch.Generator, device: torch.dev
         torch.cuda.set_rng_state(state["torch_cuda"], device)
     flow_generator.set_state(state["flow"])
     numpy_state = state["numpy"]
-    np.random.set_state((numpy_state[0], numpy_state[1].numpy(), *numpy_state[2:]))
+    np.random.set_state((numpy_state[0], numpy_state[1].numpy().astype(np.uint32), *numpy_state[2:]))
 
 
 def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, scheduler,
-                           flow_generator: torch.Generator, device: torch.device) -> None:
+                           flow_generator: torch.Generator, device: torch.device, runtime=None) -> None:
     """Restore AdamW/LR and RNGs after model loading and frozen-cache preparation.
 
     The transformer has already been loaded from checkpoint.path / transformer
@@ -197,7 +247,26 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
     next complete optimizer batch. Load scheduler state after constructing it,
     then optimizer state to retain the next update's stored learning rate.
     """
+    execution = _checkpoint_execution(checkpoint.metadata)
+    if execution != _runtime_execution(runtime):
+        raise ValueError("checkpoint execution strategy or world size differs from this runtime")
     state = torch.load(checkpoint.path / "training_state.pt", map_location="cpu", weights_only=True)
+    if not isinstance(state, dict) or not {"parameter_names", "optimizer", "scheduler"} <= state.keys():
+        raise ValueError("checkpoint training state is incomplete")
+    if execution["strategy"] == "ddp":
+        states = state.get("rng_by_rank")
+        if not isinstance(states, list) or len(states) != execution["world_size"]:
+            raise ValueError("checkpoint rank RNG states are incomplete")
+        rng = states[runtime.rank]
+    else:
+        rng = state.get("rng")
+        states = [rng]
+    if any(not isinstance(item, dict) or set(item) != {
+            "python", "torch_cpu", "torch_cuda", "flow", "flow_device_type", "numpy"} for item in states):
+        raise ValueError("checkpoint RNG state is incomplete")
+    if (rng["flow_device_type"] != flow_generator.device.type
+            or (rng["torch_cuda"] is None) != (device.type != "cuda")):
+        raise ValueError("checkpoint RNG device type differs from this run")
     if state["parameter_names"] != [name for name, _ in transformer.named_parameters()]:
         raise ValueError("checkpoint optimizer parameter order differs from the transformer")
     progress = checkpoint.metadata["progress"]
@@ -232,43 +301,81 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
                     raise ValueError("checkpoint optimizer moment shape or dtype differs")
     scheduler.load_state_dict(state["scheduler"])
     optimizer.load_state_dict(state["optimizer"])
-    optimizer.zero_grad(set_to_none=True)
-    _restore_rng(state["rng"], flow_generator, device)
+    optimizer.zero_grad(set_to_none=execution["strategy"] != "ddp")
+    _restore_rng(rng, flow_generator, device)
 
 
 def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transformer, optimizer,
                     scheduler, flow_generator: torch.Generator, device: torch.device,
-                    identity: dict, wandb_run: dict) -> dict[str, float | int | str]:
+                    identity: dict, wandb_run: dict, runtime=None,
+                    completed_update: bool = False) -> dict[str, float | int | str]:
     """Publish one full checkpoint after all writes finish, then apply retention.
 
     HF stores only the trainable FLUX transformer in sharded safetensors. Frozen
     NVARC/VAE weights and CPU evaluation caches are referenced by the recipe.
     Checkpoints live in a per-W&B-run directory; retention only touches completed
     checkpoints of that run. Failed temporary writes never replace a good save.
+
+    Every DDP rank enters this function. The caller explicitly confirms a
+    completed update because DDP retains zeroed gradient bucket views. No
+    gradient tensor scan is needed to re-prove that training-loop boundary.
     """
+    execution = _runtime_execution(runtime)
+    if execution != _config_execution(config):
+        raise ValueError("checkpoint execution strategy or world size differs from the recipe")
+    error = None
+    if execution["strategy"] == "ddp":
+        if completed_update is not True:
+            error = "DDP checkpoint requires an explicitly completed optimizer update"
+    elif any(parameter.grad is not None for parameter in transformer.parameters()):
+        error = "checkpoint requires cleared gradients at an optimizer boundary"
+    if scheduler.last_epoch != progress.optimizer_step - progress.optimizer_start_step:
+        error = "checkpoint scheduler is not at the completed optimizer step"
+    rng = _capture_rng(flow_generator, device)
+    try:
+        gathered = ([{"error": error, "rng": rng}] if runtime is None
+                    else runtime.gather({"error": error, "rng": rng}))
+        errors = [f"rank {rank}: {item['error']}" for rank, item in enumerate(gathered) if item["error"]]
+        if errors:
+            raise ValueError("; ".join(errors))
+        if len(gathered) != execution["world_size"]:
+            raise ValueError("checkpoint rank RNG states are incomplete")
+        rng_payload = ({"rng_by_rank": [item["rng"] for item in gathered]}
+                       if execution["strategy"] == "ddp" else {"rng": rng})
+
+        def publish():
+            return _publish_checkpoint(progress, config=config, transformer=transformer,
+                                       optimizer=optimizer, scheduler=scheduler, device=device,
+                                       identity=identity, wandb_run=wandb_run,
+                                       execution=execution, rng_payload=rng_payload)
+
+        return publish() if runtime is None else runtime.primary(publish)
+    finally:
+        _restore_rng(rng, flow_generator, device)
+
+
+def _publish_checkpoint(progress, *, config, transformer, optimizer, scheduler, device,
+                        identity, wandb_run, execution, rng_payload):
+    """Write shared DDP or single-process state on the primary rank only."""
     started = time.perf_counter()
     directory = config.recipe["deployment"]["output_directory"] / "checkpoints" / wandb_run["id"]
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"step-{progress.optimizer_step:06d}"
     if destination.exists():
         raise FileExistsError(f"checkpoint already exists: {destination}")
-    if any(parameter.grad is not None for parameter in transformer.parameters()):
-        raise ValueError("checkpoint requires cleared gradients at an optimizer boundary")
-    if scheduler.last_epoch != progress.optimizer_step - progress.optimizer_start_step:
-        raise ValueError("checkpoint scheduler is not at the completed optimizer step")
-    rng = _capture_rng(flow_generator, device)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=directory))
     try:
         transformer.save_pretrained(temporary / "transformer", safe_serialization=True,
                                     max_shard_size="5GB", push_to_hub=False)
         optimizer_state = optimizer.state_dict()
         torch.save({"optimizer": optimizer_state, "scheduler": scheduler.state_dict(),
-                    "rng": rng, "parameter_names": [name for name, _ in transformer.named_parameters()]},
+                    **rng_payload, "parameter_names": [name for name, _ in transformer.named_parameters()]},
                    temporary / "training_state.pt")
         files = {str(file.relative_to(temporary)): file.stat().st_size
                  for file in temporary.rglob("*") if file.is_file()}
         metadata = {
-            "schema_version": 1, "progress": asdict(progress), "identity": identity,
+            "schema_version": 2, "progress": asdict(progress), "identity": identity,
+            "execution": execution,
             "optimizer_state_keys": list(optimizer_state["state"]),
             "recipe": config.recipe_dict(), "wandb_run": wandb_run, "files": files,
             "runtime": {"python": platform.python_version(), "torch": str(torch.__version__),
@@ -287,7 +394,6 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
                 os.fsync(handle.fileno())
         temporary.rename(destination)
     finally:
-        _restore_rng(rng, flow_generator, device)
         if temporary.exists():
             shutil.rmtree(temporary)
     size = sum(files.values()) + (destination / "checkpoint.json").stat().st_size
@@ -315,4 +421,5 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
 
 
 __all__ = ["Checkpoint", "checkpoint_identity", "read_checkpoint", "restore_training_state", "save_checkpoint",
-           "validate_epoch_continuation", "remove_training_state"]
+           "validate_epoch_continuation", "remove_training_state", "normalize_checkpoint_recipe",
+           "checkpoint_identities_match"]

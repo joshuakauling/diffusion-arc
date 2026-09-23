@@ -190,6 +190,8 @@ def main(argv=None) -> int:
         prepare_next_view(parent_config, config)
         pod.write_json(startup_path, {
             **parent_startup, "parent": lineage, "output_repo": output_repo,
+            "execution": {"strategy": config.recipe["execution"]["distributed_strategy"],
+                          "gpu_count": config.recipe["deployment"]["gpu_count"]},
             "augmentation_seed": config.seed, "launcher_sha256": pod.sha256_file(Path(__file__)),
             "source_snapshot": json.loads((ROOT / "_source.json").read_text()) if (ROOT / "_source.json").exists() else None,
         })
@@ -199,9 +201,10 @@ def main(argv=None) -> int:
         pod.write_json(run_directory / "training-started.json", {
             "parent": lineage, "resume_from": config.recipe_dict()["models"]["resume_from"],
         })
-        subprocess.run([sys.executable, "-c",
-                        "from scripts.cloud.continue_runpod import train; import sys; train(*sys.argv[1:])",
-                        str(config.path), str(parent_run)], check=True, cwd=ROOT)
+        subprocess.run(pod.training_command(config, [
+            sys.executable, "-c",
+            "from scripts.cloud.continue_runpod import train; import sys; train(*sys.argv[1:])",
+            str(config.path), str(parent_run)]), check=True, cwd=ROOT)
         pod.upload_weights(config, api=api, output_repo=output_repo)
         suffix = " The Pod remains running." if config.recipe["deployment"]["provider"] == "runpod" else ""
         print("Additional epoch and weight uploads completed." + suffix, flush=True)

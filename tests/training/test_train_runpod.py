@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import tarfile
 from types import SimpleNamespace
@@ -126,6 +127,7 @@ class RunPodTests(unittest.TestCase):
         targets = min(step * 48, 43470)
         launcher.write_json(path / "checkpoint.json", {
             "schema_version": 1, "files": {name: len(data) for name, data in files.items()},
+            "recipe": self.config.recipe_dict(),
             "identity": checkpoint_identity(self.config, data_fingerprint="data", validation_manifest={}),
             "progress": {"optimizer_step": step, "targets_seen": targets,
                          "sources_seen": targets // 3, "workload_totals": {}},
@@ -442,6 +444,52 @@ class RunPodTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "190 GiB free"):
                 launcher.preflight_gpu_and_disk(self.config, self.workspace, 0)
         gpu.assert_not_called()
+
+    def ddp_config(self, count=2):
+        payload = self.config.recipe_dict()
+        payload["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
+        payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        payload["deployment"]["gpu_count"] = count
+        path = self.workspace / "ddp.json"
+        launcher.write_json(path, payload)
+        return load_training_config(path)
+
+    def test_training_command_preserves_stage_arguments_and_launches_configured_rank_count(self):
+        commands = ([sys.executable, "scripts/train.py", "--config", "recipe.json"],
+                    [sys.executable, "-c", "from scripts.cloud.continue_runpod import train; "
+                     "import sys; train(*sys.argv[1:])", "recipe.json", "parent run"],
+                    [sys.executable, "-c", "from scripts.cloud.finetune_runpod import train; "
+                     "import sys; train(*sys.argv[1:])", "recipe.json", "startup.json"])
+        for command in commands:
+            self.assertEqual(launcher.training_command(self.config, command), command)
+            for count in (1, 2):
+                launched = launcher.training_command(self.ddp_config(count), command)
+                self.assertEqual(launched[:3], [sys.executable, "-m", "torch.distributed.run"])
+                self.assertIn(f"--nproc-per-node={count}", launched)
+                self.assertIn("--max-restarts=0", launched)
+                self.assertEqual(launched[launched.index("--no-python") + 1:], command)
+
+    def test_ddp_preflight_checks_each_gpu_and_rejects_missing_devices(self):
+        config = self.ddp_config()
+        cuda = Mock()
+        cuda.is_available.return_value = True
+        cuda.device_count.return_value = 2
+        cuda.get_device_name.return_value = "NVIDIA H200"
+        cuda.get_device_capability.return_value = (9, 0)
+        from contextlib import nullcontext
+        cuda.device.side_effect = lambda index: nullcontext()
+        backend = Mock()
+        with patch.object(launcher, "preflight_disk"), \
+                patch.dict(sys.modules, {"torch": SimpleNamespace(cuda=cuda),
+                                        "diffusion_arc.model.flux.packing": SimpleNamespace(Flash3Backend=backend)}), \
+                patch.object(launcher.subprocess, "run", side_effect=lambda command, **kw: exec(command[2], {})):
+            launcher.preflight_gpu_and_disk(config, self.workspace, 0)
+            self.assertEqual([call.args for call in backend.call_args_list], [("cuda:0",), ("cuda:1",)])
+            backend.reset_mock()
+            cuda.device_count.return_value = 1
+            with self.assertRaisesRegex(AssertionError, "exactly 2"):
+                launcher.preflight_gpu_and_disk(config, self.workspace, 0)
+            backend.assert_not_called()
 
     def test_data_preparation_reuses_manifest_without_rechecking_task_contents(self):
         from tests.arc_data.test_nvarc_benchmark import _fixture

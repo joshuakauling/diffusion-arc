@@ -100,6 +100,22 @@ def _open_interval_lattice_bounds(lower: float, upper: float) -> tuple[int, int]
     return start, stop
 
 
+def _sample_quota_timesteps(
+    count: int, *, endpoint_count: int, high_noise_count: int,
+    high_noise_bounds: tuple[int, int], device: torch.device, generator: torch.Generator | None,
+) -> Tensor:
+    """Draw validated global quotas while preserving the original RNG call order."""
+    times = torch.randint(1, 2**24, (count,), device=device, generator=generator).float() / 2**24
+    assignment = torch.randperm(count, device=device, generator=generator)
+    times[assignment[:endpoint_count]] = 1.0
+    if high_noise_count:
+        indices = assignment[endpoint_count:endpoint_count + high_noise_count]
+        times[indices] = torch.randint(
+            *high_noise_bounds, (high_noise_count,), device=device, generator=generator,
+        ).float() / 2**24
+    return times
+
+
 def sample_endpoint_flow_batches(
     clean_latents: Sequence[Tensor],
     *,
@@ -135,16 +151,10 @@ def sample_endpoint_flow_batches(
             raise ValueError("recipe latents must share shape/device and use float32")
 
     device = clean[0].device
-    # Exclude both endpoints exactly, including the rare zero from torch.rand.
-    times = torch.randint(1, 2**24, (len(clean),), device=device,
-                          generator=generator).to(torch.float32) / 2**24
-    assignment = torch.randperm(len(clean), device=device, generator=generator)
-    times[assignment[:endpoint_count]] = 1.0
-    if high_noise_count:
-        high_noise_indices = assignment[endpoint_count:endpoint_count + high_noise_count]
-        times[high_noise_indices] = torch.randint(
-            *high_noise_bounds, (high_noise_count,), device=device, generator=generator,
-        ).to(torch.float32) / 2**24
+    times = _sample_quota_timesteps(
+        len(clean), endpoint_count=endpoint_count, high_noise_count=high_noise_count,
+        high_noise_bounds=high_noise_bounds, device=device, generator=generator,
+    )
     flows = []
     for index, latent in enumerate(clean):
         noise = torch.randn(latent.shape, device=device, dtype=torch.float32, generator=generator)
@@ -317,9 +327,16 @@ def build_flow_sampler(
     """Resolve the configured time distribution once, before consuming data."""
     if config.config_type == "baseline":
         return UniformFlowSampler(generator)
+    if config.recipe["flow"].get("rng_scheme", "legacy_stream_v1") != "legacy_stream_v1":
+        raise ValueError("global_step_target_v1 requires a sampler bound to its global batch plan")
+    return EndpointFlowSampler(generator, build_flow_policy(config))
+
+
+def build_flow_policy(config: TrainingConfig) -> EndpointFlowPolicy:
+    """Resolve the same global full-batch and tail quotas for every strategy."""
     flow = config.recipe["flow"]
     high_noise = flow["time_distribution"] == "uniform_with_fixed_endpoint_and_high_noise_counts"
-    return EndpointFlowSampler(generator, EndpointFlowPolicy(
+    return EndpointFlowPolicy(
         full_batch_size=config.loop.optimizer_batch_size,
         endpoint_targets_per_full_batch=flow["endpoint_targets_per_full_batch"],
         final_batch_size=config.final_batch_target_count,
@@ -328,7 +345,7 @@ def build_flow_sampler(
         high_noise_targets_in_final_batch=flow["high_noise_targets_in_final_batch"] if high_noise else 0,
         high_noise_min=flow["high_noise_min"] if high_noise else 0.8,
         high_noise_max=flow["high_noise_max"] if high_noise else 1.0,
-    ))
+    )
 
 
 def select_flow_batch(
@@ -346,5 +363,5 @@ def select_flow_batch(
 __all__ = [
     "FlowMatchingBatch", "EndpointFlowPolicy", "sample_endpoint_flow_batches",
     "sample_flow_matching_batch", "sample_stratified_flow_matching_batch", "build_flow_generator",
-    "UniformFlowSampler", "EndpointFlowSampler", "build_flow_sampler", "select_flow_batch",
+    "UniformFlowSampler", "EndpointFlowSampler", "build_flow_sampler", "build_flow_policy", "select_flow_batch",
 ]

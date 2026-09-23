@@ -221,6 +221,8 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             nvarc_max_tokens=config.nvarc_max_tokens,
             vae_microbatch_size=config.loop.vae_microbatch_size,
             flux_max_joint_tokens=config.flux_packing.max_tokens,
+            flux_max_spread_tokens=config.flux_packing.max_spread_tokens,
+            flux_packing_algorithm=config.flux_packing.algorithm,
             min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
             max_grad_norm=config.optimizer.max_grad_norm,
         )

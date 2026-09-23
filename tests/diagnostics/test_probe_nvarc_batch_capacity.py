@@ -146,7 +146,7 @@ class WorkloadTests(unittest.TestCase):
             return noisy * transformer.weight
 
         with patch.object(optimizer, "zero_grad", side_effect=clear_gradients), \
-             patch("diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity", side_effect=packed_forward):
+             patch("diffusion_arc.model.flux.packing.predict_packed_flux_velocity", side_effect=packed_forward):
             metadata = probe.initialize_training_memory(
                 config, models, optimizer, device=torch.device("cpu"),
             )

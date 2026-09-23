@@ -55,6 +55,7 @@ class ContinuationTests(unittest.TestCase):
         targets = (epoch - 1) * 78 + min((step - (epoch - 1) * 2) * 48, 78)
         train_runpod.write_json(directory / "checkpoint.json", {
             "schema_version": 1,
+            "recipe": config.recipe_dict(),
             "files": {str(path.relative_to(directory)): path.stat().st_size for path in directory.rglob("*") if path.is_file()},
             "identity": checkpoint_identity(config, data_fingerprint=(
                 ArcTrainingDataset(config.data.split_directory, config.data.view_name, tokenizer=None).fingerprint
@@ -161,6 +162,37 @@ class ContinuationTests(unittest.TestCase):
             prepare.assert_not_called()
             child.assert_not_called()
             self.assertFalse(self.next_run.exists())
+
+    def test_ddp_epoch_continuation_keeps_parent_state_and_launches_all_ranks(self):
+        payload = self.parent.recipe_dict()
+        payload["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
+        payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        payload["deployment"]["gpu_count"] = 2
+        train_runpod.write_json(self.parent_path, payload)
+        parent = load_training_config(self.parent_path)
+        metadata_path = self.checkpoint_path / "checkpoint.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata.update(schema_version=2, execution={"strategy": "ddp", "world_size": 2},
+                        recipe=parent.recipe_dict(), identity=checkpoint_identity(
+                            parent, data_fingerprint=metadata["identity"]["data_sha256"], validation_manifest={}))
+        train_runpod.write_json(metadata_path, metadata)
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"HF_TOKEN": "fixture", "WANDB_API_KEY": "fixture"}))
+            stack.enter_context(patch.dict("sys.modules", {"wandb": SimpleNamespace(Api=Mock(return_value=self.wandb_api))}))
+            stack.enter_context(patch("huggingface_hub.HfApi"))
+            for name in ("prepare_runtime", "prepare_output_repository", "preflight_gpu_and_disk"):
+                stack.enter_context(patch.object(train_runpod, name))
+            child = stack.enter_context(patch.object(continuation.subprocess, "run"))
+            upload = stack.enter_context(patch.object(train_runpod, "upload_weights"))
+            self.assertEqual(continuation.main([
+                "--from-run", "first", "--run-name", "second", "--workspace", str(self.workspace)]), 0)
+        command = child.call_args.args[0]
+        self.assertIn("torch.distributed.run", command)
+        self.assertIn("--nproc-per-node=2", command)
+        self.assertEqual(command[-1], str(self.parent_run))
+        resolved = load_training_config(self.next_run / "training.json")
+        self.assertEqual(resolved.recipe["execution"], parent.recipe["execution"])
+        upload.assert_called_once()
 
     def test_active_or_outdated_wandb_parent_is_rejected_without_resuming_or_relabeling_it(self):
         _, checkpoint = continuation.load_parent(self.parent_run)

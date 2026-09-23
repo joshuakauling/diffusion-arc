@@ -39,6 +39,28 @@ class ModalTrainingTests(unittest.TestCase):
         self.assertEqual([x["optimizer_reset"] for x in self.plan["epochs"]], [True, False])
         self.assertEqual(self.plan["transformer_source"]["subfolder"], "m7y2mfn2/step-003624/transformer")
         self.assertEqual(self.plan["transformer_source"]["revision"], "a0080ba91538ab001fe958d2632a2f6a0cf71fb5")
+        self.assertEqual(self.plan["execution"], {"strategy": "single_process", "gpu_count": 1})
+
+    def test_ddp_plan_records_configured_strategy_and_gpu_count(self):
+        payload = load_training_config(launch.DEFAULT_CONFIG).recipe_dict()
+        payload["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
+        payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        payload["deployment"]["gpu_count"] = 2
+        path = self.workspace / "configs/ddp.json"
+        launch.shared.write_json(path, payload)
+        self.args.config = path
+        with patch.object(launch, "ROOT", self.workspace.resolve()):
+            plan = launch.plan_run(self.args)
+        self.assertEqual(plan["execution"], {"strategy": "ddp", "gpu_count": 2})
+        self.assertEqual(plan["epochs"], self.plan["epochs"])
+
+    def test_invalid_or_missing_execution_plan_fails_before_cloud_access(self):
+        for execution in ({"strategy": "ddp"}, {"strategy": "single_process", "gpu_count": 2},
+                          {"strategy": "ddp", "gpu_count": 0}, {"strategy": "fsdp2", "gpu_count": 2}):
+            with self.subTest(execution=execution), patch.object(launch, "connect_account") as account:
+                with self.assertRaises((ValueError, KeyError)):
+                    launch.execute({**self.plan, "execution": execution})
+                account.assert_not_called()
 
     def test_dry_run_needs_no_modal_installation_or_authentication(self):
         program = """
@@ -151,8 +173,10 @@ main(['run', '--profile', 'unconfigured', '--expected-workspace', 'unconfigured'
             info.size = 0
             archive.addfile(info, io.BytesIO())
         manifest = {"files": {self.plan["config"]: {}}}
-        for preparation_code in (0, 1):
-            with self.subTest(preparation_code=preparation_code):
+        for preparation_code, count in ((0, 1), (1, 1), (0, 2)):
+            with self.subTest(preparation_code=preparation_code, count=count):
+                plan = {**self.plan, "execution": {
+                    "strategy": "single_process" if count == 1 else "ddp", "gpu_count": count}}
                 fake = Mock()
                 fake.enable_output.side_effect = nullcontext
                 prepared, trained = Mock(object_id="sb-cpu"), Mock(object_id="sb-gpu")
@@ -167,15 +191,17 @@ main(['run', '--profile', 'unconfigured', '--expected-workspace', 'unconfigured'
                         patch.object(launch, "follow", side_effect=[preparation_code, 0]):
                     if preparation_code:
                         with self.assertRaisesRegex(RuntimeError, "prepare failed"):
-                            launch.execute(self.plan)
+                            launch.execute(plan)
                     else:
-                        launch.execute(self.plan)
+                        launch.execute(plan)
                 calls = fake.Sandbox.create.call_args_list
                 self.assertEqual(len(calls), 1 if preparation_code else 2)
                 self.assertNotIn("gpu", calls[0].kwargs)
                 self.assertEqual(calls[0].kwargs["timeout"], launch.PREPARE_SECONDS)
                 if not preparation_code:
-                    self.assertEqual(calls[1].kwargs["gpu"], "H200")
+                    self.assertEqual(calls[1].kwargs["gpu"], "H200" if count == 1 else "H200:2")
+                    self.assertEqual(calls[1].kwargs["cpu"], (8 * count, 8 * count))
+                    self.assertEqual(calls[1].kwargs["memory"], (65536 * count, 65536 * count))
                     self.assertEqual(calls[1].kwargs["timeout"], launch.TRAIN_SECONDS)
                     self.assertEqual(calls[0].kwargs["name"], calls[1].kwargs["name"])
                     self.assertIn("worker", calls[1].args)

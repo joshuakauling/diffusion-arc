@@ -65,6 +65,8 @@ def plan_run(args) -> dict:
         "profile": args.profile, "expected_workspace": args.expected_workspace,
         "environment": args.environment, "volume": args.volume, "secret": args.secret,
         "config": str(config_path.relative_to(ROOT)),
+        "execution": {"strategy": recipe["execution"]["distributed_strategy"],
+                      "gpu_count": recipe["deployment"]["gpu_count"]},
         "output_repo": recipe["models"]["transformer_source"]["repo_id"],
         "transformer_source": recipe["models"]["transformer_source"],
         "frozen_sources": {"nvarc": shared.NVARC_HANDLE, "vae_repo": shared.FLUX_REPO,
@@ -212,8 +214,25 @@ def follow(sandbox) -> int:
     return code
 
 
+def phase_resources(plan: dict, phase: str) -> dict:
+    """Reserve CPU preparation once and one training resource share per GPU."""
+    execution = plan["execution"]
+    count = execution["gpu_count"]
+    strategy = execution["strategy"]
+    if (strategy not in ("single_process", "ddp") or type(count) is not int or count < 1
+            or (strategy == "single_process" and count != 1)):
+        raise ValueError("Invalid training strategy or GPU count in launch plan")
+    if phase == "prepare":
+        return {"cpu": (4, 4), "memory": (32768, 32768)}
+    if phase != "train":
+        raise ValueError(f"Unsupported launch phase: {phase}")
+    return {"gpu": "H200" if count == 1 else f"H200:{count}",
+            "cpu": (8 * count, 8 * count), "memory": (65536 * count, 65536 * count)}
+
+
 def execute(plan: dict) -> None:
     """Build on CPU, finish CPU preparation, then launch one self-terminating H200 job."""
+    resources = {phase: phase_resources(plan, phase) for phase in ("prepare", "train")}
     modal = connect_account(plan["profile"], plan["expected_workspace"])
     secret = modal.Secret.from_name(plan["secret"], environment_name=plan["environment"],
                                     required_keys=list(SECRETS))
@@ -244,8 +263,6 @@ def execute(plan: dict) -> None:
                        "KAGGLEHUB_CACHE": "/workspace/.cache/kagglehub"})
                  .workdir(REMOTE_ROOT).add_local_dir(snapshot, REMOTE_ROOT))
         for phase in ("prepare", "train"):
-            resources = ({"cpu": (4, 4), "memory": (32768, 32768)} if phase == "prepare"
-                         else {"gpu": "H200", "cpu": (8, 8), "memory": (65536, 65536)})
             with modal.enable_output():
                 sandbox = modal.Sandbox.create(
                     "python", f"{REMOTE_ROOT}/scripts/cloud/train_modal.py", "worker",
@@ -255,7 +272,7 @@ def execute(plan: dict) -> None:
                     app=app, name="arc-train-" + hashlib.sha256(plan["volume"].encode()).hexdigest()[:20],
                     image=image,
                     secrets=[secret], volumes={str(WORKSPACE): volume},
-                    timeout=plan["limits"][f"{phase}_seconds"], **resources)
+                    timeout=plan["limits"][f"{phase}_seconds"], **resources[phase])
             shared.write_json(receipt / f"{phase}.json", {"sandbox_id": sandbox.object_id})
             print(f"Modal {phase}: {sandbox.object_id}; receipt: {receipt}", flush=True)
             print("Closing this terminal does not stop this Sandbox. It exits on completion or timeout.", flush=True)

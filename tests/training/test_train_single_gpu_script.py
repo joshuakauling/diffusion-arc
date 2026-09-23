@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.train_single_gpu import main
+from scripts.train import main
+from scripts.train_single_gpu import main as compatibility_main
 from diffusion_arc.training.config import TrainingConfig
 
 
@@ -18,6 +19,24 @@ RECIPE = ROOT / "configs/training/arc_agi_1_epoch.json"
 
 
 class TrainSingleGpuScriptTests(unittest.TestCase):
+    def test_compatibility_entrypoint_uses_the_same_training_command(self):
+        self.assertIs(compatibility_main, main)
+
+    def test_ddp_recipe_reaches_the_same_runner_with_explicit_strategy_and_gpu_count(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = json.loads(RECIPE.read_text())
+            payload["execution"]["distributed_strategy"] = "ddp"
+            payload["deployment"]["gpu_count"] = 2
+            path = Path(temp) / "ddp.json"
+            path.write_text(json.dumps(payload))
+            run = Mock()
+            with patch.dict(sys.modules, {"diffusion_arc.training.runner": SimpleNamespace(run_training=run)}):
+                self.assertEqual(main(["--config", str(path)]), 0)
+            config = run.call_args.args[0]
+            self.assertEqual(config.recipe["execution"]["distributed_strategy"], "ddp")
+            self.assertEqual(config.recipe["deployment"]["gpu_count"], 2)
+            self.assertEqual(config.recipe["flow"]["rng_scheme"], "global_step_target_v1")
+
     def test_passes_the_loaded_typed_config_with_resolved_paths_to_runner(self):
         run = Mock()
         with patch.dict(sys.modules, {"diffusion_arc.training.runner": SimpleNamespace(run_training=run)}):

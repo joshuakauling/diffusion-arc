@@ -211,6 +211,12 @@ class WandbLogger:
         if not os.environ.get(self.options["api_key_environment_variable"]):
             raise ValueError("set WANDB_API_KEY in the environment before training")
         self.allowed_metrics = _metric_names(self.options)
+        if config.recipe["execution"]["distributed_strategy"] == "ddp":
+            for rank in range(config.recipe["deployment"]["gpu_count"]):
+                self.allowed_metrics.add(f"train/rank_{rank}/step_seconds")
+                self.allowed_metrics.update(
+                    f"system/rank_{rank}/{name.removeprefix('system/')}"
+                    for name in self.options["hardware"]["per_step_metrics"])
 
     def __enter__(self) -> WandbLogger:
         """Check hardware support, then start the explicitly configured SDK run."""

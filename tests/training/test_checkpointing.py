@@ -36,6 +36,30 @@ class TinyTransformer(ModelMixin, ConfigMixin):
         return self.projection(values)
 
 
+class CheckpointRuntime:
+    """Replay a two-rank rendezvous without replacing the real state serialization."""
+
+    strategy = "ddp"
+    world_size = 2
+    device = torch.device("cpu")
+
+    def __init__(self, rank, gathered, publication):
+        self.rank = rank
+        self.is_primary = rank == 0
+        self.gathered = gathered
+        self.publication = publication
+
+    def gather(self, value):
+        values = deepcopy(self.gathered)
+        values[self.rank] = value
+        return values
+
+    def primary(self, callback):
+        if self.is_primary:
+            self.publication["result"] = callback()
+        return self.publication["result"]
+
+
 class CheckpointTests(unittest.TestCase):
     def test_new_optimizer_at_global_epoch_three_restores_warmup_and_exact_next_update(self):
         payload = self.config.recipe_dict()
@@ -145,22 +169,22 @@ class CheckpointTests(unittest.TestCase):
             "train/flux_forward_calls": 6 * step, "sample/flux_forward_calls": 240,
         })
 
-    def _save(self, components, *, config=None):
+    def _save(self, components, *, config=None, **kwargs):
         model, optimizer, scheduler, generator = components
         metrics = checkpointing.save_checkpoint(
             self._progress(scheduler.last_epoch), config=self.config if config is None else config,
             transformer=model, optimizer=optimizer, scheduler=scheduler,
             flow_generator=generator, device=self.device, identity=self.identity,
-            wandb_run=self.wandb_run,
+            wandb_run=self.wandb_run, **kwargs,
         )
         return Path(metrics["checkpoint/path"]), metrics
 
-    def _restore(self, path, components):
+    def _restore(self, path, components, **kwargs):
         model, optimizer, scheduler, generator = components
         checkpoint = checkpointing.read_checkpoint(path, self.config)
         checkpointing.restore_training_state(
             checkpoint, transformer=model, optimizer=optimizer, scheduler=scheduler,
-            flow_generator=generator, device=self.device,
+            flow_generator=generator, device=self.device, **kwargs,
         )
 
     def _rewrite_metadata(self, path, change):
@@ -383,6 +407,8 @@ class CheckpointTests(unittest.TestCase):
         old, _ = self._save(components)
         old_contents = {str(file.relative_to(old)): file.read_bytes()
                         for file in old.rglob("*") if file.is_file()}
+        with self.assertRaises(FileExistsError):
+            self._save(components)
         self._advance(components)
         rng = checkpointing._capture_rng(components[3], self.device)
         weights = deepcopy(components[0].state_dict())
@@ -403,12 +429,6 @@ class CheckpointTests(unittest.TestCase):
                                        for file in old.rglob("*") if file.is_file()})
         self.assertNestedEqual(checkpointing._capture_rng(components[3], self.device), rng)
         self.assertNestedEqual(components[0].state_dict(), weights)
-        with self.assertRaises(FileExistsError):
-            checkpointing.save_checkpoint(
-                self._progress(2), config=self.config, transformer=components[0], optimizer=components[1],
-                scheduler=components[2], flow_generator=components[3], device=self.device,
-                identity=self.identity, wandb_run=self.wandb_run,
-            )
 
     def test_retention_keeps_all_by_default_and_only_removes_own_completed_checkpoints(self):
         components = self._components()
@@ -446,6 +466,138 @@ class CheckpointTests(unittest.TestCase):
                 scheduler=components[2], flow_generator=components[3], device=self.device,
                 identity=self.identity, wandb_run=self.wandb_run,
             )
+
+    def _use_ddp_config(self):
+        recipe = self.config.recipe_dict()
+        recipe["deployment"]["output_directory"] = self.config.recipe["deployment"]["output_directory"]
+        recipe["deployment"]["gpu_count"] = 2
+        recipe["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
+        recipe["flow"]["rng_scheme"] = "global_step_target_v1"
+        self.config = replace(self.config, recipe=recipe)
+        self.identity = checkpointing.checkpoint_identity(
+            self.config, data_fingerprint="a" * 64,
+            validation_manifest={"validation_task_ids": ["held-out-task"]})
+
+    def test_legacy_schema_expands_only_equivalent_rng_and_packing_defaults(self):
+        components = self._components()
+        self._advance(components)
+        path, _ = self._save(components)
+
+        def old_schema(metadata):
+            metadata["schema_version"] = 1
+            metadata.pop("execution")
+            for recipe in (metadata["recipe"], metadata["identity"]["recipe"]):
+                recipe["flow"].pop("rng_scheme", None)
+                recipe["execution"].pop("flux_packing_algorithm", None)
+                recipe["execution"].pop("flux_max_spread_tokens", None)
+
+        self._rewrite_metadata(path, old_schema)
+        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        self.assertTrue(checkpointing.checkpoint_identities_match(checkpoint.metadata["identity"], self.identity))
+        for section, field, value in (("flow", "rng_scheme", "global_step_target_v1"),
+                                      ("execution", "flux_packing_algorithm", "balanced_release_v1"),
+                                      ("execution", "flux_max_spread_tokens", 250)):
+            with self.subTest(field=field):
+                recipe = self.config.recipe_dict()
+                recipe[section][field] = value
+                changed = replace(self.config, recipe=recipe)
+                with self.assertRaisesRegex(ValueError, "recipe differs"):
+                    checkpointing.read_checkpoint(path, changed)
+
+    def test_ddp_roundtrip_keeps_each_rank_rng_and_existing_gradient_buffers(self):
+        self._use_ddp_config()
+        components = self._components()
+        self._advance(components, 2)
+        rng0 = checkpointing._capture_rng(components[3], self.device)
+        expected = [self._advance(components)]
+        rng1 = checkpointing._capture_rng(components[3], self.device)
+        expected.append(self._advance(components))
+
+        # Replicated weights/optimizer are saved once; rank-specific streams differ.
+        components = self._components()
+        self._advance(components, 2)
+        gathered = [{"error": None, "rng": rng} for rng in (rng0, rng1)]
+        publication = {}
+        buffers = []
+        for parameter in components[0].parameters():
+            parameter.grad = torch.zeros_like(parameter)
+            buffers.append(parameter.grad)
+        runtime0 = CheckpointRuntime(0, gathered, publication)
+        path, metrics = self._save(components, runtime=runtime0, completed_update=True)
+        self.assertNestedEqual(checkpointing._capture_rng(components[3], self.device), rng0)
+        checkpointing._restore_rng(rng1, components[3], self.device)
+        runtime1 = CheckpointRuntime(1, gathered, publication)
+        with patch.object(checkpointing.torch, "save") as save:
+            rank1_path, rank1_metrics = self._save(components, runtime=runtime1, completed_update=True)
+        save.assert_not_called()
+        self.assertEqual(rank1_path, path)
+        self.assertEqual(rank1_metrics, metrics)
+        self.assertNestedEqual(checkpointing._capture_rng(components[3], self.device), rng1)
+        payload = torch.load(path / "training_state.pt", weights_only=True)
+        self.assertNotIn("rng", payload)
+        self.assertNestedEqual(payload["rng_by_rank"], [rng0, rng1])
+        self.assertEqual(json.loads((path / "checkpoint.json").read_text())["execution"],
+                         {"strategy": "ddp", "world_size": 2})
+
+        for rank, runtime in enumerate((runtime0, runtime1)):
+            with self.subTest(rank=rank):
+                loaded = self._components(TinyTransformer.from_pretrained(path / "transformer", local_files_only=True))
+                original_buffers = []
+                for parameter in loaded[0].parameters():
+                    parameter.grad = torch.ones_like(parameter)
+                    original_buffers.append(parameter.grad)
+                self._restore(path, loaded, runtime=runtime)
+                self.assertNestedEqual(loaded[1].state_dict(), payload["optimizer"])
+                for parameter, buffer in zip(loaded[0].parameters(), original_buffers, strict=True):
+                    self.assertIs(parameter.grad, buffer)
+                    self.assertEqual(torch.count_nonzero(buffer).item(), 0)
+                draws = self._advance(loaded)[0]
+                if rank == 0:
+                    self.assertNestedEqual(draws, expected[0][0])
+                # Rank one's expected weights differ here; compare its four independent RNG streams.
+                for key in ("python", "numpy", "inputs", "flow_noise"):
+                    self.assertNestedEqual(draws[key], expected[rank][0][key])
+
+    def test_ddp_rejects_unconfirmed_update_and_other_rank_boundary_failure(self):
+        self._use_ddp_config()
+        components = self._components()
+        self._advance(components)
+        rng = checkpointing._capture_rng(components[3], self.device)
+        gathered = [{"error": None, "rng": rng}, {"error": None, "rng": rng}]
+        runtime = CheckpointRuntime(0, gathered, {})
+        with self.assertRaisesRegex(ValueError, "explicitly completed"):
+            self._save(components, runtime=runtime)
+        gathered[1]["error"] = "checkpoint scheduler is not at the completed optimizer step"
+        with self.assertRaisesRegex(ValueError, "rank 1.*scheduler"):
+            self._save(components, runtime=runtime, completed_update=True)
+        self.assertFalse((self.directory / "output/checkpoints").exists())
+
+    def test_ddp_rejects_changed_world_size_strategy_and_incomplete_rank_rng(self):
+        self._use_ddp_config()
+        components = self._components()
+        self._advance(components)
+        rng = checkpointing._capture_rng(components[3], self.device)
+        gathered = [{"error": None, "rng": rng}, {"error": None, "rng": rng}]
+        runtime = CheckpointRuntime(0, gathered, {})
+        path, _ = self._save(components, runtime=runtime, completed_update=True)
+        for strategy, world_size in (("single_process", 1), ("ddp", 1), ("ddp", 4)):
+            with self.subTest(strategy=strategy, world_size=world_size):
+                recipe = self.config.recipe_dict()
+                recipe["deployment"]["gpu_count"] = world_size
+                recipe["execution"]["distributed_strategy"] = strategy
+                with self.assertRaisesRegex(ValueError, "strategy or world size"):
+                    checkpointing.read_checkpoint(path, replace(self.config, recipe=recipe))
+        with self.assertRaisesRegex(ValueError, "strategy or world size"):
+            self._restore(path, components)
+        state_file = path / "training_state.pt"
+        state = torch.load(state_file, weights_only=True)
+        for faulty_rng in ([rng], [rng, {}]):
+            state["rng_by_rank"] = faulty_rng
+            torch.save(state, state_file)
+            self._rewrite_metadata(path, lambda metadata: metadata["files"].update(
+                {"training_state.pt": state_file.stat().st_size}))
+            with self.assertRaisesRegex(ValueError, "RNG state.*incomplete"):
+                self._restore(path, components, runtime=runtime)
 
 
 if __name__ == "__main__":

@@ -327,17 +327,34 @@ def preflight_disk(config, workspace: Path, start_step: int) -> None:
 
 def preflight_gpu_and_disk(config, workspace: Path, start_step: int) -> None:
     """Check checkpoint headroom and exercise the existing FA3 forward/backward preflight."""
+    if config.recipe["deployment"]["gpu_type"] != "H200":
+        raise ValueError("This launcher supports H200 training recipes")
     preflight_disk(config, workspace, start_step)
+    gpu_count = config.recipe["deployment"]["gpu_count"]
     subprocess.run([sys.executable, "-c", "\n".join((
         "import torch",
         "from diffusion_arc.model.flux.packing import Flash3Backend",
         "assert torch.cuda.is_available(), 'CUDA is unavailable'",
-        "assert torch.cuda.device_count() == 1, 'Expose exactly one H200'",
-        "assert 'H200' in torch.cuda.get_device_name(0), 'This recipe expects an H200'",
-        "assert torch.cuda.get_device_capability(0) == (9, 0), 'Hopper SM90 required'",
-        "Flash3Backend('cuda:0')",
+        f"assert torch.cuda.device_count() == {gpu_count}, 'Expose exactly {gpu_count} H200 GPUs'",
+        f"for index in range({gpu_count}):",
+        "    assert 'H200' in torch.cuda.get_device_name(index), 'This recipe expects H200 GPUs'",
+        "    assert torch.cuda.get_device_capability(index) == (9, 0), 'Hopper SM90 required'",
+        "    with torch.cuda.device(index):",
+        "        Flash3Backend(f'cuda:{index}')",
         "print('GPU/FA3 forward and backward preflight passed', flush=True)",
     ))], check=True, cwd=REPOSITORY_ROOT)
+
+
+def training_command(config, command: list[str]) -> list[str]:
+    """Launch one training process per configured GPU, preserving stage arguments."""
+    strategy = config.recipe["execution"]["distributed_strategy"]
+    if strategy == "single_process":
+        return list(command)
+    if strategy != "ddp":
+        raise ValueError(f"Unsupported training execution strategy: {strategy}")
+    count = config.recipe["deployment"]["gpu_count"]
+    return [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1",
+            f"--nproc-per-node={count}", "--max-restarts=0", "--no-python", *command]
 
 
 def download_models(config, *, workspace: Path, include_transformer: bool = True) -> None:
@@ -540,6 +557,8 @@ def main(argv=None) -> int:
                        if model_paths is not None else None},
             "data": {"provider": "kaggle", "handle": DATA_HANDLE, "sha256": DATA_SHA256},
             "output_repo": output_repo, "launcher_sha256": sha256_file(Path(__file__)),
+            "execution": {"strategy": config.recipe["execution"]["distributed_strategy"],
+                          "gpu_count": config.recipe["deployment"]["gpu_count"]},
             "source_snapshot": (json.loads((REPOSITORY_ROOT / "_source.json").read_text())
                                 if (REPOSITORY_ROOT / "_source.json").exists() else None),
         })
@@ -547,8 +566,9 @@ def main(argv=None) -> int:
             print(f"Preparation complete. Resolved config: {config.path}", flush=True)
             return 0
         write_json(run_directory / "training-started.json", {"resume_from": config.recipe_dict()["models"]["resume_from"]})
-        subprocess.run([sys.executable, str(REPOSITORY_ROOT / "scripts/train_single_gpu.py"),
-                        "--config", str(config.path)], check=True, cwd=REPOSITORY_ROOT)
+        subprocess.run(training_command(config, [sys.executable, str(REPOSITORY_ROOT / "scripts/train.py"),
+                                                 "--config", str(config.path)]),
+                       check=True, cwd=REPOSITORY_ROOT)
         upload_weights(config, api=api, output_repo=output_repo)
         print("Training and weight uploads completed. The Pod remains running.", flush=True)
     return 0

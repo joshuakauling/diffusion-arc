@@ -57,7 +57,7 @@ def source_snapshot(root: Path) -> tuple[bytes, dict]:
             info.size, info.mode = len(content), 0o644
             archive.addfile(info, io.BytesIO(content))
             files[name] = {"sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content)}
-        required = {"pyproject.toml", "README.md", "scripts/train_single_gpu.py",
+        required = {"pyproject.toml", "README.md", "scripts/train.py", "scripts/train_single_gpu.py",
                     "scripts/cloud/train_runpod.py", "scripts/cloud/launch_runpod.py"}
         if missing := required - files.keys():
             raise ValueError(f"Source snapshot is incomplete: {sorted(missing)}")

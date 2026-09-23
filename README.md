@@ -91,7 +91,8 @@ sources may require up to 8,400 tokens. The initial ARC setup uses no visual
 reference images, so the longer text context is combined only with the 900
 target image tokens rather than additional reference-image tokens.
 The [B3 benchmark](docs/performance/b3.md) measures single-GPU execution with
-these lengths; distributed memory and runtime behavior remain to be measured.
+these lengths. The [DDP report](docs/performance/ddp.md) records the subsequent
+distributed numerical, memory and runtime experiments.
 
 The complete initial architecture, training objective, and decoding procedure
 are documented in
@@ -99,14 +100,17 @@ are documented in
 
 ## Distributed Training
 
-The next engineering stage extends the B3 single-GPU baseline to DDP and
-FSDP2 without changing the underlying experiment. NVARC
-and the FLUX VAE remain frozen, while the complete FLUX transformer is trained
-using BF16 mixed precision.
+Single-GPU and DDP execution share one configurable training runner, including
+validation, sampling, W&B logging, checkpoint save/resume and epoch continuation.
+NVARC and the FLUX VAE remain frozen, while the complete FLUX transformer is
+trained using BF16 mixed precision. Execution strategies isolate gradient
+synchronization, loss scaling and gradient cleanup from the common step.
 
-The single-GPU runner supports gradient clipping, non-finite diagnostics,
-and profiling. Distributed data loading, activation checkpointing, and
-distributed checkpoint save/resume are planned extensions.
+Local tests compare native execution with two CPU/Gloo ranks and verify exact
+DDP continuation from a checkpoint. The integrated full-model GPU lifecycle
+still requires a smoke run. FSDP2 and activation checkpointing remain future
+extensions. See the [training guide](docs/training/README.md) for configuration
+and compatibility with historical single-GPU recipes.
 
 Single-GPU, DDP, and FSDP2 execution will be compared using the same global batch
 size and random seeds. Benchmarks on 1, 2, 4, and 8 GPUs, where the available

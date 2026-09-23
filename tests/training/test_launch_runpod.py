@@ -46,6 +46,7 @@ class LocalLaunchTests(unittest.TestCase):
             "time.sleep(0.2)", "sys.exit(int(os.environ.get('TEST_POD_EXIT', '0')))",
         )))
         self.write("scripts/train_single_gpu.py", "# fixture\n")
+        self.write("scripts/train.py", "# fixture\n")
         self.write("configs/recipe.json", "{}")
         self.write(".gitignore", ".env\nartifacts/\n")
         for command in (("init", "-q"), ("add", "."),

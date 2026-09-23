@@ -63,6 +63,19 @@ def _write_config(directory: Path, payload: dict) -> Path:
 
 
 class BaselineConfigTests(unittest.TestCase):
+    def test_packing_spread_has_a_default_and_accepts_an_explicit_bound(self):
+        payload = _payload()
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_training_config(_write_config(Path(directory), payload))
+            self.assertEqual(config.flux_packing.max_spread_tokens, 1000)
+            payload["flux_packing"]["max_spread_tokens"] = 500
+            config = load_training_config(_write_config(Path(directory), payload))
+            self.assertEqual(config.flux_packing.max_spread_tokens, 500)
+            for invalid in (True, -1, 1.5):
+                payload["flux_packing"]["max_spread_tokens"] = invalid
+                with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                    load_training_config(_write_config(Path(directory), payload))
+
     def test_b3_recipes_preserve_workload_and_change_only_duration(self):
         root = Path(__file__).resolve().parents[2] / "configs/training"
         benchmark = load_training_config(root / "benchmarks/single_gpu_b3.json")
@@ -352,6 +365,56 @@ class TrainingRunConfigTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.payload if payload is None else payload))
         return load_training_config(self.path)
 
+    def test_recipe_records_effective_spread_and_preserves_explicit_override(self):
+        config = self.load()
+        self.assertEqual(config.flux_packing.max_spread_tokens, 1000)
+        self.assertEqual(config.recipe["execution"]["flux_max_spread_tokens"], 1000)
+        self.payload["execution"]["flux_max_spread_tokens"] = 0
+        config = self.load()
+        self.assertEqual(config.flux_packing.max_spread_tokens, 0)
+        self.assertEqual(config.recipe["execution"]["flux_max_spread_tokens"], 0)
+        for invalid in (True, -1, 1.5):
+            self.payload["execution"]["flux_max_spread_tokens"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError)):
+                self.load()
+
+    def test_execution_defaults_preserve_single_and_select_indexed_ddp(self):
+        single = self.load()
+        self.assertEqual(single.recipe["flow"]["rng_scheme"], "legacy_stream_v1")
+        self.assertEqual(single.recipe["execution"]["flux_packing_algorithm"], "legacy_bfd_v1")
+        self.assertEqual(single.flux_packing.algorithm, "legacy_bfd_v1")
+        self.payload["execution"]["distributed_strategy"] = "ddp"
+        self.payload["deployment"]["gpu_count"] = 2
+        ddp = self.load()
+        self.assertEqual(ddp.recipe["flow"]["rng_scheme"], "global_step_target_v1")
+        self.assertEqual(ddp.flux_packing.algorithm, "balanced_release_v1")
+        self.payload["deployment"]["gpu_count"] = 1
+        self.assertEqual(self.load().recipe["execution"]["distributed_strategy"], "ddp")
+
+    def test_native_single_can_use_the_same_indexed_draws_and_packing_as_ddp(self):
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        self.payload["execution"]["flux_packing_algorithm"] = "balanced_release_v1"
+        config = self.load()
+        self.assertEqual(config.recipe["execution"]["distributed_strategy"], "single_process")
+        self.assertEqual(config.recipe["flow"]["rng_scheme"], "global_step_target_v1")
+        self.assertEqual(config.flux_packing.algorithm, "balanced_release_v1")
+
+    def test_strategy_rejects_incompatible_or_unversioned_settings(self):
+        for section, field, value in (
+            ("deployment", "gpu_count", 2), ("deployment", "gpu_count", 0),
+            ("deployment", "gpu_count", True), ("flow", "rng_scheme", "global"),
+            ("execution", "flux_packing_algorithm", "balanced"),
+        ):
+            with self.subTest(field=field, value=value):
+                payload = copy.deepcopy(self.payload)
+                payload[section][field] = value
+                with self.assertRaises((ValueError, TypeError)):
+                    self.load(payload)
+        self.payload["execution"]["distributed_strategy"] = "ddp"
+        self.payload["flow"]["rng_scheme"] = "legacy_stream_v1"
+        with self.assertRaisesRegex(ValueError, "ddp execution requires flow.rng_scheme"):
+            self.load()
+
     def test_recipe_reuses_b3_components_and_retains_complete_epoch(self):
         config = load_training_config(RECIPE)
         benchmark = load_training_config(ROOT / "configs/training/benchmarks/single_gpu_b3.json")
@@ -514,7 +577,7 @@ class TrainingRunConfigTests(unittest.TestCase):
             ("data", "vae_safety_filter", True),
             ("models", "trainable_modules", ["nvarc", "flux_transformer"]),
             ("execution", "activation_checkpointing", True),
-            ("execution", "distributed_strategy", "ddp"),
+            ("execution", "distributed_strategy", "fsdp2"),
             ("execution", "device", "cpu"),
             ("execution", "flux_max_joint_tokens", 9299),
             ("scheduler", "type", "cosine"),

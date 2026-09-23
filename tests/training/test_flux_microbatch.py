@@ -10,6 +10,7 @@ import torch
 from diffusion_arc.model import TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
 from diffusion_arc.model.contracts import FluxSpatialShape
 from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
+from diffusion_arc.model.flux.packing import PackedFluxForward
 from diffusion_arc.training.step.encoding import FluxInput, NvarcSequenceState
 from diffusion_arc.training.step.flow_sampling import UniformFlowSampler, select_flow_batch
 from diffusion_arc.training.step.flux_microbatch import FluxMicrobatch, build_flux_microbatch, compute_flux_microbatch_loss
@@ -167,13 +168,16 @@ class PackedForwardTests(unittest.TestCase):
         flows = UniformFlowSampler(torch.Generator().manual_seed(81))(latents)
         def run(groups):
             model = deepcopy(initial)
+            forward = PackedFluxForward(
+                model, compute_dtype=torch.bfloat16, backend=SegmentedReference(),
+            )
             state = NvarcSequenceState(hidden, (2,4,6))
             inputs = tuple(FluxInput(state, end, latent, (2,2), 1) for end,latent in zip((2,4,6),latents))
             total = 0.0
             for indices in groups:
                 result = compute_flux_microbatch_loss(
                     tuple(inputs[i] for i in indices), select_flow_batch(flows, indices),
-                    transformer=model, compute_dtype=torch.bfloat16, packing_backend=SegmentedReference(),
+                    transformer=forward,
                     max_joint_tokens=12288, loss_function=velocity_mse, spatial_shape=FluxSpatialShape(2,2),
                 )
                 self.assertIsNone(result.regions)
@@ -212,10 +216,10 @@ class PackedForwardTests(unittest.TestCase):
                     self.assertEqual(grid_shapes, ((30,30), (2,3), (7,1)))
                     loss_calls.append(grid_shapes)
                     return objective(prediction, target_velocity, grid_shapes)
-                with patch('diffusion_arc.training.step.flux_microbatch.predict_packed_flux_velocity', side_effect=forward) as predict:
+                with patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=forward) as predict:
                     result = compute_flux_microbatch_loss(tuple(inputs[i] for i in order), flow,
-                                                          transformer=model, compute_dtype=torch.bfloat16,
-                                                          packing_backend=object(), max_joint_tokens=12288,
+                                                          transformer=PackedFluxForward(model, compute_dtype=torch.bfloat16,
+                                                                                        backend=object()), max_joint_tokens=12288,
                                                           loss_function=loss)
                 self.assertEqual(predict.call_count, 1)
                 self.assertEqual(len(loss_calls), 1)
