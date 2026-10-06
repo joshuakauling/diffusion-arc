@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from diffusion_arc.training.benchmark_config import load_ddp_benchmark_config
+from diffusion_arc.training.benchmark_config import load_training_benchmark_config
 from diffusion_arc.training.config import load_training_config
 
 
@@ -29,19 +29,23 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
 
     def load(self, payload=None):
         self.path.write_text(json.dumps(self.payload if payload is None else payload))
-        return load_ddp_benchmark_config(self.path)
+        return load_training_benchmark_config(self.path)
 
     def test_repository_config_uses_b3_data_with_the_unchanged_training_recipe(self):
-        config = load_ddp_benchmark_config(BENCHMARK)
+        config = load_training_benchmark_config(BENCHMARK)
         original = load_training_config(RECIPE)
         b3 = load_training_config(B3)
         self.assertEqual(config.path, BENCHMARK)
         self.assertEqual(config.training.path, RECIPE)
         self.assertEqual(config.training.name, original.name)
-        self.assertEqual(config.training, replace(original, data=replace(
-            original.data, split_directory=b3.data.split_directory, view_name=b3.data.view_name,
-        )))
-        self.assertEqual(config.training.recipe_dict(), original.recipe_dict())
+        self.assertEqual(config.training.models, original.models)
+        self.assertEqual(config.training.optimizer, original.optimizer)
+        self.assertEqual(config.training.scheduler, original.scheduler)
+        self.assertEqual(config.training.data.split_directory, b3.data.split_directory)
+        self.assertEqual(config.training.recipe["execution"]["distributed_strategy"], "ddp")
+        self.assertEqual(config.training.recipe["deployment"]["gpu_count"], 2)
+        self.assertEqual(config.training.flux_packing.algorithm, "balanced_release_v1")
+        self.assertEqual(config.training.recipe["flow"]["rng_scheme"], "global_step_target_v1")
         self.assertEqual(config.expected_source_count, 960)
         self.assertEqual(config.repetitions, 3)
         self.assertEqual((config.smoke_steps, config.warmup_steps, config.measured_steps), (3, 10, 50))
@@ -78,6 +82,8 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
             lambda p: p.update(extra=True),
             lambda p: p.pop("training_recipe"),
             lambda p: p.pop("repetitions"),
+            lambda p: p.pop("execution"),
+            lambda p: p["execution"].pop("rng_scheme"),
             lambda p: p["data"].update(num_workers=0),
             lambda p: p["data"].pop("expected_source_count"),
         ):
@@ -89,7 +95,7 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
                     '{"data": {"view_name": "train", "view_name": "train"}}'):
             self.path.write_text(raw)
             with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "duplicate config field"):
-                load_ddp_benchmark_config(self.path)
+                load_training_benchmark_config(self.path)
         with self.assertRaisesRegex(TypeError, "JSON object"):
             self.load([])
 
@@ -132,8 +138,9 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
 
     def test_requires_a_fresh_training_run_recipe(self):
         self.payload["training_recipe"] = str(B3)
-        with self.assertRaisesRegex(ValueError, "expected 'training_run'"):
-            self.load()
+        baseline_objective = self.load()
+        self.assertEqual(baseline_objective.training.recipe["loss"]["type"], "velocity_mse")
+        self.payload["training_recipe"] = str(RECIPE)
         recipe = json.loads(RECIPE.read_text())
         recipe["models"]["resume_from"] = "checkpoints/prior-run"
         recipe_path = self.path.parent / "resume.json"
@@ -146,8 +153,8 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-B", "-c", (
                 "import sys; sys.path.insert(0, 'src'); "
-                "from diffusion_arc.training.benchmark_config import load_ddp_benchmark_config; "
-                "config = load_ddp_benchmark_config('configs/training/benchmarks/ddp_training.json'); "
+                "from diffusion_arc.training.benchmark_config import load_training_benchmark_config; "
+                "config = load_training_benchmark_config('configs/training/benchmarks/ddp_training.json'); "
                 "assert config.benchmark_steps == 60; "
                 "assert not {'torch', 'transformers', 'diffusers'}.intersection(sys.modules)"
             )], cwd=ROOT, capture_output=True, text=True, check=False,

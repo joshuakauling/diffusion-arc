@@ -30,7 +30,7 @@ from diffusion_arc.model.flux.velocity import (
 from .conditioning import (
     PackedGenerationInput,
     evaluation_mode,
-    sample_conditioning_noise,
+    sample_query_latent_noise,
     stage_packed_conditioning,
     validate_packed_execution,
     validate_sampling_seed,
@@ -215,7 +215,7 @@ def generate_packed_arc_samples(
             text, layout, positions = stage_packed_conditioning(batch, device)
             for sample_index, seed in enumerate(sample_seeds):
                 latents = torch.stack(tuple(
-                    sample_conditioning_noise(query, seed, ("generation", sample_index), device)
+                    sample_query_latent_noise(query, seed, ("generation", sample_index), device)
                     for query in batch
                 ))
                 for timestep, next_timestep in zip(schedule[:-1], schedule[1:], strict=True):

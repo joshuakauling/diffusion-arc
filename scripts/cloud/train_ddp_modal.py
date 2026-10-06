@@ -55,13 +55,13 @@ def resources(gpus: int, mode: str, repetitions: int = 1) -> dict:
 
 def check_inputs(repository: Path, config: str, *, remote: bool = False):
     """Validate the uploaded recipe and data without loading model weights."""
-    from diffusion_arc.training.benchmark_config import load_ddp_benchmark_config
+    from diffusion_arc.training.benchmark_config import load_training_benchmark_config
     from diffusion_arc.training.data import ArcTrainingDataset
 
     repository = repository.resolve()
     config_path = (repository / config).resolve()
     config_path.relative_to(repository / "configs")
-    experiment = load_ddp_benchmark_config(config_path)
+    experiment = load_training_benchmark_config(config_path)
     training = experiment.training
     training.path.relative_to(repository / "configs")
     expected_split = repository / BUNDLE / "splits/train"
@@ -106,12 +106,6 @@ def run_worker(command: list[str], *, timeout: int) -> None:
         raise
     if code:
         raise subprocess.CalledProcessError(code, command)
-
-
-def check_memory_snapshot_step(mode: str, step: int, benchmark_steps: int) -> None:
-    """Reject an invalid diagnostic prefix before allocating GPUs or starting ranks."""
-    if type(step) is not int or step < 0 or step and (mode != "memory" or step > benchmark_steps):
-        raise ValueError("--memory-snapshot-step requires memory mode and a step within the benchmark window")
 
 
 def check_numerics_inputs(repository: Path, experiment):
@@ -166,9 +160,10 @@ def run_numerics(experiment, destination: Path, launch: dict, *, deadline: float
     image=image, **resources(1, "smoke"), max_containers=1, retries=0,
     scaledown_window=2, volumes={str(VOLUME_ROOT): model_volume},
 )
-def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batch: int = 0,
-              memory_snapshot_step: int = 0) -> str:
+def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batch: int = 0) -> str:
     """Keep the complete torchrun lifecycle inside the detached Modal function."""
+    # Preserve the public Modal argument while using an explicit batch number internally.
+    diagnostic_batch_number = diagnostic_batch
     started = time.monotonic()
     allocation = resources(gpus, mode)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -187,7 +182,6 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
         else:
             link.symlink_to(VOLUME_ROOT, target_is_directory=True)
         experiment = check_inputs(REMOTE_ROOT, config, remote=True)
-        check_memory_snapshot_step(mode, memory_snapshot_step, experiment.benchmark_steps)
         if mode == "profile" and experiment.warmup_steps < 1:
             raise ValueError("profile requires at least one configured warmup step")
         launch["benchmark_config"] = json.loads(experiment.path.read_text())
@@ -199,8 +193,7 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
         repetitions = experiment.repetitions if mode == "benchmark" else 1
         launch["resources"] = resources(gpus, mode, repetitions)
         launch["repetitions"] = []
-        steps = (memory_snapshot_step if memory_snapshot_step else
-                 experiment.warmup_steps + 1 if mode == "profile" else
+        steps = (experiment.warmup_steps + 1 if mode == "profile" else
                  3 if mode == "diagnostic" else
                  experiment.smoke_steps if mode == "smoke" else experiment.benchmark_steps)
         completed = []
@@ -208,13 +201,11 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
             output = destination / (f"repetition-{index}" if mode == "benchmark" else "training")
             command = [sys.executable, "-B", "-u", "-m", "torch.distributed.run",
                        "--standalone", f"--nproc-per-node={gpus}", "--max-restarts=0",
-                       str(REMOTE_ROOT / "scripts/train_ddp.py"),
+                       str(REMOTE_ROOT / "scripts/benchmark_training.py"),
                        "--config", str(experiment.path), "--mode", mode,
                        "--output-dir", str(output)]
             if mode == "diagnostic":
-                command.extend(["--diagnostic-batch", str(diagnostic_batch)])
-            if memory_snapshot_step:
-                command.extend(["--memory-snapshot-step", str(memory_snapshot_step)])
+                command.extend(["--diagnostic-batch", str(diagnostic_batch_number)])
             entry = dict(repetition=index, status="running", command=command)
             launch["repetitions"].append(entry)
             (destination / "launch.json").write_text(json.dumps(launch, indent=2) + "\n")
@@ -230,11 +221,6 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
                         trace = output / f"rank-{rank}.trace.json.gz"
                         if not trace.is_file() or trace.stat().st_size == 0:
                             raise RuntimeError(f"Torch profiler trace missing for rank {rank}")
-                if memory_snapshot_step:
-                    for rank in range(gpus):
-                        snapshot = output / f"rank-{rank}-step-{memory_snapshot_step}-pack-1-backward.pickle"
-                        if not snapshot.is_file() or snapshot.stat().st_size == 0:
-                            raise RuntimeError(f"first-backward memory snapshot missing for rank {rank}")
                 if mode == "benchmark":
                     from diffusion_arc.training.run.benchmarking import BenchmarkWindow, summarize_repetitions
                     series = summarize_repetitions(
@@ -264,12 +250,12 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
 
 
 @app.local_entrypoint()
-def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_batch: int = 0,
-         memory_snapshot_step: int = 0) -> None:
+def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_batch: int = 0) -> None:
     """Check local inputs before requesting a GPU; never prepare or download data."""
+    # Preserve the Modal --diagnostic-batch option at the public boundary.
+    diagnostic_batch_number = diagnostic_batch
     allocation = resources(gpus, mode)
     experiment = check_inputs(LOCAL_ROOT, config)
-    check_memory_snapshot_step(mode, memory_snapshot_step, experiment.benchmark_steps)
     allocation = resources(gpus, mode, experiment.repetitions)
     if mode == "profile" and experiment.warmup_steps < 1:
         raise ValueError("profile requires at least one configured warmup step")
@@ -282,9 +268,9 @@ def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_ba
         plans = plan_distributed_batches(counts * experiment.expected_source_count,
                                         optimizer_batch_size=experiment.training.loop.optimizer_batch_size,
                                         rank=0, world_size=gpus)
-        if type(diagnostic_batch) is not int or not 1 <= diagnostic_batch <= len(plans):
+        if type(diagnostic_batch_number) is not int or not 1 <= diagnostic_batch_number <= len(plans):
             raise ValueError("--diagnostic-batch must select an existing one-based global batch")
-    elif diagnostic_batch != 0:
+    elif diagnostic_batch_number != 0:
         raise ValueError("--diagnostic-batch requires --mode diagnostic")
 
     def git(*arguments):
@@ -294,7 +280,6 @@ def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_ba
     metadata = dict(git_commit=git("rev-parse", "HEAD"), git_status=git("status", "--porcelain"),
                     command=sys.argv, modal_version=modal.__version__, image_id=image.object_id)
     result = train_ddp.with_options(**allocation).remote(
-        str(experiment.path.relative_to(LOCAL_ROOT.resolve())), gpus, mode, metadata, diagnostic_batch,
-        memory_snapshot_step=memory_snapshot_step,
+        str(experiment.path.relative_to(LOCAL_ROOT.resolve())), gpus, mode, metadata, diagnostic_batch_number,
     )
     print(f"Modal DDP run complete: {result}")

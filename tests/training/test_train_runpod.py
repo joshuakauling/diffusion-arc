@@ -352,11 +352,11 @@ class RunPodTests(unittest.TestCase):
             launcher.validate_start(self.config, self.output, None)
 
     def test_pruned_states_are_skipped_for_resume_but_weights_remain_uploadable(self):
-        from diffusion_arc.training.run.checkpointing import read_checkpoint, remove_training_state
+        from diffusion_arc.training.run.checkpointing import load_checkpoint_metadata, remove_training_state
 
         paths = [self.checkpoint(step) for step in (300, 600, 906)]
         for path in paths[:2]:
-            remove_training_state(read_checkpoint(path, self.config))
+            remove_training_state(load_checkpoint_metadata(path, self.config))
         self.assertEqual([item.path for item in launcher.run_checkpoints(self.config)], [paths[-1]])
         self.assertEqual([item.path for item in launcher.run_checkpoints(self.config, include_weights_only=True)], paths)
         launcher.upload_weights(self.config, api=self.api, output_repo="tester/weights")
@@ -511,8 +511,6 @@ class RunPodTests(unittest.TestCase):
         }
         payload = self.config.recipe_dict()
         payload["data"]["expected_task_count"] = 58
-        payload["loop"].update(max_optimizer_steps=4, expected_target_count=174,
-                              expected_final_batch_target_count=30)
         payload["scheduler"].update(warmup_steps=3, first_update_warmup_fraction=1 / 3)
         launcher.write_json(self.config.path, payload)
         config = load_training_config(self.config.path)

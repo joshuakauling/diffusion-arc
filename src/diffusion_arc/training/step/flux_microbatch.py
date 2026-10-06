@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from diffusion_arc.model.contracts import DEFAULT_FLUX_SPATIAL_SHAPE, FluxSpatialShape
+from diffusion_arc.model.contracts import DEFAULT_FLUX_SPATIAL_SHAPE, FluxSpatialShape, TARGET_LATENT_SHAPE
 from diffusion_arc.model.flux.packing import PackingLayout, packing_layout
 from diffusion_arc.model.flux.velocity import build_flux_image_position_ids
 
@@ -97,4 +97,21 @@ def compute_flux_microbatch_loss(
     )
 
 
-__all__ = ["FluxMicrobatch", "build_flux_microbatch", "compute_flux_microbatch_loss"]
+def compute_fsdp_dummy_loss(transformer: nn.Module, *, device: torch.device) -> Tensor:
+    """Participate in every FLUX block with one zero-weight synthetic target.
+
+    No source cache, target supervision or RNG is consumed. The ordinary graph
+    reaches every trainable block so FSDP executes the same collectives as peers.
+    """
+    latents = torch.zeros((1, *TARGET_LATENT_SHAPE), device=device, dtype=torch.float32)
+    text = torch.zeros((1, transformer.transformer.config.joint_attention_dim),
+                       device=device, dtype=transformer.compute_dtype)
+    positions = build_flux_image_position_ids(1, device)
+    layout = packing_layout((1,), TARGET_LATENT_SHAPE[0], device)
+    timesteps = torch.full((1,), 0.5, device=device, dtype=torch.float32)
+    with training_range("train/flux_forward", torch_range=True):
+        prediction = transformer(latents, text, positions, timesteps, layout)
+    return prediction.float().mean() * 0.0
+
+
+__all__ = ["FluxMicrobatch", "build_flux_microbatch", "compute_flux_microbatch_loss", "compute_fsdp_dummy_loss"]

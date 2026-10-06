@@ -11,13 +11,15 @@ from torch import Tensor, nn
 
 from diffusion_arc.model import (
     NVARC_HIDDEN_SIZE,
-    NVARC_HIDDEN_STATE_INDICES,
     NvarcBatchOutput,
     NvarcEncoder,
 )
 from unittest.mock import patch
 from contextlib import ExitStack
 from diffusion_arc.model.nvarc.attention import register_nvarc_attention, NVARC_ATTENTION_IMPLEMENTATION
+
+
+BASELINE_LAYERS = (9, 18, 27)
 
 
 class FakeEmbedding(nn.Embedding):
@@ -102,7 +104,7 @@ def reference_varlen(q, k, v, *, cu_seqlens_q, cu_seqlens_k,
 class NvarcEncoderTests(unittest.TestCase):
     def test_packed_positions_boundaries_layers_and_compact_frozen_outputs(self):
         model = FakeNvarc()
-        runner = NvarcEncoder(model)
+        runner = NvarcEncoder(model, hidden_state_indices=BASELINE_LAYERS)
         runner.train(True)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
         output = runner(ids, torch.tensor([0, 2, 6]))
@@ -119,7 +121,7 @@ class NvarcEncoderTests(unittest.TestCase):
         self.assertTrue(all(not p.requires_grad for p in runner.parameters()))
         for states, tokens in zip(output.sequence_hidden_states, (ids[:2], ids[2:])):
             expected = torch.cat(tuple((tokens[:, None] + i).expand(-1, NVARC_HIDDEN_SIZE)
-                                       for i in NVARC_HIDDEN_STATE_INDICES), -1).float()
+                                       for i in BASELINE_LAYERS), -1).float()
             torch.testing.assert_close(states, expected)
             self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
             self.assertFalse(states.requires_grad)
@@ -135,7 +137,7 @@ class NvarcEncoderTests(unittest.TestCase):
                             num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
         config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         model = Qwen3Model(config)
-        runner = NvarcEncoder(model)
+        runner = NvarcEncoder(model, hidden_state_indices=BASELINE_LAYERS)
         ids = torch.tensor([1, 2, 3, 4, 5, 6])
         actual = runner(ids, torch.tensor([0, 2, 6]))
         # Ordinary SDPA on independent sequences is the reference, including RoPE.
@@ -143,7 +145,7 @@ class NvarcEncoderTests(unittest.TestCase):
         for index, tokens in enumerate((ids[:2], ids[2:])):
             with torch.no_grad():
                 reference = model(tokens[None], output_hidden_states=True, use_cache=False)
-            states = torch.cat(tuple(reference.hidden_states[i][0] for i in NVARC_HIDDEN_STATE_INDICES), -1)
+            states = torch.cat(tuple(reference.hidden_states[i][0] for i in BASELINE_LAYERS), -1)
             torch.testing.assert_close(actual.sequence_hidden_states[index], states, atol=3e-6, rtol=3e-6)
         model.config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         changed = runner(torch.tensor([7, 8, 3, 4, 5, 6]), torch.tensor([0, 2, 6]))
@@ -162,7 +164,6 @@ class NvarcEncoderTests(unittest.TestCase):
                             num_key_value_heads=1, head_dim=4, max_position_embeddings=32)
         config._attn_implementation = NVARC_ATTENTION_IMPLEMENTATION
         model = Qwen3ForCausalLM(config)
-        runner = NvarcEncoder(model)
         # Make accidental final normalization easy to detect.
         with torch.no_grad():
             model.model.norm.weight.fill_(2)
@@ -172,33 +173,45 @@ class NvarcEncoderTests(unittest.TestCase):
                 ids = torch.arange(sum(lengths)) % 16
                 positions = torch.cat(tuple(torch.arange(n) for n in lengths))[None]
                 cumulative = offsets.to(torch.int32)
-                with torch.no_grad():
-                    full = model(
-                        ids[None], position_ids=positions, attention_mask=None,
-                        cu_seq_lens_q=cumulative, cu_seq_lens_k=cumulative,
-                        max_length_q=max(lengths), max_length_k=max(lengths),
-                        output_hidden_states=True, use_cache=False, return_dict=True,
-                    )
-                with ExitStack() as stack:
-                    calls = [stack.enter_context(patch.object(block, "forward", wraps=block.forward))
-                             for block in model.model.layers]
-                    norm = stack.enter_context(patch.object(model.model.norm, "forward",
-                        side_effect=AssertionError("final normalization must not run")))
-                    head = stack.enter_context(patch.object(model.lm_head, "forward",
-                        side_effect=AssertionError("LM head must not run")))
-                    actual = runner(ids, offsets)
-                    self.assertEqual([call.call_count for call in calls], [1] * 27 + [0] * 9)
-                    norm.assert_not_called()
-                    head.assert_not_called()
-                for states, start, end in zip(actual.sequence_hidden_states, offsets[:-1], offsets[1:]):
-                    expected = torch.cat(tuple(full.hidden_states[i][0, start:end]
-                                               for i in NVARC_HIDDEN_STATE_INDICES), -1)
-                    torch.testing.assert_close(states, expected, rtol=0, atol=0)
-                    self.assertFalse(states.requires_grad)
-                    self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
-                # This demonstrates why using HF's normalized final state would be wrong.
-                raw_last = full.hidden_states[27]
-                self.assertFalse(torch.equal(raw_last, model.model.norm(raw_last)))
+                # HF returns the normalized final state; capture block 36 before that norm.
+                raw_final = []
+                hook = model.model.layers[-1].register_forward_hook(
+                    lambda _module, _args, output: raw_final.append(output.detach().clone())
+                )
+                try:
+                    with torch.no_grad():
+                        full = model(
+                            ids[None], position_ids=positions, attention_mask=None,
+                            cu_seq_lens_q=cumulative, cu_seq_lens_k=cumulative,
+                            max_length_q=max(lengths), max_length_k=max(lengths),
+                            output_hidden_states=True, use_cache=False, return_dict=True,
+                        )
+                finally:
+                    hook.remove()
+                self.assertFalse(torch.equal(raw_final[0], full.hidden_states[36]))
+                for layers in (BASELINE_LAYERS, (18, 27, 36), (1, 12, 24)):
+                    with self.subTest(layers=layers):
+                        runner = NvarcEncoder(model, hidden_state_indices=layers)
+                        with ExitStack() as stack:
+                            calls = [stack.enter_context(patch.object(block, "forward", wraps=block.forward))
+                                     for block in model.model.layers]
+                            norm = stack.enter_context(patch.object(model.model.norm, "forward",
+                                side_effect=AssertionError("final normalization must not run")))
+                            head = stack.enter_context(patch.object(model.lm_head, "forward",
+                                side_effect=AssertionError("LM head must not run")))
+                            actual = runner(ids, offsets)
+                            self.assertEqual([call.call_count for call in calls],
+                                             [1] * layers[-1] + [0] * (36 - layers[-1]))
+                            norm.assert_not_called()
+                            head.assert_not_called()
+                        for states, start, end in zip(actual.sequence_hidden_states, offsets[:-1], offsets[1:]):
+                            expected = torch.cat(tuple(
+                                (raw_final[0] if i == 36 else full.hidden_states[i])[0, start:end]
+                                for i in layers
+                            ), -1)
+                            torch.testing.assert_close(states, expected, rtol=0, atol=0)
+                            self.assertFalse(states.requires_grad)
+                            self.assertEqual(states.untyped_storage().nbytes(), states.numel() * states.element_size())
         self.assertEqual(model.config.num_hidden_layers, 36)
         self.assertEqual(len(model.model.layers), 36)
 
@@ -206,7 +219,13 @@ class NvarcEncoderTests(unittest.TestCase):
         model = FakeNvarc()
         model.config._attn_implementation = "sdpa"
         with self.assertRaisesRegex(ValueError, "nvarc_fa3"):
-            NvarcEncoder(model)
+            NvarcEncoder(model, hidden_state_indices=BASELINE_LAYERS)
+
+    def test_selected_layer_must_exist_in_checkpoint(self):
+        model = FakeNvarc()
+        model.layers = model.layers[:27]
+        with self.assertRaisesRegex(ValueError, "decoder block count"):
+            NvarcEncoder(model, hidden_state_indices=(18, 27, 36))
 
     def test_missing_fa3_fails_without_fallback(self):
         with patch("diffusion_arc.model.nvarc.attention.import_module", side_effect=ImportError("FA3 missing")):

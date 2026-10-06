@@ -1,43 +1,110 @@
 {
-  "schema_version": 10,
+  "config_type": "training_run",
+  "schema_version": 2,
+  "name": "single_gpu_b3_torch_profile",
   "seed": 167,
-  "device": "cuda:0",
+  "deployment": {
+    "provider": "local",
+    "gpu_type": "H200",
+    "gpu_count": 1,
+    "output_directory": null
+  },
   "models": {
     "nvarc_checkpoint": "../../../checkpoints/nvarc-qwen3-4b-grids15-sft139",
     "flux_checkpoint": "../../../checkpoints/flux2-klein-base-4b",
+    "initialization": "base_checkpoint",
+    "resume_from": null,
+    "trainable_modules": [
+      "flux_transformer"
+    ],
     "nvarc_dtype": "bfloat16",
     "vae_dtype": "float32",
     "flux_parameter_dtype": "float32",
     "flux_compute_dtype": "bfloat16"
   },
+  "execution": {
+    "device": "cuda:0",
+    "distributed_strategy": "single_process",
+    "nvarc_attention_backend": "fa3_packed",
+    "nvarc_hidden_layers": [
+      9,
+      18,
+      27
+    ],
+    "nvarc_early_exit_layer": 27,
+    "nvarc_hidden_state_normalization": "none",
+    "flux_attention_backend": "fa3_packed",
+    "flux_max_joint_tokens": 12288,
+    "activation_checkpointing": false,
+    "profiler": null,
+    "nvarc_max_tokens": 134400,
+    "flux_max_spread_tokens": 1000,
+    "flux_packing_algorithm": "legacy_bfd_v1"
+  },
   "data": {
-    "split_directory": "../../../data/benchmarks/single_gpu_b0/splits/train",
+    "source": "prepared_split",
+    "prepared_split_directory": "../../../data/benchmarks/single_gpu_b0/splits/train",
     "view_name": "train",
     "shuffle": false,
+    "expected_task_count": 960,
+    "pairs_per_sequence": 5,
     "num_workers": 2,
     "prefetch_factor": 8
   },
+  "canvas": {
+    "height": 30,
+    "width": 30,
+    "cell_size": 16,
+    "alignment": "top_left",
+    "palette": "greedy_rgb_maximin_v1",
+    "padding": "white_sentinel"
+  },
   "loop": {
-    "max_optimizer_steps": 7,
     "optimizer_batch_size": 48,
     "min_context_pairs_before_target": 2,
-    "vae_microbatch_size": 48
+    "vae_microbatch_size": 48,
+    "epochs": null,
+    "max_steps": 7,
+    "drop_last": false
+  },
+  "loss": {
+    "type": "velocity_mse",
+    "reduction_dtype": "float32",
+    "target_reduction": "equal_target_mean",
+    "microbatch_reduction": "actual_target_count_weighted"
+  },
+  "flow": {
+    "interpolation": "data_to_noise",
+    "velocity_target": "noise_minus_data",
+    "time_distribution": "uniform",
+    "uniform_min": 0.0,
+    "uniform_max": 1.0,
+    "uniform_bounds": "open",
+    "noise_distribution": "independent_standard_normal_per_target",
+    "randomness_assignment": "logical_target_order_before_packing",
+    "rng_scheme": "legacy_stream_v1"
   },
   "optimizer": {
+    "type": "adamw",
     "learning_rate": 1e-05,
     "beta1": 0.9,
     "beta2": 0.999,
     "epsilon": 1e-08,
-    "weight_decay": 0.01
+    "weight_decay": 0.01,
+    "state_dtype": "float32",
+    "max_grad_norm": null
   },
   "scheduler": {
     "type": "cosine",
     "warmup_steps": 213,
     "total_steps": 7245
   },
-  "benchmark": null,
-  "flux_packing": {
-    "max_tokens": 12288
+  "validation": null,
+  "logging": null,
+  "checkpointing": null,
+  "final_test": {
+    "enabled": false,
+    "checkpoint_selection": null
   },
-  "nvarc_max_tokens": 134400
+  "benchmark": null
 }

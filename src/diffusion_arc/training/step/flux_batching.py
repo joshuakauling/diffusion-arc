@@ -38,7 +38,7 @@ class FluxPackingPolicy:
 
 
 @dataclass(frozen=True)
-class FluxTargetBatch:
+class FluxMicrobatchPlan:
     """Physical call with indices into the original FIFO optimizer batch."""
 
     target_indices: tuple[int, ...]
@@ -51,7 +51,7 @@ def plan_flux_batches(
     *,
     source_ids: tuple[int, ...] | None = None,
     source_bytes: tuple[int, ...] | None = None,
-) -> tuple[FluxTargetBatch, ...]:
+) -> tuple[FluxMicrobatchPlan, ...]:
     """Use the selected deterministic planner without splitting or dropping targets.
 
     legacy_bfd_v1 preserves the original best-fit-decreasing call and target order.
@@ -89,7 +89,7 @@ def plan_flux_batches(
     costs = tuple(length + _FLUX_IMAGE_TOKENS for length in prefix_lengths)
     if policy.algorithm == "legacy_bfd_v1":
         packs = _best_fit_decreasing(costs, policy.max_tokens)
-        return tuple(FluxTargetBatch(tuple(pack), sum(costs[i] for i in pack)) for pack in packs)
+        return tuple(FluxMicrobatchPlan(tuple(pack), sum(costs[i] for i in pack)) for pack in packs)
     packs = _few_packs(costs, policy.max_tokens)
     # Least-loaded placement often avoids the almost empty tail left by BFD.
     balanced = [[] for _ in packs]
@@ -114,7 +114,7 @@ def plan_flux_batches(
                     *_balance_score(candidate, costs))
 
         packs = _improve(packs, costs, policy, release_score, release=True)
-    return tuple(FluxTargetBatch(tuple(pack), sum(costs[i] for i in pack)) for pack in packs)
+    return tuple(FluxMicrobatchPlan(tuple(pack), sum(costs[i] for i in pack)) for pack in packs)
 
 
 def _best_fit_decreasing(costs, budget):
@@ -232,5 +232,5 @@ def _improve(packs, costs, policy, score, *, release=False):
 
 
 __all__ = [
-    "FluxPackingPolicy", "FluxTargetBatch", "plan_flux_batches",
+    "FluxPackingPolicy", "FluxMicrobatchPlan", "plan_flux_batches",
 ]

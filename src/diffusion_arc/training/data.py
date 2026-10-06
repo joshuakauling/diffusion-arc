@@ -120,19 +120,19 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
             "keys": serialized_keys,
         }
         self._legacy_fingerprint: str | None = None
-        manifest_path = split_root / "manifest.json"
-        if manifest_path.is_file():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("schema_version") != 1 or manifest.get("dataset") != config.dataset:
+        training_data_manifest_path = split_root / "manifest.json"
+        if training_data_manifest_path.is_file():
+            training_data_manifest = json.loads(training_data_manifest_path.read_text(encoding="utf-8"))
+            if training_data_manifest.get("schema_version") != 1 or training_data_manifest.get("dataset") != config.dataset:
                 raise ValueError("prepared training manifest does not match its split configuration")
             sources = {record["task_key"]: record["converted_sha256"]
-                       for record in manifest["sources"]}
-            if len(sources) != len(manifest["sources"]):
+                       for record in training_data_manifest["sources"]}
+            if len(sources) != len(training_data_manifest["sources"]):
                 raise ValueError("prepared training manifest contains duplicate source tasks")
             referenced_task_ids = sorted({key.task_id for key in keys})
             if not set(referenced_task_ids).issubset(sources):
                 raise ValueError("prepared training manifest is missing referenced source tasks")
-            if hashlib.sha256(key_path.read_bytes()).hexdigest() != manifest["keys_sha256"]:
+            if hashlib.sha256(key_path.read_bytes()).hexdigest() != training_data_manifest["keys_sha256"]:
                 raise ValueError("prepared training keys differ from their manifest")
             identity = {
                 **self._identity,

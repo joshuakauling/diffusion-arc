@@ -95,6 +95,13 @@ class FinetuneRunPodTests(unittest.TestCase):
         path = self.workspace / "ddp.json"
         path.write_text(json.dumps(payload))
         # Real parent W&B runs predate the explicitly versioned defaults.
+        self.run.config["schema_version"] = 1
+        self.run.config.pop("benchmark")
+        self.run.config["data"].pop("source")
+        self.run.config["loop"].pop("epochs")
+        self.run.config["loop"].pop("max_steps")
+        self.run.config["loop"].update({key: self.parent_config.recipe["loop"][key] for key in (
+            "max_optimizer_steps", "expected_target_count", "expected_final_batch_target_count")})
         for key in ("flux_packing_algorithm", "flux_max_spread_tokens"):
             self.run.config["execution"].pop(key, None)
         self.run.config["flow"].pop("rng_scheme", None)

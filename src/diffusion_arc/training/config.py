@@ -1,4 +1,4 @@
-"""Canonical training configuration for baseline benchmarks and finite run recipes."""
+"""One strict configuration for training, measurement, and profiling workloads."""
 
 from __future__ import annotations
 
@@ -11,11 +11,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS
+from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS, NVARC_CONTEXT_WIDTH, NVARC_HIDDEN_SIZE
 from .step.flux_batching import FluxPackingPolicy
 
 
-BASELINE_SCHEMA_VERSION = 10
+# Version 2 unifies training and benchmark inputs and makes experiment choices explicit.
+# The version describes the JSON contract, not the model or checkpoint file format.
+TRAINING_SCHEMA_VERSION = 2
 _SUPPORTED_DTYPES = frozenset({"bfloat16", "float32"})
 
 
@@ -90,11 +92,10 @@ class BenchmarkConfig:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Shared runtime components and an optional immutable finite-epoch recipe.
+    """Validated components and an immutable recipe, independent of the runner.
 
-    Both JSON formats normalize to this type. Entrypoints select their supported
-    config_type when loading so benchmark runners cannot ignore recipe semantics.
     Loading never requires local checkpoints, prepared data, or credentials.
+    Derived loop counts are kept internally and omitted from recipe_dict().
     """
 
     seed: int
@@ -104,15 +105,17 @@ class TrainingConfig:
     loop: LoopConfig
     optimizer: AdamWConfig
     flux_packing: FluxPackingPolicy
+    nvarc_hidden_layers: tuple[int, int, int]
     nvarc_max_tokens: int = DEFAULT_NVARC_MAX_TOKENS
     scheduler: CosineSchedulerConfig | LinearWarmupConstantConfig | None = None
     benchmark: BenchmarkConfig | None = None
-    config_type: str = "baseline"
+    config_type: str = "training_run"
     recipe: Mapping[str, Any] | None = None
     path: Path | None = field(default=None, compare=False)
     name: str | None = field(default=None, compare=False)
 
     def _require_recipe(self) -> Mapping[str, Any]:
+        """Return the validated recipe; reject component-only objects used by local fixtures."""
         if self.recipe is None:
             raise ValueError("this property requires a training_run config")
         return self.recipe
@@ -123,7 +126,10 @@ class TrainingConfig:
         Logging and checkpoints use the same representation. Mutating the copy
         does not change the validated, immutable configuration.
         """
-        return _config_values(self._require_recipe())
+        recipe = _to_json_values(self._require_recipe())
+        for key in ("max_optimizer_steps", "expected_target_count", "expected_final_batch_target_count", "epoch_steps"):
+            recipe["loop"].pop(key, None)
+        return recipe
 
     @property
     def targets_per_sequence(self) -> int:
@@ -131,171 +137,154 @@ class TrainingConfig:
 
     @property
     def final_batch_target_count(self) -> int:
-        return self._require_recipe()["loop"]["expected_final_batch_target_count"]
+        """Target count of the prepared epoch tail, independent of a step prefix."""
+        recipe = self._require_recipe()
+        task_count = recipe["data"]["expected_task_count"]
+        if task_count is None:
+            return recipe["loop"]["expected_final_batch_target_count"]
+        return (task_count * self.targets_per_sequence - 1) % self.loop.optimizer_batch_size + 1
+
+    @property
+    def epoch_optimizer_steps(self) -> int | None:
+        return self._require_recipe()["loop"]["epoch_steps"]
 
     @property
     def endpoint_target_count(self) -> int:
         flow = self._require_recipe()["flow"]
-        return ((self.loop.max_optimizer_steps - 1) * flow["endpoint_targets_per_full_batch"]
-                + flow["endpoint_targets_in_final_batch"])
+        if flow["time_distribution"] == "uniform":
+            return 0
+        run_final_count = self._require_recipe()["loop"]["expected_final_batch_target_count"]
+        final_quota = (flow["endpoint_targets_per_full_batch"]
+                       if run_final_count == self.loop.optimizer_batch_size
+                       else flow["endpoint_targets_in_final_batch"])
+        return (self.loop.max_optimizer_steps - 1) * flow["endpoint_targets_per_full_batch"] + final_quota
 
     @property
     def validation_steps(self) -> tuple[int, ...]:
-        return _event_steps(self._require_recipe()["validation"]["loss"], self.loop.max_optimizer_steps)
+        validation = self._require_recipe()["validation"]
+        return () if validation is None else _compute_event_steps(validation["loss"], self.loop.max_optimizer_steps)
 
     @property
     def sampling_steps(self) -> tuple[int, ...]:
-        return _event_steps(self._require_recipe()["validation"]["sampling"], self.loop.max_optimizer_steps)
+        validation = self._require_recipe()["validation"]
+        return () if validation is None else _compute_event_steps(validation["sampling"], self.loop.max_optimizer_steps)
 
     @property
     def checkpoint_steps(self) -> tuple[int, ...]:
-        return _event_steps(self._require_recipe()["checkpointing"], self.loop.max_optimizer_steps)
+        return _compute_event_steps(self._require_recipe()["checkpointing"], self.loop.max_optimizer_steps)
 
 
-def _config_values(value: Any) -> Any:
+def _to_json_values(value: Any) -> Any:
     """Convert immutable recipe containers and resolved paths to JSON values."""
     if isinstance(value, Mapping):
-        return {key: _config_values(item) for key, item in value.items()}
+        return {key: _to_json_values(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return [_config_values(item) for item in value]
+        return [_to_json_values(item) for item in value]
     return str(value) if isinstance(value, Path) else value
 
 
 def load_training_config(path: str | Path, *, expected_type: str | None = None) -> TrainingConfig:
-    """Read either strict JSON format and resolve paths relative to its file.
-
-    Specify expected_type at an execution entrypoint to reject unsupported
-    experiment semantics before loading any model or creating outputs.
-    """
-    if expected_type not in (None, "baseline", "training_run"):
-        raise ValueError("expected_type must be 'baseline', 'training_run', or None")
+    """Read the strict shared schema; no experiment choices are filled in."""
+    if expected_type not in (None, "training_run"):
+        raise ValueError("expected_type must be 'training_run' or None; baseline configs are retired")
     config_path = Path(path).resolve()
     with config_path.open(encoding="utf-8") as handle:
-        payload = _object(json.load(handle, object_pairs_hook=_unique_fields), name="config")
-    config_type = payload.get("config_type", "baseline")
-    if config_type not in ("baseline", "training_run"):
-        raise ValueError(f"unsupported config_type: {config_type!r}")
-    if expected_type is not None and config_type != expected_type:
-        raise ValueError(f"expected {expected_type!r} config, got {config_type!r}")
-    if config_type == "training_run":
-        return _parse_recipe(payload, config_path=config_path)
-    return _parse_baseline(payload, config_path=config_path)
+        payload = json.load(handle, object_pairs_hook=_reject_duplicate_json_fields)
+    return parse_training_config(payload, config_path=config_path)
 
 
-def _parse_baseline(
-    payload: Mapping[str, Any], *, config_path: Path,
-) -> TrainingConfig:
-    """Parse the packed-only baseline schema; reject retired execution fields."""
-
-    base_directory = config_path.parent
-
-    schema_version = _integer(payload.get("schema_version"), name="schema_version")
-    if schema_version != BASELINE_SCHEMA_VERSION:
-        raise ValueError(f"unsupported schema_version: {schema_version!r}")
-    config_fields = {"schema_version", "seed", "device", "models", "data", "loop",
-                     "optimizer", "scheduler", "benchmark", "flux_packing", "nvarc_max_tokens"}
-    _fields(payload, config_fields, name="config")
-
-    seed = _integer(payload["seed"], name="seed")
-    if not 0 <= seed < 2**64:
-        raise ValueError("seed must lie in [0, 2**64)")
-
-    device = _device(payload["device"])
-
-    models_payload = _object(payload["models"], name="models")
-    _fields(
-        models_payload,
-        {
-            "nvarc_checkpoint",
-            "flux_checkpoint",
-            "nvarc_dtype",
-            "vae_dtype",
-            "flux_parameter_dtype",
-            "flux_compute_dtype",
-        },
-        name="models",
-    )
-    models = _parse_models(models_payload, base_directory=base_directory)
-
-    data_payload = _object(payload["data"], name="data")
-    data_fields = {"split_directory", "view_name", "shuffle", "num_workers", "prefetch_factor"}
-    _fields(
-        data_payload,
-        data_fields,
-        name="data",
-    )
-    data = _parse_data(data_payload, base_directory=base_directory)
-
-    loop_payload = _object(payload["loop"], name="loop")
-    loop_fields = {
-        "max_optimizer_steps",
-        "optimizer_batch_size",
-        "min_context_pairs_before_target",
-        "vae_microbatch_size",
-    }
-    _fields(loop_payload, loop_fields, name="loop")
-    loop = _parse_loop(loop_payload)
-
-    optimizer_payload = _object(payload["optimizer"], name="optimizer")
-    _fields(
-        optimizer_payload,
-        {"learning_rate", "beta1", "beta2", "epsilon", "weight_decay"},
-        name="optimizer",
-    )
-    optimizer = _parse_optimizer(optimizer_payload)
-
-    scheduler = None
-    if payload.get("scheduler") is not None:
-        section = _object(payload["scheduler"], name="scheduler")
-        _fields(section, {"type", "warmup_steps", "total_steps"}, name="scheduler")
-        if section["type"] != "cosine":
-            raise ValueError("scheduler.type must be 'cosine'")
-        scheduler = CosineSchedulerConfig(
-            warmup_steps=_integer(section["warmup_steps"], name="scheduler.warmup_steps"),
-            total_steps=_positive_integer(section["total_steps"], name="scheduler.total_steps"),
+def parse_training_config(payload: Mapping[str, Any], *, config_path: str | Path) -> TrainingConfig:
+    """Validate explicit settings, resolve paths, and build immutable runtime components."""
+    payload = _validate_json_object(payload, name="config")
+    config_path = Path(config_path).resolve()
+    # Adapt the validation schema to the explicitly selected configuration variants.
+    schema = deepcopy(_RECIPE_SCHEMA)
+    for section in ("validation", "logging", "checkpointing", "scheduler"):
+        if section in payload and payload[section] is None:
+            schema[section] = None
+    if isinstance(payload.get("data"), Mapping) and payload["data"].get("source") == "prepared_split":
+        schema["data"] = {
+            "source": "prepared_split", "prepared_split_directory": _validate_nonempty_string,
+            "view_name": "train", "shuffle": bool,
+            "expected_task_count": _allow_none(_validate_positive_integer),
+            "pairs_per_sequence": _validate_positive_integer,
+            "num_workers": _validate_nonnegative_integer, "prefetch_factor": _allow_none(_validate_positive_integer),
+        }
+    if isinstance(payload.get("loss"), Mapping) and payload["loss"].get("type") == "velocity_mse":
+        schema["loss"] = {key: value for key, value in schema["loss"].items()
+                          if key in ("reduction_dtype", "target_reduction", "microbatch_reduction")}
+        schema["loss"]["type"] = "velocity_mse"
+    if isinstance(payload.get("flow"), Mapping) and payload["flow"].get("time_distribution") == "uniform":
+        schema["flow"] = {key: value for key, value in schema["flow"].items()
+                          if not key.startswith("endpoint_")}
+        schema["flow"]["time_distribution"] = "uniform"
+    if isinstance(payload.get("scheduler"), Mapping) and payload["scheduler"].get("type") == "cosine":
+        schema["scheduler"] = {"type": "cosine", "warmup_steps": _validate_nonnegative_integer,
+                               "total_steps": _validate_positive_integer}
+    if isinstance(payload.get("benchmark"), Mapping):
+        schema["benchmark"] = {"warmup_steps": _validate_nonnegative_integer, "measured_steps": _validate_positive_integer,
+                               "repetitions": _validate_positive_integer}
+    if isinstance(payload.get("models"), Mapping) and payload["models"].get("initialization") == "transformer_weights":
+        schema["models"].update(
+            initialization="transformer_weights", transformer_checkpoint=_allow_none(_validate_nonempty_string),
+            completed_epochs=_validate_nonnegative_integer,
+            transformer_source={"repo_id": _validate_nonempty_string, "revision": _validate_nonempty_string, "subfolder": _validate_nonempty_string},
         )
-        if not 0 <= scheduler.warmup_steps < scheduler.total_steps:
-            raise ValueError("scheduler requires 0 <= warmup_steps < total_steps")
-        if loop.max_optimizer_steps > scheduler.total_steps:
-            raise ValueError("scheduler.total_steps must cover loop.max_optimizer_steps")
-
-    benchmark = None
-    if payload.get("benchmark") is not None:
-        section = _object(payload["benchmark"], name="benchmark")
-        _fields(section, {"warmup_steps", "measured_steps", "repetitions"}, name="benchmark")
-        benchmark = BenchmarkConfig(
-            warmup_steps=_integer(section["warmup_steps"], name="benchmark.warmup_steps"),
-            measured_steps=_positive_integer(section["measured_steps"], name="benchmark.measured_steps"),
-            repetitions=_positive_integer(section["repetitions"], name="benchmark.repetitions"),
+        if schema["logging"] is not None:
+            schema["logging"].update(parent_run_id=_validate_nonempty_string, resume_parent_run=bool)
+    if (isinstance(payload.get("flow"), Mapping)
+            and payload["flow"].get("time_distribution") == "uniform_with_fixed_endpoint_and_high_noise_counts"):
+        schema["flow"].update(
+            time_distribution="uniform_with_fixed_endpoint_and_high_noise_counts",
+            high_noise_min=_validate_unit_interval, high_noise_max=1.0,
+            high_noise_targets_per_full_batch=_validate_nonnegative_integer,
+            high_noise_targets_in_final_batch=_validate_nonnegative_integer,
         )
-        if benchmark.warmup_steps < 0:
-            raise ValueError("benchmark.warmup_steps must not be negative")
-        if benchmark.warmup_steps + benchmark.measured_steps != loop.max_optimizer_steps:
-            raise ValueError("benchmark warmup_steps + measured_steps must equal loop.max_optimizer_steps")
 
-    section = _object(payload["flux_packing"], name="flux_packing")
-    section = {"max_spread_tokens": 1_000, "algorithm": "legacy_bfd_v1", **section}
-    _fields(section, {"max_tokens", "max_spread_tokens", "algorithm"}, name="flux_packing")
-    flux_packing = FluxPackingPolicy(**section)
-
+    recipe = _validate_against_schema(payload, schema, name="config")
+    models = _parse_model_config(recipe["models"], base_directory=config_path.parent)
+    # Data preparation already froze the seeded task order for this epoch.
+    data = _parse_data_config(recipe["data"], base_directory=config_path.parent,
+                       split_field="prepared_split_directory",
+                       shuffle=recipe["data"]["shuffle"] if recipe["data"]["source"] == "prepared_split" else False)
+    _derive_loop_counts(recipe)
+    loop = _parse_loop_config(recipe["loop"])
+    optimizer = _parse_optimizer_config(recipe["optimizer"])
+    device = _validate_cuda_device(recipe["execution"]["device"])
+    packing = FluxPackingPolicy(
+        max_tokens=recipe["execution"]["flux_max_joint_tokens"],
+        max_spread_tokens=recipe["execution"]["flux_max_spread_tokens"],
+        algorithm=recipe["execution"]["flux_packing_algorithm"],
+    )
+    _validate_config_relationships(recipe)
+    paths = [
+        ("models", "nvarc_checkpoint"), ("models", "flux_checkpoint"), ("models", "resume_from"),
+        ("deployment", "output_directory"), ("data", "task_index"),
+        ("data", "source_archive"), ("data", "official_training_keys"),
+        ("data", "prepared_split_directory"), ("validation", "bundle"),
+    ]
+    if recipe["models"]["initialization"] == "transformer_weights":
+        paths.append(("models", "transformer_checkpoint"))
+    for section, field in paths:
+        if recipe[section] is None or field not in recipe[section]:
+            continue
+        value = recipe[section][field]
+        if value is not None:
+            recipe[section][field] = _resolve_config_path(value, base_directory=config_path.parent, name=f"{section}.{field}")
     return TrainingConfig(
-        path=config_path,
-        name=config_path.stem,
-        seed=seed,
-        device=device,
-        models=models,
-        data=data,
-        loop=loop,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        benchmark=benchmark,
-        flux_packing=flux_packing,
-        nvarc_max_tokens=_positive_integer(payload["nvarc_max_tokens"], name="nvarc_max_tokens"),
+        config_type="training_run", path=config_path, name=recipe["name"],
+        seed=recipe["seed"], device=device, recipe=_freeze_config_values(recipe), models=models,
+        data=data, loop=loop, optimizer=optimizer, flux_packing=packing,
+        nvarc_hidden_layers=tuple(recipe["execution"]["nvarc_hidden_layers"]),
+        nvarc_max_tokens=recipe["execution"]["nvarc_max_tokens"],
+        scheduler=_parse_scheduler_config(recipe["scheduler"], loop.max_optimizer_steps),
+        benchmark=None if recipe["benchmark"] is None else BenchmarkConfig(**recipe["benchmark"]),
     )
 
 
-def _device(value: Any) -> str:
-    device = _string(value, name="device")
+def _validate_cuda_device(value: Any) -> str:
+    """Validate CUDA device syntax without querying hardware availability."""
+    device = _validate_nonempty_string(value, name="device")
     device_parts = device.split(":")
     if not (
         device_parts[0] == "cuda"
@@ -307,14 +296,15 @@ def _device(value: Any) -> str:
     return device
 
 
-def _parse_models(models_payload: Mapping[str, Any], *, base_directory: Path) -> ModelConfig:
-    flux_parameter_dtype = _dtype(
+def _parse_model_config(models_payload: Mapping[str, Any], *, base_directory: Path) -> ModelConfig:
+    """Validate model precision and resolve checkpoint paths without loading weights."""
+    flux_parameter_dtype = _validate_dtype(
         models_payload["flux_parameter_dtype"],
         name="models.flux_parameter_dtype",
     )
     if flux_parameter_dtype != "float32":
         raise ValueError("models.flux_parameter_dtype must be 'float32'")
-    flux_compute_dtype = _dtype(
+    flux_compute_dtype = _validate_dtype(
         models_payload["flux_compute_dtype"],
         name="models.flux_compute_dtype",
     )
@@ -322,18 +312,18 @@ def _parse_models(models_payload: Mapping[str, Any], *, base_directory: Path) ->
         raise ValueError("models.flux_compute_dtype must be 'bfloat16'")
 
     models = ModelConfig(
-        nvarc_checkpoint=_path(
+        nvarc_checkpoint=_resolve_config_path(
             models_payload["nvarc_checkpoint"],
             base_directory=base_directory,
             name="models.nvarc_checkpoint",
         ),
-        flux_checkpoint=_path(
+        flux_checkpoint=_resolve_config_path(
             models_payload["flux_checkpoint"],
             base_directory=base_directory,
             name="models.flux_checkpoint",
         ),
-        nvarc_dtype=_dtype(models_payload["nvarc_dtype"], name="models.nvarc_dtype"),
-        vae_dtype=_dtype(models_payload["vae_dtype"], name="models.vae_dtype"),
+        nvarc_dtype=_validate_dtype(models_payload["nvarc_dtype"], name="models.nvarc_dtype"),
+        vae_dtype=_validate_dtype(models_payload["vae_dtype"], name="models.vae_dtype"),
         flux_parameter_dtype=flux_parameter_dtype,
         flux_compute_dtype=flux_compute_dtype,
     )
@@ -344,29 +334,30 @@ def _parse_models(models_payload: Mapping[str, Any], *, base_directory: Path) ->
     return models
 
 
-def _parse_data(
+def _parse_data_config(
     data_payload: Mapping[str, Any], *, base_directory: Path,
     split_field: str = "split_directory", shuffle: bool | None = None,
 ) -> DataConfig:
+    """Validate loader settings and resolve the split path without opening the dataset."""
     if shuffle is None:
         shuffle = data_payload["shuffle"]
     if not isinstance(shuffle, bool):
         raise TypeError("data.shuffle must be a boolean")
-    num_workers = _integer(data_payload["num_workers"], name="data.num_workers")
+    num_workers = _validate_integer(data_payload["num_workers"], name="data.num_workers")
     if num_workers < 0:
         raise ValueError("data.num_workers must not be negative")
     prefetch_factor = data_payload.get("prefetch_factor")
     if num_workers:
-        prefetch_factor = _positive_integer(prefetch_factor, name="data.prefetch_factor")
+        prefetch_factor = _validate_positive_integer(prefetch_factor, name="data.prefetch_factor")
     elif prefetch_factor is not None:
         raise ValueError("data.prefetch_factor must be null when num_workers = 0")
     data = DataConfig(
-        split_directory=_path(
+        split_directory=_resolve_config_path(
             data_payload[split_field],
             base_directory=base_directory,
             name=f"data.{split_field}",
         ),
-        view_name=_string(data_payload["view_name"], name="data.view_name"),
+        view_name=_validate_nonempty_string(data_payload["view_name"], name="data.view_name"),
         shuffle=shuffle,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
@@ -375,9 +366,10 @@ def _parse_data(
     return data
 
 
-def _parse_loop(loop_payload: Mapping[str, Any]) -> LoopConfig:
+def _parse_loop_config(loop_payload: Mapping[str, Any]) -> LoopConfig:
+    """Build loop settings after run and epoch counts have been derived."""
     loop_values = {
-        field: _positive_integer(loop_payload[field], name=f"loop.{field}")
+        field: _validate_positive_integer(loop_payload[field], name=f"loop.{field}")
         for field in ("max_optimizer_steps", "optimizer_batch_size", "min_context_pairs_before_target",
                       "vae_microbatch_size")
     }
@@ -393,15 +385,16 @@ def _parse_loop(loop_payload: Mapping[str, Any]) -> LoopConfig:
     return loop
 
 
-def _parse_optimizer(optimizer_payload: Mapping[str, Any]) -> AdamWConfig:
-    learning_rate = _number(
+def _parse_optimizer_config(optimizer_payload: Mapping[str, Any]) -> AdamWConfig:
+    """Validate AdamW hyperparameters and return settings without creating an optimizer."""
+    learning_rate = _parse_finite_number(
         optimizer_payload["learning_rate"],
         name="optimizer.learning_rate",
     )
-    beta1 = _number(optimizer_payload["beta1"], name="optimizer.beta1")
-    beta2 = _number(optimizer_payload["beta2"], name="optimizer.beta2")
-    epsilon = _number(optimizer_payload["epsilon"], name="optimizer.epsilon")
-    weight_decay = _number(
+    beta1 = _parse_finite_number(optimizer_payload["beta1"], name="optimizer.beta1")
+    beta2 = _parse_finite_number(optimizer_payload["beta2"], name="optimizer.beta2")
+    epsilon = _parse_finite_number(optimizer_payload["epsilon"], name="optimizer.epsilon")
+    weight_decay = _parse_finite_number(
         optimizer_payload["weight_decay"],
         name="optimizer.weight_decay",
     )
@@ -417,18 +410,20 @@ def _parse_optimizer(optimizer_payload: Mapping[str, Any]) -> AdamWConfig:
     return AdamWConfig(
         learning_rate=learning_rate, beta1=beta1, beta2=beta2,
         epsilon=epsilon, weight_decay=weight_decay,
-        max_grad_norm=(_positive(optimizer_payload["max_grad_norm"], name="optimizer.max_grad_norm")
-                       if "max_grad_norm" in optimizer_payload else None),
+        max_grad_norm=(_validate_positive_number(optimizer_payload["max_grad_norm"], name="optimizer.max_grad_norm")
+                       if optimizer_payload["max_grad_norm"] is not None else None),
     )
 
 
-def _object(value: Any, *, name: str) -> Mapping[str, Any]:
+def _validate_json_object(value: Any, *, name: str) -> Mapping[str, Any]:
+    """Require a mapping for a JSON object and return it unchanged."""
     if not isinstance(value, Mapping):
         raise TypeError(f"{name} must be a JSON object")
     return value
 
 
-def _fields(value: Mapping[str, Any], expected: set[str], *, name: str) -> None:
+def _validate_required_fields(value: Mapping[str, Any], expected: set[str], *, name: str) -> None:
+    """Reject missing and unknown keys; every expected field is required."""
     actual = set(value)
     if actual != expected:
         missing = tuple(sorted(expected - actual))
@@ -436,26 +431,30 @@ def _fields(value: Mapping[str, Any], expected: set[str], *, name: str) -> None:
         raise ValueError(f"{name} fields differ: missing={missing!r}, extra={extra!r}")
 
 
-def _string(value: Any, *, name: str) -> str:
+def _validate_nonempty_string(value: Any, *, name: str) -> str:
+    """Require a nonempty string and return it unchanged."""
     if not isinstance(value, str) or not value:
         raise TypeError(f"{name} must be a non-empty string")
     return value
 
 
-def _integer(value: Any, *, name: str) -> int:
+def _validate_integer(value: Any, *, name: str) -> int:
+    """Require an integer, explicitly rejecting booleans."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer")
     return value
 
 
-def _positive_integer(value: Any, *, name: str) -> int:
-    integer = _integer(value, name=name)
+def _validate_positive_integer(value: Any, *, name: str) -> int:
+    """Require an integer greater than zero."""
+    integer = _validate_integer(value, name=name)
     if integer <= 0:
         raise ValueError(f"{name} must be positive")
     return integer
 
 
-def _number(value: Any, *, name: str) -> float:
+def _parse_finite_number(value: Any, *, name: str) -> float:
+    """Accept a finite int or float, reject booleans, and return a float."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a number")
     number = float(value)
@@ -464,59 +463,83 @@ def _number(value: Any, *, name: str) -> float:
     return number
 
 
-def _dtype(value: Any, *, name: str) -> str:
-    dtype = _string(value, name=name)
+def _validate_dtype(value: Any, *, name: str) -> str:
+    """Require one of the supported precision names."""
+    dtype = _validate_nonempty_string(value, name=name)
     if dtype not in _SUPPORTED_DTYPES:
         raise ValueError(f"{name} must be one of {tuple(sorted(_SUPPORTED_DTYPES))!r}")
     return dtype
 
 
-def _path(value: Any, *, base_directory: Path, name: str) -> Path:
-    path = Path(_string(value, name=name))
+def _resolve_config_path(value: Any, *, base_directory: Path, name: str) -> Path:
+    """Resolve a path against the config file's directory without requiring it to exist."""
+    path = Path(_validate_nonempty_string(value, name=name))
     if not path.is_absolute():
         path = base_directory / path
     return path.resolve()
 
 
-def _natural(value: Any, *, name: str) -> int:
-    value = _integer(value, name=name)
+def _validate_nonnegative_integer(value: Any, *, name: str) -> int:
+    """Require an integer greater than or equal to zero."""
+    value = _validate_integer(value, name=name)
     if value < 0:
         raise ValueError(f"{name} must not be negative")
     return value
 
 
-def _seed(value: Any, *, name: str) -> int:
-    value = _natural(value, name=name)
+def _validate_nvarc_hidden_layers(value: Any, *, name: str) -> list[int]:
+    """Select three ordered one-based block outputs for FLUX's fixed text width."""
+    count = NVARC_CONTEXT_WIDTH // NVARC_HIDDEN_SIZE
+    if not isinstance(value, list) or len(value) != count:
+        raise ValueError(f"{name} must be an array of {count} layer indices")
+    layers = [_validate_integer(index, name=f"{name}[{position}]")
+              for position, index in enumerate(value)]
+    if not all(1 <= index <= 36 for index in layers):
+        raise ValueError(f"{name} layer indices must lie in [1, 36]")
+    if any(left >= right for left, right in zip(layers, layers[1:])):
+        raise ValueError(f"{name} layer indices must be distinct and strictly increasing")
+    return layers
+
+
+def _validate_seed(value: Any, *, name: str) -> int:
+    """Require an integer seed in the unsigned 64-bit range."""
+    value = _validate_nonnegative_integer(value, name=name)
     if value >= 2**64:
         raise ValueError(f"{name} must lie in [0, 2**64)")
     return value
 
 
-def _positive(value: Any, *, name: str) -> float:
-    value = _number(value, name=name)
+def _validate_positive_number(value: Any, *, name: str) -> float:
+    """Require a finite number greater than zero and return it as a float."""
+    value = _parse_finite_number(value, name=name)
     if value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
 
 
-def _unit(value: Any, *, name: str) -> float:
-    value = _number(value, name=name)
+def _validate_unit_interval(value: Any, *, name: str) -> float:
+    """Require a finite number in the inclusive interval [0, 1]."""
+    value = _parse_finite_number(value, name=name)
     if not 0 <= value <= 1:
         raise ValueError(f"{name} must lie in [0, 1]")
     return value
 
 
-def _nullable(parser):
+def _allow_none(parser):
+    """Wrap a value parser so explicit null is accepted; missing fields remain errors."""
     return lambda value, *, name: None if value is None else parser(value, name=name)
 
 
-def _deployment_provider(value: Any, *, name: str) -> str:
-    if value not in ("runpod", "modal"):
-        raise ValueError(f"{name} must be runpod or modal")
+def _validate_deployment_provider(value: Any, *, name: str) -> str:
+    """Require a supported local or cloud execution provider."""
+    if value not in ("local", "runpod", "modal"):
+        raise ValueError(f"{name} must be local, runpod, or modal")
     return value
 
 
-def _choice(*choices: str):
+def _choice_validator(*choices: str):
+    """Build a validator accepting exactly one of the supplied string choices."""
+
     def parse(value: Any, *, name: str) -> str:
         if not isinstance(value, str) or value not in choices:
             raise ValueError(f"{name} must be one of {choices!r}")
@@ -524,8 +547,8 @@ def _choice(*choices: str):
     return parse
 
 
-def _names(allowed: str):
-    """Allow explicit subsets of a finite metric vocabulary, never per-task keys."""
+def _metric_names_validator(allowed: str):
+    """Build a validator for unique metric names from a whitespace-separated vocabulary."""
     allowed_names = frozenset(allowed.split())
 
     def parse(value: Any, *, name: str) -> list[str]:
@@ -539,7 +562,7 @@ def _names(allowed: str):
 
 
 _CADENCE = {
-    "every_optimizer_steps": _positive_integer,
+    "every_optimizer_steps": _validate_positive_integer,
     "at_start": bool,
     "at_end": bool,
     "replace_last_periodic_with_final": bool,
@@ -547,57 +570,56 @@ _CADENCE = {
 # Literals define the supported experiment semantics. Tunable numbers have explicit
 # validators; changing a string must never silently select an unimplemented path.
 _RECIPE_SCHEMA = {
-    "config_type": "training_run", "schema_version": 1,
-    "name": _string, "seed": _seed,
+    "config_type": "training_run", "schema_version": TRAINING_SCHEMA_VERSION,
+    "name": _validate_nonempty_string, "seed": _validate_seed,
     "deployment": {
-        "provider": _deployment_provider, "gpu_type": _string, "gpu_count": _positive_integer,
-        "output_directory": _nullable(_string),
+        "provider": _validate_deployment_provider, "gpu_type": _validate_nonempty_string, "gpu_count": _validate_positive_integer,
+        "output_directory": _allow_none(_validate_nonempty_string),
     },
     "models": {
-        "nvarc_checkpoint": _string, "flux_checkpoint": _string,
-        "initialization": "base_checkpoint", "resume_from": _nullable(_string),
+        "nvarc_checkpoint": _validate_nonempty_string, "flux_checkpoint": _validate_nonempty_string,
+        "initialization": "base_checkpoint", "resume_from": _allow_none(_validate_nonempty_string),
         "trainable_modules": ["flux_transformer"],
         "nvarc_dtype": "bfloat16", "vae_dtype": "float32",
         "flux_parameter_dtype": "float32", "flux_compute_dtype": "bfloat16",
     },
     "execution": {
-        "device": _string, "distributed_strategy": _choice("single_process", "ddp"),
-        "nvarc_attention_backend": "fa3_packed", "nvarc_hidden_layers": [9, 18, 27],
-        "nvarc_early_exit_layer": 27, "nvarc_hidden_state_normalization": "none",
-        "nvarc_max_tokens": _positive_integer,
-        "flux_attention_backend": "fa3_packed", "flux_max_joint_tokens": _positive_integer,
-        "flux_max_spread_tokens": _natural,
-        "flux_packing_algorithm": _choice("legacy_bfd_v1", "balanced_release_v1"),
+        "device": _validate_nonempty_string, "distributed_strategy": _choice_validator("single_process", "ddp", "fsdp2"),
+        "nvarc_attention_backend": "fa3_packed", "nvarc_hidden_layers": _validate_nvarc_hidden_layers,
+        "nvarc_early_exit_layer": _validate_positive_integer, "nvarc_hidden_state_normalization": "none",
+        "nvarc_max_tokens": _validate_positive_integer,
+        "flux_attention_backend": "fa3_packed", "flux_max_joint_tokens": _validate_positive_integer,
+        "flux_max_spread_tokens": _validate_nonnegative_integer,
+        "flux_packing_algorithm": _choice_validator("legacy_bfd_v1", "balanced_release_v1"),
         "activation_checkpointing": False, "profiler": None,
     },
     "data": {
-        "pool": "nvarc_train_arc_agi_1_training_only",
-        "task_index": _string, "source_archive": _string, "official_training_keys": _string,
-        "prepared_split_directory": _string, "view_name": "train",
+        "source": "epoch_pool", "pool": "nvarc_train_arc_agi_1_training_only",
+        "task_index": _validate_nonempty_string, "source_archive": _validate_nonempty_string, "official_training_keys": _validate_nonempty_string,
+        "prepared_split_directory": _validate_nonempty_string, "view_name": "train",
         "require_both_parents_in_official_training": True,
-        "expected_task_count": _positive_integer,
+        "expected_task_count": _validate_positive_integer,
         "task_order": "seeded_shuffle_of_sorted_task_ids", "views_per_task_per_epoch": 1,
         "pairs_per_sequence": 5, "pair_selection": "random_without_replacement",
         "color_permutation": "uniform_all_10_colors", "geometry_sampling": "uniform",
         "geometries": ["ID", "R90", "R180", "R270", "FH", "FV", "FD1", "FD2"],
         "shared_augmentation_across_sequence": True, "vae_safety_filter": False,
         "max_cells_per_sequence": 9000, "max_tokens": 8400, "overlength_policy": "error",
-        "num_workers": _natural, "prefetch_factor": _nullable(_positive_integer),
+        "num_workers": _validate_nonnegative_integer, "prefetch_factor": _allow_none(_validate_positive_integer),
     },
     "canvas": {
         "height": 30, "width": 30, "cell_size": 16, "alignment": "top_left",
         "palette": "greedy_rgb_maximin_v1", "padding": "white_sentinel",
     },
     "loop": {
-        "epochs": 1, "max_optimizer_steps": _positive_integer,
-        "optimizer_batch_size": _positive_integer, "min_context_pairs_before_target": 2,
-        "vae_microbatch_size": _positive_integer,
-        "drop_last": False, "expected_target_count": _positive_integer,
-        "expected_final_batch_target_count": _positive_integer,
+        "epochs": _allow_none(_validate_positive_integer), "max_steps": _allow_none(_validate_positive_integer),
+        "optimizer_batch_size": _validate_positive_integer, "min_context_pairs_before_target": 2,
+        "vae_microbatch_size": _validate_positive_integer,
+        "drop_last": False,
     },
     "loss": {
         "type": "region_weighted_velocity_mse", "reduction_dtype": "float32",
-        "region_weights": {"canvas": _unit, "grid": _unit, "boundary": _unit},
+        "region_weights": {"canvas": _validate_unit_interval, "grid": _validate_unit_interval, "boundary": _validate_unit_interval},
         "canvas_region": "all_tokens",
         "boundary_region": "adjacent_bottom_right_including_corner",
         "empty_boundary_policy": "renormalize_remaining_weights",
@@ -605,37 +627,37 @@ _RECIPE_SCHEMA = {
         "microbatch_reduction": "actual_target_count_weighted",
     },
     "flow": {
-        "rng_scheme": _choice("legacy_stream_v1", "global_step_target_v1"),
+        "rng_scheme": _choice_validator("legacy_stream_v1", "global_step_target_v1"),
         "interpolation": "data_to_noise", "velocity_target": "noise_minus_data",
         "time_distribution": "uniform_with_fixed_endpoint_count",
         "uniform_min": 0.0, "uniform_max": 1.0, "uniform_bounds": "open",
-        "endpoint_time": 1.0, "endpoint_targets_per_full_batch": _natural,
-        "endpoint_targets_in_final_batch": _natural,
+        "endpoint_time": 1.0, "endpoint_targets_per_full_batch": _validate_nonnegative_integer,
+        "endpoint_targets_in_final_batch": _validate_nonnegative_integer,
         "endpoint_selection": "random_without_replacement",
         "noise_distribution": "independent_standard_normal_per_target",
         "randomness_assignment": "logical_target_order_before_packing",
     },
     "optimizer": {
-        "type": "adamw", "learning_rate": _positive, "beta1": _unit, "beta2": _unit,
-        "epsilon": _positive, "weight_decay": _number, "state_dtype": "float32",
-        "max_grad_norm": _positive,
+        "type": "adamw", "learning_rate": _validate_positive_number, "beta1": _validate_unit_interval, "beta2": _validate_unit_interval,
+        "epsilon": _validate_positive_number, "weight_decay": _parse_finite_number, "state_dtype": "float32",
+        "max_grad_norm": _allow_none(_validate_positive_number),
     },
     "scheduler": {
-        "type": "linear_warmup_constant", "warmup_steps": _positive_integer,
-        "first_update_warmup_fraction": _positive, "reset_on_resume": False,
+        "type": "linear_warmup_constant", "warmup_steps": _validate_positive_integer,
+        "first_update_warmup_fraction": _validate_positive_number, "reset_on_resume": False,
     },
     "validation": {
-        "bundle": _string, "split_seed": _seed, "expected_task_count": _positive_integer,
-        "expected_query_count": _positive_integer, "cache_device": "cpu",
+        "bundle": _validate_nonempty_string, "split_seed": _validate_seed, "expected_task_count": _validate_positive_integer,
+        "expected_query_count": _validate_positive_integer, "cache_device": "cpu",
         "context": "all_original_demonstrations", "augmentation": False,
         "loss": {
-            **_CADENCE, "timesteps": [0.1, 0.3, 0.5, 0.7, 0.9, 1.0], "noise_seed": _seed,
-            "uniform_proxy_weight": _unit, "endpoint_weight": _unit,
+            **_CADENCE, "timesteps": [0.1, 0.3, 0.5, 0.7, 0.9, 1.0], "noise_seed": _validate_seed,
+            "uniform_proxy_weight": _validate_unit_interval, "endpoint_weight": _validate_unit_interval,
         },
         "sampling": {
-            **_CADENCE, "expected_task_count": _positive_integer,
-            "expected_query_count": _positive_integer, "seeds": [_seed, _seed],
-            "steps": _positive_integer, "solver": "euler", "time_schedule": "linear",
+            **_CADENCE, "expected_task_count": _validate_positive_integer,
+            "expected_query_count": _validate_positive_integer, "seeds": [_validate_seed, _validate_seed],
+            "steps": _validate_positive_integer, "solver": "euler", "time_schedule": "linear",
             "trajectory_dtype": "float32", "use_target_shape": False,
             "test_time_training": False, "test_time_augmentation": False, "voting": False,
             "task_success": "one_sample_index_solves_all_queries",
@@ -643,13 +665,13 @@ _RECIPE_SCHEMA = {
         },
     },
     "logging": {
-        "backend": "wandb", "entity": _nullable(_string), "project": _nullable(_string),
+        "backend": "wandb", "entity": _allow_none(_validate_nonempty_string), "project": _allow_none(_validate_nonempty_string),
         "mode": "online", "api_key_environment_variable": "WANDB_API_KEY",
         "step_metric": "progress/optimizer_step", "every_optimizer_steps": 1,
         "aggregate_across_optimizer_steps": False, "batch_scalars_per_step": True,
         "automatic_system_metrics": False, "console_capture": False,
         "model_watch": False, "histograms": False,
-        "train_metrics": _names(
+        "train_metrics": _metric_names_validator(
             "train/loss train/mse_canvas train/mse_grid train/mse_boundary "
             "train/contribution_canvas train/contribution_grid train/contribution_boundary "
             "train/loss_t1 train/loss_uniform train/loss_demos_2 train/loss_demos_3 train/loss_demos_4 "
@@ -661,24 +683,24 @@ _RECIPE_SCHEMA = {
         ),
         "workload_counters": {
             "phases": ["train", "val", "sample"],
-            "names": _names("nvarc_tokens flux_text_tokens flux_image_tokens flux_joint_tokens flux_forward_calls"),
+            "names": _metric_names_validator("nvarc_tokens flux_text_tokens flux_image_tokens flux_joint_tokens flux_forward_calls"),
             "cumulative_suffix": "_total",
         },
-        "validation_metrics": _names("val/loss val/loss_uniform_proxy val/target_count val/boundary_target_count val/seconds"),
+        "validation_metrics": _metric_names_validator("val/loss val/loss_uniform_proxy val/target_count val/boundary_target_count val/seconds"),
         "validation_time_metrics": {
-            "names": _names("loss mse_canvas mse_grid mse_boundary"),
+            "names": _metric_names_validator("loss mse_canvas mse_grid mse_boundary"),
             "suffixes": ["t_0_1", "t_0_3", "t_0_5", "t_0_7", "t_0_9", "t1"],
         },
-        "sampling_metrics": _names(
+        "sampling_metrics": _metric_names_validator(
             "sample/pass_at_1 sample/pass_at_2 sample/solved_tasks_at_1 sample/solved_tasks_at_2 "
             "sample/task_count sample/shape_accuracy sample/cell_accuracy sample/invalid_grid_rate "
             "sample/shape_correct_count sample/prediction_count sample/seconds"
         ),
-        "checkpoint_metrics": _names("checkpoint/seconds checkpoint/size_bytes checkpoint/path"),
+        "checkpoint_metrics": _metric_names_validator("checkpoint/seconds checkpoint/size_bytes checkpoint/path"),
         "hardware": {
-            "per_step_metrics": _names("system/gpu_allocated_bytes system/gpu_reserved_bytes system/gpu_peak_allocated_bytes"),
-            "sample_interval_seconds": _positive,
-            "sampled_metrics": _names(
+            "per_step_metrics": _metric_names_validator("system/gpu_allocated_bytes system/gpu_reserved_bytes system/gpu_peak_allocated_bytes"),
+            "sample_interval_seconds": _validate_positive_number,
+            "sampled_metrics": _metric_names_validator(
                 "system/gpu_utilization_percent system/gpu_power_watts system/gpu_temperature_celsius "
                 "system/cpu_utilization_percent system/ram_rss_bytes"
             ),
@@ -692,103 +714,90 @@ _RECIPE_SCHEMA = {
     },
     "checkpointing": {
         **_CADENCE, "at_start": False, "save_full_state": True,
-        "keep_last": _nullable(_positive_integer), "upload_weights_to_wandb": False,
+        "keep_last": _allow_none(_validate_positive_integer), "upload_weights_to_wandb": False,
     },
     "final_test": {"enabled": False, "checkpoint_selection": None},
+    "benchmark": None,
 }
 
 
-def _parse_recipe(payload: Mapping[str, Any], *, config_path: Path) -> TrainingConfig:
-    """Normalize a finite run directly through the shared component readers."""
-    execution = payload.get("execution")
-    distributed = isinstance(execution, Mapping) and execution.get("distributed_strategy") == "ddp"
-    if isinstance(execution, Mapping):
-        payload = {**payload, "execution": {
-            "flux_max_spread_tokens": 1_000,
-            "flux_packing_algorithm": "balanced_release_v1" if distributed else "legacy_bfd_v1",
-            **execution,
-        }}
-    if isinstance(payload.get("flow"), Mapping):
-        payload = {**payload, "flow": {
-            "rng_scheme": "global_step_target_v1" if distributed else "legacy_stream_v1",
-            **payload["flow"],
-        }}
-    schema = deepcopy(_RECIPE_SCHEMA)
-    if isinstance(payload.get("models"), Mapping) and payload["models"].get("initialization") == "transformer_weights":
-        schema["models"].update(
-            initialization="transformer_weights", transformer_checkpoint=_nullable(_string),
-            completed_epochs=_natural,
-            transformer_source={"repo_id": _string, "revision": _string, "subfolder": _string},
-        )
-        schema["logging"].update(parent_run_id=_string, resume_parent_run=bool)
-    if (isinstance(payload.get("flow"), Mapping)
-            and payload["flow"].get("time_distribution") == "uniform_with_fixed_endpoint_and_high_noise_counts"):
-        schema["flow"].update(
-            time_distribution="uniform_with_fixed_endpoint_and_high_noise_counts",
-            high_noise_min=_unit, high_noise_max=1.0,
-            high_noise_targets_per_full_batch=_natural,
-            high_noise_targets_in_final_batch=_natural,
-        )
-    recipe = _validate(payload, schema, name="config")
-    models = _parse_models(recipe["models"], base_directory=config_path.parent)
-    # Data preparation already froze the seeded task order for this epoch.
-    data = _parse_data(recipe["data"], base_directory=config_path.parent,
-                       split_field="prepared_split_directory", shuffle=False)
-    loop = _parse_loop(recipe["loop"])
-    optimizer = _parse_optimizer(recipe["optimizer"])
-    device = _device(recipe["execution"]["device"])
-    packing = FluxPackingPolicy(
-        max_tokens=recipe["execution"]["flux_max_joint_tokens"],
-        max_spread_tokens=recipe["execution"]["flux_max_spread_tokens"],
-        algorithm=recipe["execution"]["flux_packing_algorithm"],
-    )
-    _validate_relationships(recipe)
-    paths = [
-        ("models", "nvarc_checkpoint"), ("models", "flux_checkpoint"), ("models", "resume_from"),
-        ("deployment", "output_directory"), ("data", "task_index"),
-        ("data", "source_archive"), ("data", "official_training_keys"),
-        ("data", "prepared_split_directory"), ("validation", "bundle"),
-    ]
-    if recipe["models"]["initialization"] == "transformer_weights":
-        paths.append(("models", "transformer_checkpoint"))
-    for section, field in paths:
-        value = recipe[section][field]
-        if value is not None:
-            recipe[section][field] = _path(value, base_directory=config_path.parent, name=f"{section}.{field}")
-    return TrainingConfig(
-        config_type="training_run", path=config_path, name=recipe["name"],
-        seed=recipe["seed"], device=device, recipe=_freeze(recipe), models=models,
-        data=data, loop=loop, optimizer=optimizer, flux_packing=packing,
-        nvarc_max_tokens=recipe["execution"]["nvarc_max_tokens"],
-        scheduler=LinearWarmupConstantConfig(warmup_steps=recipe["scheduler"]["warmup_steps"]),
-    )
+def _derive_loop_counts(recipe: dict[str, Any]) -> None:
+    """Add derived run and epoch counts in place without reading prepared data."""
+    loop, data = recipe["loop"], recipe["data"]
+    epochs, max_steps = loop["epochs"], loop["max_steps"]
+    if (epochs is None) == (max_steps is None):
+        raise ValueError("loop requires exactly one of epochs or max_steps; set the other to null")
+    if epochs is not None and epochs != 1:
+        raise ValueError("loop.epochs must be 1; prepare and continue the next augmentation epoch separately")
+    per_sequence = data["pairs_per_sequence"] - loop["min_context_pairs_before_target"]
+    if per_sequence <= 0:
+        raise ValueError("data.pairs_per_sequence must exceed loop.min_context_pairs_before_target")
+    batch = loop["optimizer_batch_size"]
+    if batch % per_sequence:
+        raise ValueError("loop.optimizer_batch_size must fit whole training sequences")
+    task_count = data["expected_task_count"]
+    if task_count is None and epochs is not None:
+        raise ValueError("epoch runs require data.expected_task_count")
+    if (task_count is None and recipe["models"]["initialization"] == "transformer_weights"
+            and recipe["models"]["completed_epochs"] > 0):
+        raise ValueError("completed epoch offsets require data.expected_task_count")
+    if task_count is None and recipe["checkpointing"] is not None:
+        raise ValueError("checkpointing requires data.expected_task_count for the resume cursor")
+    full_targets = None if task_count is None else task_count * per_sequence
+    epoch_steps = None if full_targets is None else (full_targets + batch - 1) // batch
+    steps = epoch_steps if epochs is not None else max_steps
+    if epoch_steps is not None and steps > epoch_steps:
+        raise ValueError("loop.max_steps exceeds the prepared epoch; prepare the next epoch explicitly")
+    targets = steps * batch if full_targets is None else min(steps * batch, full_targets)
+    loop.update(max_optimizer_steps=steps, expected_target_count=targets,
+                expected_final_batch_target_count=(targets - 1) % batch + 1,
+                epoch_steps=epoch_steps)
 
 
-def _validate_relationships(recipe: dict[str, Any]) -> None:
+def _parse_scheduler_config(schedule: Mapping[str, Any] | None, steps: int):
+    """Validate schedule parameters and return settings, or None when explicitly disabled."""
+    if schedule is None:
+        return None
+    if schedule["type"] == "cosine":
+        if not 0 <= schedule["warmup_steps"] < schedule["total_steps"]:
+            raise ValueError("scheduler requires 0 <= warmup_steps < total_steps")
+        if steps > schedule["total_steps"]:
+            raise ValueError("scheduler.total_steps must cover the run step limit")
+        return CosineSchedulerConfig(schedule["warmup_steps"], schedule["total_steps"])
+    if not math.isclose(schedule["first_update_warmup_fraction"], 1 / schedule["warmup_steps"], rel_tol=1e-12):
+        raise ValueError("scheduler.first_update_warmup_fraction must equal 1 / warmup_steps")
+    return LinearWarmupConstantConfig(schedule["warmup_steps"])
+
+
+def _validate_config_relationships(recipe: dict[str, Any]) -> None:
+    """Check compatibility across execution, batching, sampling, and service settings."""
     data, loop, flow = recipe["data"], recipe["loop"], recipe["flow"]
+
+    execution = recipe["execution"]
+    if execution["nvarc_early_exit_layer"] != execution["nvarc_hidden_layers"][-1]:
+        raise ValueError("execution.nvarc_early_exit_layer must equal the highest selected NVARC layer")
+
+    # Match the execution strategy to the GPU count, random sampling, and packing policy.
     strategy = recipe["execution"]["distributed_strategy"]
     if strategy == "single_process" and recipe["deployment"]["gpu_count"] != 1:
         raise ValueError("single_process execution requires deployment.gpu_count=1")
-    if strategy == "ddp" and flow["rng_scheme"] != "global_step_target_v1":
-        raise ValueError("ddp execution requires flow.rng_scheme=global_step_target_v1")
-    targets_per_sequence = data["pairs_per_sequence"] - loop["min_context_pairs_before_target"]
-    total = data["expected_task_count"] * targets_per_sequence
+    if strategy in ("ddp", "fsdp2") and flow["rng_scheme"] != "global_step_target_v1":
+        raise ValueError(f"{strategy} execution requires flow.rng_scheme=global_step_target_v1")
+    if strategy == "fsdp2" and recipe["execution"]["flux_packing_algorithm"] != "legacy_bfd_v1":
+        raise ValueError("fsdp2 execution requires execution.flux_packing_algorithm=legacy_bfd_v1")
+
     batch = loop["optimizer_batch_size"]
-    if batch % targets_per_sequence:
-        raise ValueError("loop.optimizer_batch_size must fit whole training sequences")
-    steps = (total + batch - 1) // batch
-    final_count = (total - 1) % batch + 1
-    for name, expected in (
-        ("expected_target_count", total), ("max_optimizer_steps", steps),
-        ("expected_final_batch_target_count", final_count),
-    ):
-        if loop[name] != expected:
-            raise ValueError(f"loop.{name} must equal {expected} for the complete epoch")
+    steps = loop["max_optimizer_steps"]
+    # Flow quotas describe full batches and the prepared epoch tail. A bounded
+    # prefix does not change the last full batch into a different sampling policy.
+    task_count = data["expected_task_count"]
+    final_count = (loop["expected_final_batch_target_count"] if task_count is None else
+                   (task_count * (data["pairs_per_sequence"] - loop["min_context_pairs_before_target"]) - 1) % batch + 1)
     for name, count in (("endpoint_targets_per_full_batch", batch),
                         ("endpoint_targets_in_final_batch", final_count)):
-        if flow[name] > count:
+        if flow.get(name, 0) > count:
             raise ValueError(f"flow.{name} exceeds its batch target count")
-    if final_count == batch and flow["endpoint_targets_in_final_batch"] != flow["endpoint_targets_per_full_batch"]:
+    if final_count == batch and flow.get("endpoint_targets_in_final_batch", 0) != flow.get("endpoint_targets_per_full_batch", 0):
         raise ValueError("a full final batch must use the full-batch endpoint count")
     if "high_noise_min" in flow:
         if not 0 < flow["high_noise_min"] < flow["high_noise_max"]:
@@ -798,6 +807,8 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
                 raise ValueError("endpoint and high-noise quotas exceed the batch target count")
         if final_count == batch and flow["high_noise_targets_in_final_batch"] != flow["high_noise_targets_per_full_batch"]:
             raise ValueError("a full final batch must use the full-batch high-noise count")
+
+    # Require a pinned transformer source and a valid parent run ID when logging is enabled.
     if recipe["models"]["initialization"] == "transformer_weights":
         import re
         source = recipe["models"]["transformer_source"]
@@ -808,21 +819,40 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
         if (not re.fullmatch(r"[A-Za-z0-9_./-]+", source["subfolder"])
                 or any(part in ("", ".", "..") for part in source["subfolder"].split("/"))):
             raise ValueError("transformer_source.subfolder must be a safe relative path")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", recipe["logging"]["parent_run_id"]):
+        if recipe["logging"] is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", recipe["logging"]["parent_run_id"]):
             raise ValueError("logging.parent_run_id must identify a W&B run")
 
-    weights = recipe["loss"]["region_weights"]
-    if not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-12):
-        raise ValueError("loss.region_weights must sum to one")
-    if weights["canvas"] + weights["grid"] <= 0:
-        raise ValueError("loss needs positive weight outside the boundary for 30x30 grids")
-    schedule = recipe["scheduler"]
-    if schedule["warmup_steps"] > steps:
-        raise ValueError("scheduler.warmup_steps must not exceed the epoch")
-    if not math.isclose(schedule["first_update_warmup_fraction"], 1 / schedule["warmup_steps"], rel_tol=1e-12):
-        raise ValueError("scheduler.first_update_warmup_fraction must equal 1 / warmup_steps")
+    # Require region weights to sum to one and cover grids without a boundary region.
+    if recipe["loss"]["type"] == "region_weighted_velocity_mse":
+        weights = recipe["loss"]["region_weights"]
+        if not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-12):
+            raise ValueError("loss.region_weights must sum to one")
+        if weights["canvas"] + weights["grid"] <= 0:
+            raise ValueError("loss needs positive weight outside the boundary for 30x30 grids")
 
+    # Check the learning-rate schedule and benchmark duration against the run length.
+    _parse_scheduler_config(recipe["scheduler"], steps)
+    benchmark = recipe["benchmark"]
+    if benchmark is not None and benchmark["warmup_steps"] + benchmark["measured_steps"] != steps:
+        raise ValueError("benchmark warmup_steps + measured_steps must equal the run step limit")
+
+    # The logging step metric must be included in the recorded training metrics.
+    if recipe["logging"] is not None and recipe["logging"]["step_metric"] not in recipe["logging"]["train_metrics"]:
+        raise ValueError("logging.train_metrics must include the step metric")
+
+    # Cadences define when checkpoints and validation run: periodically, at start, or at end.
+    # Replacing the last periodic event requires an enabled event at run end.
+    cadences = [recipe["checkpointing"]] if recipe["checkpointing"] is not None else []
+    if recipe["validation"] is not None:
+        cadences.extend((recipe["validation"]["loss"], recipe["validation"]["sampling"]))
+    for cadence in cadences:
+        if cadence["replace_last_periodic_with_final"] and not cadence["at_end"]:
+            raise ValueError("replace_last_periodic_with_final requires at_end")
+
+    # If validation is enabled, its sampling subset must fit the available tasks and queries.
     validation = recipe["validation"]
+    if validation is None:
+        return
     sampling, loss = validation["sampling"], validation["loss"]
     if validation["expected_query_count"] < validation["expected_task_count"]:
         raise ValueError("validation must contain at least one query per task")
@@ -832,7 +862,9 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
         raise ValueError("sampling tasks must fit the validation pool")
     if len(set(sampling["seeds"])) != 2:
         raise ValueError("validation.sampling.seeds must be distinct")
-    endpoint_fraction = flow["endpoint_targets_per_full_batch"] / batch
+
+    # Match validation loss weights to the flow mixture, except for the high-noise variant below.
+    endpoint_fraction = flow.get("endpoint_targets_per_full_batch", 0) / batch
     if "high_noise_min" in flow:
         # Keep the original evaluation mixture when changing the training distribution.
         if not math.isclose(loss["endpoint_weight"] + loss["uniform_proxy_weight"], 1.0, abs_tol=1e-12):
@@ -840,17 +872,12 @@ def _validate_relationships(recipe: dict[str, Any]) -> None:
     elif not (math.isclose(loss["endpoint_weight"], endpoint_fraction, rel_tol=0, abs_tol=1e-12)
             and math.isclose(loss["uniform_proxy_weight"], 1 - endpoint_fraction, rel_tol=0, abs_tol=1e-12)):
         raise ValueError("validation.loss weights must match the full-batch flow mixture")
-    for cadence in (loss, sampling, recipe["checkpointing"]):
-        if cadence["replace_last_periodic_with_final"] and not cadence["at_end"]:
-            raise ValueError("replace_last_periodic_with_final requires at_end")
-    checkpoint_steps = _event_steps(recipe["checkpointing"], steps)
-    if checkpoint_steps != tuple(step for step in _event_steps(sampling, steps) if step):
-        raise ValueError("checkpointing must align with every nonzero sampling check")
-    if recipe["logging"]["step_metric"] not in recipe["logging"]["train_metrics"]:
-        raise ValueError("logging.train_metrics must include the step metric")
 
 
-def _event_steps(cadence: Mapping[str, Any], total: int) -> tuple[int, ...]:
+def _compute_event_steps(cadence: Mapping[str, Any] | None, total: int) -> tuple[int, ...]:
+    """Compute event update indices, including optional start/end checks; None disables events."""
+    if cadence is None:
+        return ()
     steps = list(range(cadence["every_optimizer_steps"], total + 1, cadence["every_optimizer_steps"]))
     if cadence["at_end"] and (not steps or steps[-1] != total):
         if cadence["replace_last_periodic_with_final"] and steps:
@@ -861,15 +888,16 @@ def _event_steps(cadence: Mapping[str, Any], total: int) -> tuple[int, ...]:
     return tuple(steps)
 
 
-def _validate(value: Any, spec: Any, *, name: str) -> Any:
+def _validate_against_schema(value: Any, spec: Any, *, name: str) -> Any:
+    """Recursively enforce required fields, validators, and fixed literals without filling defaults."""
     if isinstance(spec, dict):
-        value = _object(value, name=name)
-        _fields(value, set(spec), name=name)
-        return {key: _validate(value[key], child, name=f"{name}.{key}") for key, child in spec.items()}
+        value = _validate_json_object(value, name=name)
+        _validate_required_fields(value, set(spec), name=name)
+        return {key: _validate_against_schema(value[key], child, name=f"{name}.{key}") for key, child in spec.items()}
     if isinstance(spec, list):
         if not isinstance(value, list) or len(value) != len(spec):
             raise ValueError(f"{name} must be an array of length {len(spec)}")
-        return [_validate(item, child, name=f"{name}[{index}]") for index, (item, child) in enumerate(zip(value, spec))]
+        return [_validate_against_schema(item, child, name=f"{name}[{index}]") for index, (item, child) in enumerate(zip(value, spec))]
     if spec is bool:
         if not isinstance(value, bool):
             raise TypeError(f"{name} must be a boolean")
@@ -877,13 +905,14 @@ def _validate(value: Any, spec: Any, *, name: str) -> Any:
     if callable(spec):
         return spec(value, name=name)
     if isinstance(spec, float):
-        value = _number(value, name=name)
+        value = _parse_finite_number(value, name=name)
     if type(value) is not type(spec) or value != spec:
         raise ValueError(f"{name} must be {spec!r}")
     return value
 
 
-def _unique_fields(pairs):
+def _reject_duplicate_json_fields(pairs):
+    """JSON object_pairs_hook that rejects duplicate keys before they can be overwritten."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -892,16 +921,17 @@ def _unique_fields(pairs):
     return result
 
 
-def _freeze(value: Any) -> Any:
+def _freeze_config_values(value: Any) -> Any:
+    """Recursively copy dictionaries to read-only mappings and lists to tuples."""
     if isinstance(value, dict):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+        return MappingProxyType({key: _freeze_config_values(item) for key, item in value.items()})
     if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
+        return tuple(_freeze_config_values(item) for item in value)
     return value
 
 
 __all__ = [
-    "BASELINE_SCHEMA_VERSION", "AdamWConfig", "BenchmarkConfig", "CosineSchedulerConfig",
+    "TRAINING_SCHEMA_VERSION", "AdamWConfig", "BenchmarkConfig", "CosineSchedulerConfig",
     "LinearWarmupConstantConfig", "DataConfig", "LoopConfig", "ModelConfig",
-    "TrainingConfig", "load_training_config",
+    "TrainingConfig", "load_training_config", "parse_training_config",
 ]

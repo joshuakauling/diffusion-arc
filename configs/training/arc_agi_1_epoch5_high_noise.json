@@ -1,6 +1,6 @@
 {
   "config_type": "training_run",
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "arc_agi_1_epoch5_high_noise",
   "seed": 171,
   "deployment": {
@@ -44,7 +44,9 @@
     "flux_max_joint_tokens": 12288,
     "activation_checkpointing": false,
     "profiler": null,
-    "nvarc_max_tokens": 134400
+    "nvarc_max_tokens": 134400,
+    "flux_max_spread_tokens": 1000,
+    "flux_packing_algorithm": "legacy_bfd_v1"
   },
   "data": {
     "pool": "nvarc_train_arc_agi_1_training_only",
@@ -77,7 +79,8 @@
     "max_tokens": 8400,
     "overlength_policy": "error",
     "num_workers": 2,
-    "prefetch_factor": 8
+    "prefetch_factor": 8,
+    "source": "epoch_pool"
   },
   "canvas": {
     "height": 30,
@@ -89,13 +92,11 @@
   },
   "loop": {
     "epochs": 1,
-    "max_optimizer_steps": 906,
     "optimizer_batch_size": 48,
     "min_context_pairs_before_target": 2,
     "vae_microbatch_size": 48,
     "drop_last": false,
-    "expected_target_count": 43470,
-    "expected_final_batch_target_count": 30
+    "max_steps": null
   },
   "loss": {
     "type": "region_weighted_velocity_mse",
@@ -127,7 +128,8 @@
     "high_noise_min": 0.8,
     "high_noise_max": 1.0,
     "high_noise_targets_per_full_batch": 12,
-    "high_noise_targets_in_final_batch": 8
+    "high_noise_targets_in_final_batch": 8,
+    "rng_scheme": "legacy_stream_v1"
   },
   "optimizer": {
     "type": "adamw",
@@ -342,5 +344,6 @@
   "final_test": {
     "enabled": false,
     "checkpoint_selection": null
-  }
+  },
+  "benchmark": null
 }

@@ -18,7 +18,7 @@ from torch import Tensor, nn
 from diffusion_arc.arc_data.image.canvas import classify_arc_cells, decode_arc_grids
 from diffusion_arc.inference.conditioning import (
     evaluation_mode,
-    sample_conditioning_noise,
+    sample_query_latent_noise,
     stage_packed_conditioning,
     validate_packed_execution,
     validate_sampling_seed,
@@ -122,7 +122,7 @@ def iter_partial_denoising(
 
         for sample_index, seed in enumerate(sample_seeds):
             noise = torch.stack(tuple(
-                sample_conditioning_noise(query, seed, ("generation", sample_index), device)
+                sample_query_latent_noise(query, seed, ("generation", sample_index), device)
                 for query in queries
             ))
             target_velocity = noise - clean

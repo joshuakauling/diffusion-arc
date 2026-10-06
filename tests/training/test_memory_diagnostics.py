@@ -39,7 +39,7 @@ class CudaMemoryHistoryTests(unittest.TestCase):
         self.events.append(("dump", None))
         Path(filename).write_bytes(pickle.dumps({"device_traces": [[{"action": "oom", "size": 430}]]}))
 
-    def test_oom_snapshot_precedes_distributed_cleanup_and_preserves_context(self):
+    def test_oom_snapshot_precedes_distributed_cleanup_and_preserves_error(self):
         @contextmanager
         def distributed_scope():
             try:
@@ -49,10 +49,7 @@ class CudaMemoryHistoryTests(unittest.TestCase):
 
         original = torch.OutOfMemoryError("failed request")
         with self.assertRaises(torch.OutOfMemoryError) as caught:
-            with distributed_scope(), CudaMemoryHistory(self.directory, 1, torch.device("cuda:1")) as memory:
-                memory.trace("batch_start", {"global_batch": 54})
-                memory.trace("flux_forward_start", {"pack": 2, "joint_tokens": 12000})
-                memory.trace("flux_backward_start", {})
+            with distributed_scope(), CudaMemoryHistory(self.directory, 1, torch.device("cuda:1")):
                 raise original
         self.assertIs(caught.exception, original)
         self.assertEqual([event for event, _ in self.events], ["history", "dump", "history", "distributed_cleanup"])
@@ -63,8 +60,9 @@ class CudaMemoryHistoryTests(unittest.TestCase):
         self.assertEqual(pickle.loads(snapshot.read_bytes())["device_traces"][0][0]["action"], "oom")
         self.assertFalse(snapshot.with_suffix(".pickle.partial").exists())
         metadata = json.loads(snapshot.with_suffix(".json").read_text())
-        self.assertEqual((metadata["global_batch"], metadata["pack"], metadata["last_stage"]),
-                         (54, 2, "flux_backward_start"))
+        self.assertEqual(metadata["reason"], "oom")
+        self.assertEqual(metadata["error_type"], type(original).__name__)
+        self.assertEqual(metadata["message"], "failed request")
         self.assertEqual(metadata["snapshot_bytes"], snapshot.stat().st_size)
 
     def test_success_still_saves_a_reference_snapshot(self):
@@ -73,34 +71,6 @@ class CudaMemoryHistoryTests(unittest.TestCase):
         self.assertTrue((self.directory / "rank-0-complete.pickle").exists())
         self.assertFalse((self.directory / "rank-0-oom.pickle").exists())
         self.assertEqual(self.record.call_args.kwargs["enabled"], None)
-
-    def test_selected_snapshot_is_after_the_first_backward_only_and_keeps_history(self):
-        with CudaMemoryHistory(self.directory, 0, torch.device("cuda:0"), capture_step=54) as memory:
-            for step, pack in ((53, 1), (54, 2), (54, 1)):
-                memory.observe("batch_start", {"global_batch": step})
-                memory.observe("flux_forward_start", {"pack": pack, "joint_tokens": 12200})
-                memory.observe("flux_backward_start", {})
-                self.dump.assert_not_called()
-                memory.observe("flux_backward_end", {})
-            self.dump.assert_called_once()
-            # A duplicate callback must neither overwrite the snapshot nor reset history.
-            memory.observe("flux_backward_end", {})
-            self.dump.assert_called_once()
-            self.assertEqual(self.record.call_count, 1)
-            path = self.directory / "rank-0-step-54-pack-1-backward.pickle"
-            metadata = json.loads(path.with_suffix(".json").read_text())
-            self.assertEqual((metadata["global_batch"], metadata["pack"], metadata["last_stage"]),
-                             (54, 1, "flux_backward_end"))
-            self.assertEqual(metadata["reason"], "checkpoint")
-        self.assertEqual(self.dump.call_count, 2)
-        self.assertTrue((self.directory / "rank-0-complete.pickle").is_file())
-
-    def test_missing_selected_backward_fails_and_still_disables_recording(self):
-        with self.assertRaisesRegex(RuntimeError, "was not captured"):
-            with CudaMemoryHistory(self.directory, 0, torch.device("cuda:0"), capture_step=54):
-                pass
-        self.assertEqual(self.record.call_args.kwargs["enabled"], None)
-        self.assertTrue((self.directory / "rank-0-failure.pickle").is_file())
 
     def test_snapshot_failure_never_replaces_the_original_oom(self):
         self.dump.side_effect = OSError("disk full")

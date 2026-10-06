@@ -1,8 +1,8 @@
-"""Atomic full-state checkpoints at completed single-GPU or DDP updates."""
+"""Atomic full-state checkpoints at completed single-GPU, DDP or FSDP2 updates."""
 
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
 import hashlib
 from importlib.metadata import version
@@ -34,12 +34,40 @@ class Checkpoint:
 
 
 def normalize_checkpoint_recipe(recipe: dict) -> dict:
-    """Expand only defaults that preserve the pre-integration single-GPU behavior."""
+    """Migrate historical saved recipes; never complete a new user configuration."""
     recipe = deepcopy(recipe)
+    schema = recipe.get("schema_version")
+    if schema == 2:
+        return recipe
+    if schema != 1:
+        raise ValueError("unsupported saved training recipe schema")
+    recipe["schema_version"] = 2
+    recipe["data"]["source"] = "epoch_pool"
+    recipe["benchmark"] = None
+    targets = (recipe["data"]["expected_task_count"]
+               * (recipe["data"]["pairs_per_sequence"] - recipe["loop"]["min_context_pairs_before_target"]))
+    batch = recipe["loop"]["optimizer_batch_size"]
+    expected = {"max_optimizer_steps": (targets + batch - 1) // batch,
+                "expected_target_count": targets,
+                "expected_final_batch_target_count": (targets - 1) % batch + 1}
+    if any(recipe["loop"].get(name) != value for name, value in expected.items()):
+        raise ValueError("historical saved recipe has inconsistent epoch counts")
+    for name in expected:
+        recipe["loop"].pop(name)
+    recipe["loop"].update(epochs=1, max_steps=None)
     recipe["execution"].setdefault("flux_max_spread_tokens", 1_000)
     recipe["execution"].setdefault("flux_packing_algorithm", "legacy_bfd_v1")
     recipe["flow"].setdefault("rng_scheme", "legacy_stream_v1")
     return recipe
+
+
+def load_saved_training_config(path: Path) -> TrainingConfig:
+    """Read an existing run receipt, explicitly migrating its historical recipe."""
+    from ..config import parse_training_config
+
+    path = Path(path).resolve()
+    payload = normalize_checkpoint_recipe(json.loads(path.read_text()))
+    return parse_training_config(payload, config_path=path)
 
 
 def checkpoint_identities_match(saved: dict, current: dict) -> bool:
@@ -58,7 +86,7 @@ def _checkpoint_execution(metadata: dict) -> dict:
     if execution is None and metadata["schema_version"] == 1:
         execution = {"strategy": "single_process", "world_size": 1}
     if (not isinstance(execution, dict) or set(execution) != {"strategy", "world_size"}
-            or execution["strategy"] not in ("single_process", "ddp")
+            or execution["strategy"] not in ("single_process", "ddp", "fsdp2")
             or type(execution["world_size"]) is not int or execution["world_size"] < 1
             or (execution["strategy"] == "single_process" and execution["world_size"] != 1)):
         raise ValueError("checkpoint execution strategy or world size is invalid")
@@ -70,7 +98,7 @@ def _runtime_execution(runtime) -> dict:
             else {"strategy": runtime.strategy, "world_size": runtime.world_size})
 
 
-def checkpoint_identity(config: TrainingConfig, *, data_fingerprint: str, validation_manifest: dict) -> dict:
+def checkpoint_identity(config: TrainingConfig, *, data_fingerprint: str, validation_manifest: dict | None) -> dict:
     """Bind continuation to the recipe, ordered training content and validation split.
 
     Deployment and logging may change when restarting. Model/data paths remain
@@ -85,7 +113,7 @@ def checkpoint_identity(config: TrainingConfig, *, data_fingerprint: str, valida
             "validation_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_state: bool = True) -> Checkpoint:
+def load_checkpoint_metadata(path: Path, config: TrainingConfig, *, require_training_state: bool = True) -> Checkpoint:
     """Reject incomplete inventories, incompatible recipes and invalid data cursors.
 
     File sizes detect missing/truncated writes, not arbitrary same-size bit rot.
@@ -93,7 +121,7 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
     """
     path = Path(path).resolve()
     metadata = json.loads((path / "checkpoint.json").read_text())
-    if type(metadata.get("schema_version")) is not int or metadata["schema_version"] not in (1, 2):
+    if type(metadata.get("schema_version")) is not int or metadata["schema_version"] not in (1, 2, 3):
         raise ValueError("unsupported checkpoint schema")
     execution = _checkpoint_execution(metadata)
     if execution != _config_execution(config):
@@ -109,11 +137,26 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
         raise ValueError("checkpoint retains model weights only; its training state was removed")
     inventory = metadata["files"]
     required = {"transformer/config.json"} | (set() if weights_only else {"training_state.pt"})
+    if execution["strategy"] == "fsdp2":
+        if metadata["schema_version"] != 3:
+            raise ValueError("FSDP2 requires distributed checkpoint schema 3")
+        required.add("model/.metadata")
+        if not weights_only:
+            required.add("optimizer/.metadata")
+        elif any(name.startswith("optimizer/") for name in inventory):
+            raise ValueError("weights-only checkpoint must not inventory optimizer shards")
+        has_weights = any(name.startswith("model/") and name.endswith(".distcp") for name in inventory)
+        if not weights_only and not any(name.startswith("optimizer/") and name.endswith(".distcp")
+                                        for name in inventory):
+            raise ValueError("checkpoint optimizer shards are missing")
+    else:
+        has_weights = any(name.startswith("transformer/") and name.endswith(".safetensors")
+                          for name in inventory)
     if weights_only and "training_state.pt" in inventory:
         raise ValueError("weights-only checkpoint must not inventory a training state")
     actual = {str(file.relative_to(path)) for file in path.rglob("*") if file.is_file()}
     if (not required <= inventory.keys() or actual != set(inventory) | {"checkpoint.json"}
-            or not any(name.startswith("transformer/") and name.endswith(".safetensors") for name in inventory)):
+            or not has_weights):
         raise ValueError("incomplete checkpoint inventory")
     for name, size in inventory.items():
         file = path / name
@@ -130,14 +173,15 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
     epoch = progress.get("epoch", 1)
     if type(epoch) is not int or epoch < 1:
         raise ValueError("checkpoint epoch must be a positive integer")
-    previous_steps = (epoch - 1) * config.loop.max_optimizer_steps
+    epoch_steps = config.epoch_optimizer_steps
+    previous_steps = (epoch - 1) * epoch_steps
     optimizer_start = progress.get("optimizer_start_step", 0)
-    expected_start = config.recipe["models"].get("completed_epochs", 0) * config.loop.max_optimizer_steps
+    expected_start = config.recipe["models"].get("completed_epochs", 0) * epoch_steps
     if type(optimizer_start) is not int or optimizer_start != expected_start or optimizer_start > previous_steps:
         raise ValueError("checkpoint optimizer start differs from its initialization recipe")
     if type(step) is not int or not previous_steps < step <= previous_steps + config.loop.max_optimizer_steps:
         raise ValueError("checkpoint optimizer step is outside this epoch")
-    epoch_targets = config.recipe["loop"]["expected_target_count"]
+    epoch_targets = config.recipe["data"]["expected_task_count"] * config.targets_per_sequence
     expected_targets = ((epoch - 1) * epoch_targets
                         + min((step - previous_steps) * config.loop.optimizer_batch_size, epoch_targets))
     if (type(progress["targets_seen"]) is not int or type(progress["sources_seen"]) is not int
@@ -147,7 +191,9 @@ def read_checkpoint(path: Path, config: TrainingConfig, *, require_training_stat
     if any(type(value) is not int or value < 0 for value in progress["workload_totals"].values()):
         raise ValueError("checkpoint workload counters must be nonnegative integers")
     run = metadata["wandb_run"]
-    if not all(isinstance(run[name], str) and run[name] for name in ("id", "project", "entity")):
+    if run is None:
+        return Checkpoint(path, metadata)
+    if not isinstance(run, dict) or not all(isinstance(run[name], str) and run[name] for name in ("id", "project", "entity")):
         raise ValueError("checkpoint must identify its W&B run")
     if not run["id"].isascii() or not all(char.isalnum() or char in "-_" for char in run["id"]):
         raise ValueError("checkpoint W&B run ID is not a directory name")
@@ -159,7 +205,7 @@ def remove_training_state(checkpoint: Checkpoint) -> int:
 
     Move the state out of the inventory before publishing the weights-only marker.
     If publication fails, restore it. Only delete the state after publication;
-    transformer files and their HF-compatible layout are never changed.
+    model files and their HF or distributed layout are never changed.
     """
     path = checkpoint.path
     metadata_path = path / "checkpoint.json"
@@ -167,6 +213,8 @@ def remove_training_state(checkpoint: Checkpoint) -> int:
         raise ValueError("checkpoint metadata changed since verification")
     if checkpoint.metadata.get("weights_only", False):
         return 0
+    if _checkpoint_execution(checkpoint.metadata)["strategy"] == "fsdp2":
+        return _remove_sharded_training_state(checkpoint)
     state = path / "training_state.pt"
     size = checkpoint.metadata["files"][state.name]
     if state.is_symlink() or state.stat().st_size != size:
@@ -196,6 +244,41 @@ def remove_training_state(checkpoint: Checkpoint) -> int:
     return size
 
 
+def _remove_sharded_training_state(checkpoint: Checkpoint) -> int:
+    """Prune optimizer shards and the sidecar while retaining distributed weights."""
+    path = checkpoint.path
+    removed = {name: size for name, size in checkpoint.metadata["files"].items()
+               if name == "training_state.pt" or name.startswith("optimizer/")}
+    for name, size in removed.items():
+        file = path / name
+        if file.is_symlink() or file.stat().st_size != size:
+            raise ValueError("checkpoint training state changed since verification")
+    pending = path.parent / f".{path.name}-training-state-removal"
+    pending.mkdir()  # An interrupted cleanup requires inspection before retrying.
+    metadata = dict(checkpoint.metadata, weights_only=True,
+                    files={name: size for name, size in checkpoint.metadata["files"].items()
+                           if name not in removed})
+    moved = []
+    try:
+        with (pending / "checkpoint.json").open("x") as handle:
+            json.dump(metadata, handle, indent=2, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        for name in ("training_state.pt", "optimizer"):
+            (path / name).rename(pending / name)
+            moved.append(name)
+        (pending / "checkpoint.json").replace(path / "checkpoint.json")
+    except BaseException:
+        for name in reversed(moved):
+            (pending / name).rename(path / name)
+        (pending / "checkpoint.json").unlink(missing_ok=True)
+        pending.rmdir()
+        raise
+    shutil.rmtree(pending)
+    return sum(removed.values())
+
+
 def validate_epoch_continuation(checkpoint: Checkpoint, config: TrainingConfig) -> None:
     """Allow a completed epoch to feed a new augmentation view of the same experiment."""
     if _checkpoint_execution(checkpoint.metadata) != _config_execution(config):
@@ -210,7 +293,8 @@ def validate_epoch_continuation(checkpoint: Checkpoint, config: TrainingConfig) 
     if previous != current:
         raise ValueError("only the augmentation seed and prepared view may change between epochs")
     progress = checkpoint.metadata["progress"]
-    if progress["optimizer_step"] != progress.get("epoch", 1) * config.loop.max_optimizer_steps:
+    if (config.recipe["data"]["source"] != "epoch_pool"
+            or progress["optimizer_step"] != progress.get("epoch", 1) * config.epoch_optimizer_steps):
         raise ValueError("finish the previous epoch before starting the next one")
 
 
@@ -242,8 +326,9 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
                            flow_generator: torch.Generator, device: torch.device, runtime=None) -> None:
     """Restore AdamW/LR and RNGs after model loading and frozen-cache preparation.
 
-    The transformer has already been loaded from checkpoint.path / transformer
-    by load_models. No pending gradients are saved; continuation starts with the
+    Single/DDP weights have already been loaded by load_models. FSDP2 loads its
+    model and optimizer shards here, after fully_shard and optimizer creation.
+    No pending gradients are saved; continuation starts with the
     next complete optimizer batch. Load scheduler state after constructing it,
     then optimizer state to retain the next update's stored learning rate.
     """
@@ -253,7 +338,8 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
     state = torch.load(checkpoint.path / "training_state.pt", map_location="cpu", weights_only=True)
     if not isinstance(state, dict) or not {"parameter_names", "optimizer", "scheduler"} <= state.keys():
         raise ValueError("checkpoint training state is incomplete")
-    if execution["strategy"] == "ddp":
+    sharded = execution["strategy"] == "fsdp2"
+    if execution["strategy"] in ("ddp", "fsdp2"):
         states = state.get("rng_by_rank")
         if not isinstance(states, list) or len(states) != execution["world_size"]:
             raise ValueError("checkpoint rank RNG states are incomplete")
@@ -271,18 +357,33 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
         raise ValueError("checkpoint optimizer parameter order differs from the transformer")
     progress = checkpoint.metadata["progress"]
     step = progress["optimizer_step"] - progress.get("optimizer_start_step", 0)
-    if state["scheduler"]["last_epoch"] != step:
-        raise ValueError("checkpoint scheduler step differs from optimizer progress")
-    for name in ("warmup_steps", "base_lrs"):
-        if state["scheduler"][name] != scheduler.state_dict()[name]:
-            raise ValueError(f"checkpoint scheduler {name} differs from the recipe")
-    fraction = min(step + 1, scheduler.warmup_steps) / scheduler.warmup_steps
-    expected_lrs = [base * fraction for base in scheduler.base_lrs]
+    stored_scheduler = state["scheduler"]
+    if (stored_scheduler is None) != (scheduler is None):
+        raise ValueError("checkpoint scheduler differs from the recipe")
     groups = state["optimizer"]["param_groups"]
     if len(groups) != len(optimizer.param_groups):
         raise ValueError("checkpoint optimizer parameter groups differ")
-    if (state["scheduler"]["_last_lr"] != expected_lrs
-            or [group["lr"] for group in groups] != expected_lrs):
+    if scheduler is None:
+        expected_lrs = [group["lr"] for group in optimizer.param_groups]
+    else:
+        if stored_scheduler["last_epoch"] != step:
+            raise ValueError("checkpoint scheduler step differs from optimizer progress")
+        progress_fields = {"last_epoch", "_step_count", "_last_lr", "_get_lr_called_within_step"}
+        current_settings = {key: value for key, value in scheduler.state_dict().items()
+                            if key not in progress_fields}
+        saved_settings = {key: value for key, value in stored_scheduler.items()
+                          if key not in progress_fields}
+        if saved_settings != current_settings:
+            raise ValueError("checkpoint scheduler settings differ from the recipe")
+        # Evaluate the configured schedule at the saved step without advancing
+        # either the live scheduler or its optimizer.
+        probe = copy(scheduler)
+        probe.load_state_dict(deepcopy(stored_scheduler))
+        probe._get_lr_called_within_step = True
+        expected_lrs = probe.get_lr()
+        if stored_scheduler["_last_lr"] != expected_lrs:
+            raise ValueError("checkpoint learning rate differs from scheduler progress")
+    if [group["lr"] for group in groups] != expected_lrs:
         raise ValueError("checkpoint learning rate differs from scheduler progress")
     if set(state["optimizer"]["state"]) != set(checkpoint.metadata["optimizer_state_keys"]):
         raise ValueError("checkpoint optimizer states are incomplete")
@@ -294,29 +395,53 @@ def restore_training_state(checkpoint: Checkpoint, *, transformer, optimizer, sc
         for key, parameter in zip(stored["params"], current["params"], strict=True):
             moments = state["optimizer"]["state"].get(key)
             if moments is not None:
+                if sharded:
+                    if (moments.get("shape") != list(parameter.shape)
+                            or moments.get("dtype") != str(parameter.dtype)):
+                        raise ValueError("checkpoint optimizer moment shape or dtype differs")
+                    continue
                 if not {"exp_avg", "exp_avg_sq", "step"} <= moments.keys():
                     raise ValueError("checkpoint optimizer moments are incomplete")
                 if any(moments[name].shape != parameter.shape or moments[name].dtype != parameter.dtype
                        for name in ("exp_avg", "exp_avg_sq")):
                     raise ValueError("checkpoint optimizer moment shape or dtype differs")
-    scheduler.load_state_dict(state["scheduler"])
-    optimizer.load_state_dict(state["optimizer"])
+    if scheduler is not None:
+        scheduler.load_state_dict(state["scheduler"])
+    if sharded:
+        from .fsdp_checkpoint import restore_sharded_optimizer
+
+        restore_model_weights(checkpoint, transformer=transformer, runtime=runtime)
+        restore_sharded_optimizer(checkpoint.path, transformer, optimizer, runtime.process_group,
+                                  state["optimizer"])
+    else:
+        optimizer.load_state_dict(state["optimizer"])
     optimizer.zero_grad(set_to_none=execution["strategy"] != "ddp")
     _restore_rng(rng, flow_generator, device)
 
 
+def restore_model_weights(checkpoint: Checkpoint, *, transformer, runtime) -> None:
+    """Collectively restore FSDP2 weights after constructing and sharding the model."""
+    from .fsdp_checkpoint import restore_sharded_model
+
+    if (_checkpoint_execution(checkpoint.metadata) != _runtime_execution(runtime)
+            or runtime.strategy != "fsdp2"):
+        raise ValueError("sharded model restore requires the checkpoint's FSDP2 runtime")
+    restore_sharded_model(checkpoint.path, transformer, runtime.process_group)
+
+
 def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transformer, optimizer,
                     scheduler, flow_generator: torch.Generator, device: torch.device,
-                    identity: dict, wandb_run: dict, runtime=None,
+                    identity: dict, wandb_run: dict | None, runtime=None,
                     completed_update: bool = False) -> dict[str, float | int | str]:
     """Publish one full checkpoint after all writes finish, then apply retention.
 
-    HF stores only the trainable FLUX transformer in sharded safetensors. Frozen
-    NVARC/VAE weights and CPU evaluation caches are referenced by the recipe.
-    Checkpoints live in a per-W&B-run directory; retention only touches completed
-    checkpoints of that run. Failed temporary writes never replace a good save.
+    HF safetensors (single/DDP) or distributed tensor shards (FSDP2) store only
+    the trainable FLUX transformer. Frozen NVARC/VAE weights and CPU evaluation
+    caches are referenced by the recipe.
+    Checkpoints live in a per-W&B-run directory, or under "local" without W&B;
+    retention only touches completed checkpoints of that run. Failed temporary writes never replace a good save.
 
-    Every DDP rank enters this function. The caller explicitly confirms a
+    Every distributed rank enters this function. The caller explicitly confirms a
     completed update because DDP retains zeroed gradient bucket views. No
     gradient tensor scan is needed to re-prove that training-loop boundary.
     """
@@ -324,24 +449,46 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
     if execution != _config_execution(config):
         raise ValueError("checkpoint execution strategy or world size differs from the recipe")
     error = None
-    if execution["strategy"] == "ddp":
+    if execution["strategy"] in ("ddp", "fsdp2"):
         if completed_update is not True:
-            error = "DDP checkpoint requires an explicitly completed optimizer update"
+            error = f"{execution['strategy'].upper()} checkpoint requires an explicitly completed optimizer update"
     elif any(parameter.grad is not None for parameter in transformer.parameters()):
         error = "checkpoint requires cleared gradients at an optimizer boundary"
-    if scheduler.last_epoch != progress.optimizer_step - progress.optimizer_start_step:
+    if scheduler is not None and scheduler.last_epoch != progress.optimizer_step - progress.optimizer_start_step:
         error = "checkpoint scheduler is not at the completed optimizer step"
     rng = _capture_rng(flow_generator, device)
     try:
         gathered = ([{"error": error, "rng": rng}] if runtime is None
-                    else runtime.gather({"error": error, "rng": rng}))
+                    else runtime.all_gather_objects({"error": error, "rng": rng}))
         errors = [f"rank {rank}: {item['error']}" for rank, item in enumerate(gathered) if item["error"]]
         if errors:
             raise ValueError("; ".join(errors))
         if len(gathered) != execution["world_size"]:
             raise ValueError("checkpoint rank RNG states are incomplete")
         rng_payload = ({"rng_by_rank": [item["rng"] for item in gathered]}
-                       if execution["strategy"] == "ddp" else {"rng": rng})
+                       if execution["strategy"] in ("ddp", "fsdp2") else {"rng": rng})
+
+        if execution["strategy"] == "fsdp2":
+            from .fsdp_checkpoint import save_sharded_state
+
+            def prepare_directory():
+                directory = config.recipe["deployment"]["output_directory"] / "checkpoints" / (wandb_run["id"] if wandb_run else "local")
+                directory.mkdir(parents=True, exist_ok=True)
+                destination = directory / f"step-{progress.optimizer_step:06d}"
+                if destination.exists():
+                    raise FileExistsError(f"checkpoint already exists: {destination}")
+                return str(Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=directory)))
+
+            started = time.perf_counter()
+            temporary = Path(runtime.run_on_primary_and_broadcast(prepare_directory))
+            # Distributed writes finish before rank zero publishes the directory.
+            # Failed collective writes remain hidden for diagnosis; never publish them.
+            optimizer_summary = save_sharded_state(temporary, transformer, optimizer, runtime.process_group)
+            return runtime.run_on_primary_and_broadcast(lambda: _publish_checkpoint(
+                progress, config=config, transformer=transformer, optimizer=optimizer,
+                scheduler=scheduler, device=device, identity=identity, wandb_run=wandb_run,
+                execution=execution, rng_payload=rng_payload, prepared_directory=temporary,
+                optimizer_summary=optimizer_summary, started=started))
 
         def publish():
             return _publish_checkpoint(progress, config=config, transformer=transformer,
@@ -349,32 +496,39 @@ def save_checkpoint(progress: RunProgress, *, config: TrainingConfig, transforme
                                        identity=identity, wandb_run=wandb_run,
                                        execution=execution, rng_payload=rng_payload)
 
-        return publish() if runtime is None else runtime.primary(publish)
+        return publish() if runtime is None else runtime.run_on_primary_and_broadcast(publish)
     finally:
         _restore_rng(rng, flow_generator, device)
 
 
 def _publish_checkpoint(progress, *, config, transformer, optimizer, scheduler, device,
-                        identity, wandb_run, execution, rng_payload):
-    """Write shared DDP or single-process state on the primary rank only."""
-    started = time.perf_counter()
-    directory = config.recipe["deployment"]["output_directory"] / "checkpoints" / wandb_run["id"]
+                        identity, wandb_run, execution, rng_payload, prepared_directory=None,
+                        optimizer_summary=None, started=None):
+    """Publish shared metadata after local HF or collective FSDP2 weight writes."""
+    started = time.perf_counter() if started is None else started
+    directory = config.recipe["deployment"]["output_directory"] / "checkpoints" / (wandb_run["id"] if wandb_run else "local")
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"step-{progress.optimizer_step:06d}"
     if destination.exists():
         raise FileExistsError(f"checkpoint already exists: {destination}")
-    temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=directory))
+    temporary = (Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=directory))
+                 if prepared_directory is None else prepared_directory)
     try:
-        transformer.save_pretrained(temporary / "transformer", safe_serialization=True,
-                                    max_shard_size="5GB", push_to_hub=False)
-        optimizer_state = optimizer.state_dict()
-        torch.save({"optimizer": optimizer_state, "scheduler": scheduler.state_dict(),
+        if prepared_directory is None:
+            transformer.save_pretrained(temporary / "transformer", safe_serialization=True,
+                                        max_shard_size="5GB", push_to_hub=False)
+            optimizer_state = optimizer.state_dict()
+        else:
+            transformer.save_config(temporary / "transformer")
+            optimizer_state = optimizer_summary
+        torch.save({"optimizer": optimizer_state, "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     **rng_payload, "parameter_names": [name for name, _ in transformer.named_parameters()]},
                    temporary / "training_state.pt")
         files = {str(file.relative_to(temporary)): file.stat().st_size
                  for file in temporary.rglob("*") if file.is_file()}
         metadata = {
-            "schema_version": 2, "progress": asdict(progress), "identity": identity,
+            "schema_version": 3 if execution["strategy"] == "fsdp2" else 2,
+            "progress": asdict(progress), "identity": identity,
             "execution": execution,
             "optimizer_state_keys": list(optimizer_state["state"]),
             "recipe": config.recipe_dict(), "wandb_run": wandb_run, "files": files,
@@ -407,19 +561,20 @@ def _publish_checkpoint(progress, *, config, transformer, optimizer, scheduler, 
                 marker = json.loads((path / "checkpoint.json").read_text())
             except (ValueError, OSError):
                 continue
-            if marker.get("wandb_run", {}).get("id") == wandb_run["id"]:
+            if marker.get("wandb_run") == wandb_run:
                 completed.append(path)
         for old in completed[:-keep_last]:
             # Refuse deletion of incompatible or incomplete saves, even inside our run directory.
-            saved = read_checkpoint(old, config, require_training_state=False)
-            if saved.metadata["wandb_run"]["id"] != wandb_run["id"]:
+            saved = load_checkpoint_metadata(old, config, require_training_state=False)
+            if saved.metadata["wandb_run"] != wandb_run:
                 raise ValueError("retention encountered a checkpoint from another run")
             shutil.rmtree(old)
     values = {"checkpoint/seconds": time.perf_counter() - started,
               "checkpoint/size_bytes": size, "checkpoint/path": str(destination)}
-    return {name: values[name] for name in config.recipe["logging"]["checkpoint_metrics"]}
+    logging = config.recipe["logging"]
+    return values if logging is None else {name: values[name] for name in logging["checkpoint_metrics"]}
 
 
-__all__ = ["Checkpoint", "checkpoint_identity", "read_checkpoint", "restore_training_state", "save_checkpoint",
+__all__ = ["Checkpoint", "checkpoint_identity", "load_checkpoint_metadata", "restore_training_state", "save_checkpoint",
            "validate_epoch_continuation", "remove_training_state", "normalize_checkpoint_recipe",
-           "checkpoint_identities_match"]
+           "checkpoint_identities_match", "restore_model_weights", "load_saved_training_config"]

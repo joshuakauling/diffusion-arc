@@ -56,7 +56,7 @@ class ModalTrainingTests(unittest.TestCase):
 
     def test_invalid_or_missing_execution_plan_fails_before_cloud_access(self):
         for execution in ({"strategy": "ddp"}, {"strategy": "single_process", "gpu_count": 2},
-                          {"strategy": "ddp", "gpu_count": 0}, {"strategy": "fsdp2", "gpu_count": 2}):
+                          {"strategy": "ddp", "gpu_count": 0}, {"strategy": "unknown", "gpu_count": 2}):
             with self.subTest(execution=execution), patch.object(launch, "connect_account") as account:
                 with self.assertRaises((ValueError, KeyError)):
                     launch.execute({**self.plan, "execution": execution})

@@ -49,6 +49,7 @@ def plan_run(args) -> dict:
     if not config_path.is_relative_to(ROOT / "configs"):
         raise ValueError("--config must be inside this repository's configs directory")
     config = load_training_config(config_path, expected_type="training_run")
+    shared.require_epoch_launch_config(config)
     recipe = config.recipe_dict()
     if (recipe["deployment"]["provider"] != "modal"
             or recipe["deployment"]["gpu_type"] != "H200"
@@ -74,7 +75,7 @@ def plan_run(args) -> dict:
         "wandb": {key: recipe["logging"][key] for key in ("entity", "project", "parent_run_id")},
         "epochs": [{"epoch": epoch, "run_name": f"{args.run_name}-epoch{epoch}",
                     "seed": config.seed + offset,
-                    "final_step": epoch * config.loop.max_optimizer_steps,
+                    "final_step": epoch * config.epoch_optimizer_steps,
                     "optimizer_reset": offset == 0} for offset, epoch in enumerate((first, first + 1))],
         "limits": {"prepare_seconds": PREPARE_SECONDS, "train_seconds": TRAIN_SECONDS},
         "checkpoint_budget_gib": 2 * 55 * len(config.checkpoint_steps) + 25,
@@ -219,7 +220,7 @@ def phase_resources(plan: dict, phase: str) -> dict:
     execution = plan["execution"]
     count = execution["gpu_count"]
     strategy = execution["strategy"]
-    if (strategy not in ("single_process", "ddp") or type(count) is not int or count < 1
+    if (strategy not in ("single_process", "ddp", "fsdp2") or type(count) is not int or count < 1
             or (strategy == "single_process" and count != 1)):
         raise ValueError("Invalid training strategy or GPU count in launch plan")
     if phase == "prepare":
@@ -240,10 +241,10 @@ def execute(plan: dict) -> None:
     from scripts.cloud._training_image import training_image
     from scripts.cloud.launch_runpod import source_snapshot
 
-    content, manifest = source_snapshot(ROOT)
-    if plan["config"] not in manifest["files"]:
+    content, source_snapshot_manifest = source_snapshot(ROOT)
+    if plan["config"] not in source_snapshot_manifest["files"]:
         raise ValueError("Config is missing from the source snapshot")
-    plan = {**plan, "source": manifest}
+    plan = {**plan, "source": source_snapshot_manifest}
     receipt = ROOT / "artifacts/modal-launches" / f"{plan['run_name']}-{time.time_ns()}"
     receipt.mkdir(parents=True)
     (receipt / "source.tar.gz").write_bytes(content)

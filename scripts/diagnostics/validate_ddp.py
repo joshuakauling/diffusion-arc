@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from diffusion_arc.training.benchmark_config import load_ddp_benchmark_config
+from diffusion_arc.training.benchmark_config import load_training_benchmark_config
 from diffusion_arc.training.numerical_runner import compare_numerical_phases, run_numerical_phase
 from diffusion_arc.training.run.numerics import NumericalCriteria, write_json
 
@@ -25,7 +25,7 @@ def main(argv=None):
     parser.add_argument("--scratch-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     criteria = NumericalCriteria.load(args.criteria)
-    experiment = load_ddp_benchmark_config(args.config)
+    experiment = load_training_benchmark_config(args.config)
     if args.phase == "reference" and any(key in os.environ for key in ("RANK", "WORLD_SIZE")):
         parser.error("reference must run without torchrun")
     digest = hashlib.sha256()

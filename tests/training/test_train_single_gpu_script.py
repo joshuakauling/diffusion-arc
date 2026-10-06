@@ -27,6 +27,7 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
             payload = json.loads(RECIPE.read_text())
             payload["execution"]["distributed_strategy"] = "ddp"
             payload["deployment"]["gpu_count"] = 2
+            payload["flow"]["rng_scheme"] = "global_step_target_v1"
             path = Path(temp) / "ddp.json"
             path.write_text(json.dumps(payload))
             run = Mock()
@@ -51,13 +52,13 @@ class TrainSingleGpuScriptTests(unittest.TestCase):
         self.assertEqual(config.sampling_steps, (0, 300, 600, 906))
         self.assertEqual(config.checkpoint_steps, (300, 600, 906))
 
-    def test_baseline_or_invalid_recipe_is_rejected_before_importing_runner(self):
+    def test_invalid_recipe_is_rejected_before_importing_runner(self):
         with tempfile.TemporaryDirectory() as temp:
             invalid = Path(temp) / "invalid.json"
             payload = json.loads(RECIPE.read_text())
             payload["loop"]["optimizer_batch_size"] = 0
             invalid.write_text(json.dumps(payload))
-            for path in (ROOT / "configs/training/benchmarks/single_gpu_b3.json", invalid):
+            for path in (invalid,):
                 with self.subTest(path=path), patch.dict(sys.modules, {"diffusion_arc.training.runner": None}):
                     with self.assertRaises(ValueError):
                         main(["--config", str(path)])

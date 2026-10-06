@@ -15,12 +15,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from diffusion_arc.model.flux.packing import PackedFluxForward
 from .run.experiment import training_settings as _training_settings
-from .distributed import DistributedRuntime, distributed_runtime
+from .config import parse_training_config
+from .distributed import TrainingRuntime, distributed_runtime
 from .distributed_data import build_distributed_dataloader
 from .run.numerics import (NumericalCriteria, compare_records, inspect_gradients, json_digest,
                            state_fingerprint, tensor_fingerprint, write_json)
 from .setup import build_optimizer, load_models, prepare_device, seed_process
-from .step.distributed_flow import build_distributed_flow_sampler, FLOW_SEED_SCHEME
+from .step.indexed_flow import build_indexed_flow_sampler, FLOW_SEED_SCHEME
 from .step.loss import build_velocity_loss
 from .step.lr_schedule import build_lr_scheduler
 from .trainer import Trainer
@@ -57,11 +58,8 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
             or criteria.steps > config.loop.max_optimizer_steps):
         raise ValueError("numerical comparison requires fresh base weights and three available updates")
     input_recipe = config.recipe_dict()
-    recipe = config.recipe_dict()
-    recipe["flow"]["rng_scheme"] = FLOW_SEED_SCHEME
-    recipe["execution"]["flux_packing_algorithm"] = "balanced_release_v1"
-    config = replace(config, recipe=recipe,
-                     flux_packing=replace(config.flux_packing, algorithm="balanced_release_v1"))
+    if config.recipe["flow"]["rng_scheme"] != FLOW_SEED_SCHEME:
+        raise ValueError("numerical comparison requires explicit global_step_target_v1 flow RNG")
     output_directory = Path(output_directory)
     directory = output_directory / phase
     reference_directory = output_directory / "reference"
@@ -73,11 +71,13 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
         raise ValueError("reference phase must finish before distributed execution")
     if phase == "reference":
         torch.set_num_threads(8)
-        context = nullcontext(DistributedRuntime(0, 0, 1, prepare_device(config), None))
+        context = nullcontext(TrainingRuntime(0, 0, 1, prepare_device(config), None))
     else:
         # Rank zero also reads the full CPU gradient reference. Keep this
         # diagnostic's collective timeout separate from normal training.
-        context = distributed_runtime(config, timeout_seconds=600)
+        runtime_recipe = config.recipe_dict()
+        runtime_recipe["execution"]["distributed_strategy"] = "ddp"
+        context = distributed_runtime(parse_training_config(runtime_recipe, config_path=config.path), timeout_seconds=600)
     with context as runtime:
         if phase == "ddp" and runtime.world_size != 2:
             raise ValueError("numerical comparison requires exactly two DDP ranks")
@@ -120,28 +120,18 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                        ddp=phase == "ddp", contract=contract, devices=devices, source_identity=source_identity,
                        note="Instrumented numerical diagnostic; timings are not benchmark measurements."))
 
-        forward = PackedFluxForward(models.flux_transformer, compute_dtype=models.flux_compute_dtype,
+        flux_model = PackedFluxForward(models.flux_transformer, compute_dtype=models.flux_compute_dtype,
                                     backend=models.flux_packing_backend)
         if phase == "ddp":
-            forward = DDP(forward, device_ids=[runtime.device.index] if runtime.device.type == "cuda" else None,
+            flux_model = DDP(flux_model, device_ids=[runtime.device.index] if runtime.device.type == "cuda" else None,
                           process_group=runtime.process_group, forward_sync_buffers=False,
                           gradient_as_bucket_view=True)
         optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
         step, gradients = 0, None
 
-        def trace(stage, details):
-            nonlocal gradients
-            if stage == "clip_start" and step == 1:
-                print(json.dumps(dict(phase=phase, rank=runtime.rank, stage="capture_gradients")), flush=True)
-                gradients = inspect_gradients(
-                    models.flux_transformer, criteria.chunk_elements,
-                    save_to=gradient_directory if phase == "reference" else None,
-                    compare_to=gradient_directory if phase == "ddp" and runtime.rank == 0 else None,
-                )
-
         trainer = Trainer(
             nvarc_encoder=models.nvarc_encoder, vae_encoder=models.vae_encoder,
-            flux_transformer=forward, optimizer=optimizer,
+            flux_transformer=flux_model, optimizer=optimizer,
             scheduler=build_lr_scheduler(config, optimizer=optimizer),
             flow_sampler=lambda _: (), loss_function=build_velocity_loss(config),
             flux_compute_dtype=models.flux_compute_dtype, flux_packing_backend=models.flux_packing_backend,
@@ -150,8 +140,23 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
             flux_max_spread_tokens=config.flux_packing.max_spread_tokens,
             flux_packing_algorithm=config.flux_packing.algorithm,
             min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
-            max_grad_norm=config.optimizer.max_grad_norm, trace=trace,
+            max_grad_norm=config.optimizer.max_grad_norm,
         )
+        # Capture unclipped gradients only in this numerical diagnostic.
+        clip_gradients = trainer._clip_gradients
+
+        def inspect_then_clip():
+            nonlocal gradients
+            if step == 1:
+                print(json.dumps(dict(phase=phase, rank=runtime.rank, stage="capture_gradients")), flush=True)
+                gradients = inspect_gradients(
+                    models.flux_transformer, criteria.chunk_elements,
+                    save_to=gradient_directory if phase == "reference" else None,
+                    compare_to=gradient_directory if phase == "ddp" and runtime.rank == 0 else None,
+                )
+            return clip_gradients()
+
+        trainer._clip_gradients = inspect_then_clip
         samples = iter(loader)
         rows = []
         for step, plan in enumerate(plans[:criteria.steps], 1):
@@ -176,8 +181,8 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                     raise ValueError("actual random draw differs from the reference")
                 draws.append(draw)
 
-            trainer.flow_sampler = replace(build_distributed_flow_sampler(
-                config, step=plan.step, global_target_count=plan.global_target_count,
+            trainer.flow_sampler = replace(build_indexed_flow_sampler(
+                config, step=plan.epoch_batch_index, global_target_count=plan.global_target_count,
                 target_indices=plan.target_indices), observe_draw=observe_draw)
             result = trainer.step(sequences)
             frozen, frozen_ok = _frozen_checks(models, criteria.chunk_elements)
@@ -188,8 +193,12 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                          parameters=state_fingerprint(models.flux_transformer, criteria.chunk_elements),
                          gradients=gradients if step == 1 else None,
                          frozen_unchanged=frozen == frozen_initial, frozen_no_grad=frozen_ok,
-                         packs=asdict(result.diagnostics),
-                         target_metrics=[asdict(target) for target in result.targets])
+                         # Keep the persisted diagnostics schema independent of Python field names.
+                         packs=dict(preparation=asdict(result.diagnostics.preparation),
+                                    flux_batches=tuple(asdict(microbatch_plan)
+                                                       for microbatch_plan in result.diagnostics.flux_microbatch_plans),
+                                    target_prefix_tokens=result.diagnostics.target_prefix_tokens),
+                         target_metrics=[asdict(target) for target in result.target_metrics])
             ranks = _gather(local, runtime)
             targets = sum(r["targets"] for r in ranks)
             if targets != plan.global_target_count:

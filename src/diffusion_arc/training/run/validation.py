@@ -29,7 +29,7 @@ from diffusion_arc.inference.conditioning import (
     PackedGenerationInput,
     evaluation_mode,
     plan_conditioning_packs,
-    sample_conditioning_noise,
+    sample_query_latent_noise,
     stage_packed_conditioning,
     validate_packed_execution,
     validate_sampling_seed,
@@ -311,7 +311,7 @@ def evaluate_packed_loss(
             measurements = []
             for time in times:
                 noise = torch.stack(tuple(
-                    sample_conditioning_noise(target.conditioning, seed, ("loss", time), device)
+                    sample_query_latent_noise(target.conditioning, seed, ("loss", time), device)
                     for target in batch
                 ))
                 state = (1.0 - time) * clean + time * noise

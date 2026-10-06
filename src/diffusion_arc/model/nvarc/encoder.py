@@ -7,10 +7,7 @@ from torch import Tensor, nn
 
 from .attention import NVARC_ATTENTION_IMPLEMENTATION
 
-from ..contracts import (
-    NVARC_HIDDEN_STATE_INDICES,
-    NvarcBatchOutput,
-)
+from ..contracts import NvarcBatchOutput
 
 
 def _module_input_device(module: nn.Module) -> torch.device:
@@ -36,16 +33,20 @@ class NvarcEncoder(nn.Module):
     without padding between sources or at the end. FA3 Varlen uses their
     boundaries to keep causal attention within each source. Position IDs restart
     at zero for each source. Selected hidden states are returned as separate
-    compact tensors in the original source order. Only blocks 1 through 27 run;
-    the outputs of blocks 9, 18 and 27 are kept before final normalization.
+    compact tensors in the original source order. The validated one-based
+    hidden-state indices select three increasing block outputs. Execution stops
+    after the highest selected block, always before final normalization.
     """
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, *, hidden_state_indices: tuple[int, int, int]) -> None:
         super().__init__()
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch.nn.Module")
         if getattr(model.config, "_attn_implementation", None) != NVARC_ATTENTION_IMPLEMENTATION:
             raise ValueError("NvarcEncoder requires the explicit nvarc_fa3 attention binding")
+        if hidden_state_indices[-1] > len(model.base_model.layers):
+            raise ValueError("selected NVARC layer exceeds the checkpoint's decoder block count")
+        self.hidden_state_indices = tuple(hidden_state_indices)
         self.model = model
         self.model.requires_grad_(False)
         self.train(False)
@@ -77,10 +78,10 @@ class NvarcEncoder(nn.Module):
         with torch.no_grad():
             hidden_states = backbone.embed_tokens(input_ids.to(device=device).unsqueeze(0))
             position_embeddings = backbone.rotary_emb(hidden_states, position_ids)
-            # Keep the original block outputs: making block 27 the final model
-            # output would apply an extra normalization through the HF wrapper.
+            # Read raw block outputs, including block 36. HF's final model
+            # output applies a separate normalization that FLUX does not expect.
             for index, block in enumerate(
-                backbone.layers[:max(NVARC_HIDDEN_STATE_INDICES)], start=1,
+                backbone.layers[:self.hidden_state_indices[-1]], start=1,
             ):
                 hidden_states = block(
                     hidden_states,
@@ -93,7 +94,7 @@ class NvarcEncoder(nn.Module):
                     max_length_k=max(lengths),
                     use_cache=False,
                 )
-                if index in NVARC_HIDDEN_STATE_INDICES:
+                if index in self.hidden_state_indices:
                     selected_states.append(hidden_states)
         return NvarcBatchOutput(sequence_hidden_states=tuple(
             torch.cat(tuple(states[0, start:end] for states in selected_states), dim=-1)

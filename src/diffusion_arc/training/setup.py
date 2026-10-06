@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import random
 
@@ -15,7 +16,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenize
 from diffusion_arc._constants import NVARC_TOKENIZER_MAX_TOKENS
 from diffusion_arc.model.contracts import (
     NVARC_HIDDEN_SIZE,
-    NVARC_HIDDEN_STATE_INDICES,
     NVARC_MAX_TOKENS,
     NVARC_PAD_TOKEN_ID,
     NVARC_VOCAB_SIZE,
@@ -89,14 +89,17 @@ def load_models(
     *,
     device: torch.device,
     transformer_checkpoint: str | Path | None = None,
+    transformer_config_only: bool = False,
 ) -> TrainingModels:
     """Load and validate all models from local checkpoint directories only.
 
     ``transformer_checkpoint`` selects a standalone FLUX transformer saved with
     ``save_pretrained`` while the configured base checkpoint continues to own
-    the frozen VAE. Omitting it preserves the training-time checkpoint layout.
+    the frozen VAE. FSDP resumes load only its saved config onto meta; the runner
+    shards and materializes it before collectively restoring the checkpoint.
     """
 
+    # Check local checkpoint directories and select the FLUX transformer source.
     if not config.models.nvarc_checkpoint.is_dir():
         raise FileNotFoundError(
             f"NVARC checkpoint directory does not exist: "
@@ -107,6 +110,9 @@ def load_models(
             f"FLUX checkpoint directory does not exist: "
             f"{config.models.flux_checkpoint}"
         )
+    sharded = config.recipe is not None and config.recipe["execution"]["distributed_strategy"] == "fsdp2"
+    if transformer_config_only and (not sharded or transformer_checkpoint is None):
+        raise ValueError("config-only model loading requires an FSDP2 resume checkpoint")
     if transformer_checkpoint is None:
         transformer_source = config.models.flux_checkpoint
         transformer_subfolder = "transformer"
@@ -118,7 +124,13 @@ def load_models(
                 f"{transformer_source}"
             )
         transformer_subfolder = None
+        parent_metadata = transformer_source.parent / "checkpoint.json"
+        if not transformer_config_only and parent_metadata.is_file():
+            metadata = json.loads(parent_metadata.read_text())
+            if metadata.get("execution", {}).get("strategy") == "fsdp2":
+                raise ValueError("FSDP2 shards require models.resume_from; weights-only initialization requires an HF export")
 
+    # Resolve parameter/compute dtypes and initialize the packed-attention backend.
     nvarc_dtype = _TORCH_DTYPES[config.models.nvarc_dtype]
     vae_dtype = _TORCH_DTYPES[config.models.vae_dtype]
     flux_parameter_dtype = _TORCH_DTYPES[config.models.flux_parameter_dtype]
@@ -128,6 +140,7 @@ def load_models(
 
     flux_packing_backend = Flash3Backend(device)
 
+    # Load NVARC and its tokenizer, then wrap the model as a frozen text encoder.
     tokenizer = AutoTokenizer.from_pretrained(
         config.models.nvarc_checkpoint,
         local_files_only=True,
@@ -151,8 +164,9 @@ def load_models(
         expected_dtype=nvarc_dtype,
     )
     tokenizer.model_max_length = NVARC_TOKENIZER_MAX_TOKENS
-    nvarc_encoder = NvarcEncoder(nvarc_model)
+    nvarc_encoder = NvarcEncoder(nvarc_model, hidden_state_indices=config.nvarc_hidden_layers)
 
+    # Load the frozen VAE; encoding and decoding share the same model weights.
     vae = AutoencoderKLFlux2.from_pretrained(
         config.models.flux_checkpoint,
         subfolder="vae",
@@ -171,22 +185,33 @@ def load_models(
     vae_encoder = FluxVaeEncoder(vae)
     vae_decoder = FluxVaeDecoder(vae)
 
+    # Stage FSDP weights on CPU, or create only the architecture on meta for resume.
+    # Other strategies load the transformer directly onto the training device.
+    transformer_device = torch.device("meta" if transformer_config_only else "cpu") if sharded else device
     transformer_load_arguments = {
         "local_files_only": True,
         "use_safetensors": True,
         "low_cpu_mem_usage": True,
         "torch_dtype": flux_parameter_dtype,
-        "device_map": device_map,
+        "device_map": {"": transformer_device},
     }
     if transformer_subfolder is not None:
         transformer_load_arguments["subfolder"] = transformer_subfolder
     else:
         transformer_load_arguments["output_loading_info"] = True
-    flux_transformer = Flux2Transformer2DModel.from_pretrained(
-        transformer_source,
-        **transformer_load_arguments,
-    )
-    if transformer_subfolder is None:
+    if transformer_config_only:
+        # FSDP2 resume: build only the transformer structure; restore weight shards later.
+        # NVARC and VAE have already been loaded normally above.
+        architecture = Flux2Transformer2DModel.load_config(transformer_source, local_files_only=True)
+        with torch.device("meta"):
+            flux_transformer = Flux2Transformer2DModel.from_config(architecture).to(dtype=flux_parameter_dtype)
+    else:
+        flux_transformer = Flux2Transformer2DModel.from_pretrained(
+            transformer_source,
+            **transformer_load_arguments,
+        )
+    # Verify complete standalone weights, architecture, placement, and packing support.
+    if transformer_subfolder is None and not transformer_config_only:
         flux_transformer, loading_info = flux_transformer
         if any(loading_info.get(name) for name in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")):
             raise ValueError(f"standalone FLUX checkpoint does not restore every parameter: {loading_info}")
@@ -194,12 +219,13 @@ def load_models(
     _validate_parameter_placement(
         flux_transformer,
         name="FLUX transformer",
-        expected_device=device,
+        expected_device=transformer_device,
         expected_dtype=flux_parameter_dtype,
     )
     flux_transformer.requires_grad_(True)
     validate_packed_transformer(flux_transformer, flux_compute_dtype)
 
+    # Enforce the training boundary: frozen NVARC/VAE, fully trainable FLUX transformer.
     if any(parameter.requires_grad for parameter in nvarc_encoder.parameters()):
         raise RuntimeError("NVARC must remain frozen")
     if any(parameter.requires_grad for parameter in vae_encoder.parameters()):

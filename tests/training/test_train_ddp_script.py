@@ -1,4 +1,4 @@
-"""The DDP CLI validates inputs before loading the distributed runtime."""
+"""The training benchmark CLI validates inputs before loading the training runtime."""
 
 import io
 from pathlib import Path
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.train_ddp import main
+from scripts.benchmark_training import main
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,11 +16,24 @@ RECIPE = ROOT / "configs/training/arc_agi_1_epoch.json"
 BENCHMARK = ROOT / "configs/training/benchmarks/ddp_training.json"
 
 
-class TrainDdpScriptTests(unittest.TestCase):
+class TrainingBenchmarkScriptTests(unittest.TestCase):
+    def test_benchmark_entry_preserves_explicit_training_choices(self):
+        from diffusion_arc.training.config import load_training_config
+        from diffusion_arc.training.benchmark_runner import run_training_benchmark
+        config = load_training_config(ROOT / "configs/training/benchmarks/single_gpu_b3.json")
+        original = config.recipe_dict()
+        with patch("diffusion_arc.training.benchmark_runner.run_benchmark", return_value="progress") as run:
+            result = run_training_benchmark(config, max_steps=2, emit=lambda record: None)
+        self.assertEqual(result, "progress")
+        self.assertIs(run.call_args.args[0], config)
+        self.assertEqual(run.call_args.kwargs["experiment"].max_steps, 2)
+        self.assertEqual(config.recipe_dict(), original)
+        self.assertEqual(config.flux_packing.algorithm, "legacy_bfd_v1")
+
     def test_passes_recipe_step_limit_and_source_identity(self):
         run = Mock()
-        with patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}), \
-                patch("scripts.train_ddp.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="revision\n")):
+        with patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}), \
+                patch("scripts.benchmark_training.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="revision\n")):
             self.assertEqual(main(["--config", str(RECIPE), "--max-steps", "2"]), 0)
         config = run.call_args.args[0]
         self.assertEqual(config.config_type, "training_run")
@@ -28,10 +41,14 @@ class TrainDdpScriptTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["max_steps"], 2)
         self.assertEqual(run.call_args.kwargs["source_identity"]["git_commit"], "revision")
 
+    def test_single_process_recipe_remains_single_process(self):
+        run = Mock()
+        with patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
+            main(["--config", str(ROOT / "configs/training/benchmarks/single_gpu_b3.json"), "--max-steps", "2"])
+        self.assertEqual(run.call_args.args[0].recipe["execution"]["distributed_strategy"], "single_process")
+
     def test_rejects_bad_recipe_or_step_limit_before_runner_import(self):
-        with patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": None}):
-            with self.assertRaises(ValueError):
-                main(["--config", str(ROOT / "configs/training/benchmarks/single_gpu_b3.json")])
+        with patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": None}):
             for args in ([], ["--config", str(RECIPE), "--max-steps", "0"],
                          ["--config", str(RECIPE), "--max-steps", "907"]):
                 with self.subTest(args=args), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
@@ -42,7 +59,7 @@ class TrainDdpScriptTests(unittest.TestCase):
             run = Mock()
             with tempfile.TemporaryDirectory() as directory, \
                     patch.dict("os.environ", {"RANK": "0"}), \
-                    patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
+                    patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
                 output = Path(directory) / mode
                 self.assertEqual(main(["--config", str(BENCHMARK), "--mode", mode,
                                        "--output-dir", str(output)]), 0)
@@ -65,7 +82,7 @@ class TrainDdpScriptTests(unittest.TestCase):
     def test_prepared_mode_requires_output_and_rejects_independent_step_override(self):
         invalid = (["--config", str(BENCHMARK), "--mode", "benchmark"],
                    ["--config", str(BENCHMARK), "--mode", "smoke", "--output-dir", "unused", "--max-steps", "2"])
-        with patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": None}):
+        with patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": None}):
             for args in invalid:
                 with self.subTest(args=args), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
                     main(args)
@@ -73,12 +90,12 @@ class TrainDdpScriptTests(unittest.TestCase):
     def test_diagnostic_selection_is_separate_from_benchmark_measurement(self):
         run = Mock()
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
-                patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
             output = Path(directory) / "diagnostic"
             main(["--config", str(BENCHMARK), "--mode", "diagnostic", "--diagnostic-batch", "29",
                   "--output-dir", str(output)])
         options = run.call_args.kwargs
-        self.assertEqual((options["diagnostic_batch"], options["max_steps"]), (29, 3))
+        self.assertEqual((options["diagnostic_batch_number"], options["max_steps"]), (29, 3))
         self.assertEqual(options["trace_directory"], output)
         self.assertNotIn("measurement", options)
         for extra in (["--mode", "diagnostic"], ["--mode", "smoke", "--diagnostic-batch", "29"],
@@ -89,7 +106,7 @@ class TrainDdpScriptTests(unittest.TestCase):
     def test_secondary_rank_never_creates_artifacts(self):
         run = Mock()
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "1"}), \
-                patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
             output = Path(directory) / "not-written"
             main(["--config", str(BENCHMARK), "--mode", "smoke", "--output-dir", str(output)])
             self.assertFalse(output.exists())
@@ -98,7 +115,7 @@ class TrainDdpScriptTests(unittest.TestCase):
     def test_memory_mode_traverses_full_window_without_benchmark_statistics(self):
         run = Mock()
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
-                patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
             output = Path(directory) / "memory"
             main(["--config", str(BENCHMARK), "--mode", "memory", "--output-dir", str(output)])
         options = run.call_args.kwargs
@@ -106,13 +123,13 @@ class TrainDdpScriptTests(unittest.TestCase):
         self.assertTrue(options["memory_history"])
         self.assertEqual(options["trace_directory"], output)
         self.assertNotIn("measurement", options)
-        self.assertNotIn("diagnostic_batch", options)
+        self.assertNotIn("diagnostic_batch_number", options)
         self.assertEqual(run.call_args.args[0].flux_packing.max_tokens, 12288)
 
     def test_profile_records_one_step_after_benchmark_warmup_without_repetitions(self):
         run = Mock()
         with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
-                patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
             output = Path(directory) / "profile"
             main(["--config", str(BENCHMARK), "--mode", "profile", "--output-dir", str(output)])
         run.assert_called_once()
@@ -123,23 +140,13 @@ class TrainDdpScriptTests(unittest.TestCase):
         self.assertNotIn("measurement", options)
         self.assertNotIn("memory_history", options)
 
-    def test_memory_snapshot_runs_the_complete_prefix_and_rejects_invalid_targets(self):
+    def test_removed_stage_snapshot_option_is_rejected_before_training(self):
         run = Mock()
-        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
-                patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": SimpleNamespace(run_training_ddp=run)}):
-            output = Path(directory) / "memory"
-            main(["--config", str(BENCHMARK), "--mode", "memory", "--output-dir", str(output),
+        with patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}), \
+                patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            main(["--config", str(BENCHMARK), "--mode", "memory", "--output-dir", "unused",
                   "--memory-snapshot-step", "54"])
-        options = run.call_args.kwargs
-        self.assertEqual((options["max_steps"], options["memory_snapshot_step"]), (54, 54))
-        self.assertTrue(options["memory_history"])
-        self.assertNotIn("diagnostic_batch", options)
-        self.assertEqual(options["expected_source_count"], 960)
-        with patch.dict(sys.modules, {"diffusion_arc.training.ddp_runner": None}):
-            for mode, step in (("memory", "0"), ("memory", "-1"), ("memory", "61"), ("profile", "54")):
-                with self.subTest(mode=mode, step=step), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-                    main(["--config", str(BENCHMARK), "--mode", mode, "--output-dir", "unused",
-                          "--memory-snapshot-step", step])
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

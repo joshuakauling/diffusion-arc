@@ -24,7 +24,7 @@ from scripts.diagnostics._nvarc_tokenizer import make_nvarc_tokenizer
 def _config():
     return load_training_config(
         probe.REPOSITORY_ROOT / "configs/training/benchmarks/single_gpu_b3.json"
-    , expected_type="baseline")
+    , expected_type="training_run")
 
 
 class CapacitySearchTests(unittest.TestCase):

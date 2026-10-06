@@ -214,7 +214,7 @@ def load_runtime(config_path: Path, config: dict):
     """Require the B3 model contract before downloads or GPU model allocation."""
     from diffusion_arc.training.config import load_training_config
 
-    runtime = load_training_config((config_path.parent / config["training_config"]).resolve(), expected_type="baseline")
+    runtime = load_training_config((config_path.parent / config["training_config"]).resolve(), expected_type="training_run")
     if (runtime.flux_packing is None or runtime.flux_packing.max_tokens != 12288
             or runtime.nvarc_max_tokens != 134400
             or (runtime.models.nvarc_dtype, runtime.models.vae_dtype,

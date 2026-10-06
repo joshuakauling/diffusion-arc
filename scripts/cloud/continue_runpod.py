@@ -29,9 +29,9 @@ from scripts.cloud import train_runpod as pod
 
 def load_parent(run_directory: Path):
     """Select the final complete checkpoint without accepting a weights-only export."""
-    from diffusion_arc.training.config import load_training_config
     from diffusion_arc.training.data import ArcTrainingDataset
-    config = load_training_config(run_directory / "training.json", expected_type="training_run")
+    config = pod.load_saved_config(run_directory / "training.json")
+    pod.require_epoch_launch_config(config)
     if config.recipe["deployment"]["output_directory"] != run_directory.resolve():
         raise ValueError("Parent config points to another run directory")
     checkpoints = pod.run_checkpoints(config)
@@ -39,7 +39,7 @@ def load_parent(run_directory: Path):
         raise ValueError("The previous run has no complete local checkpoint including optimizer state")
     checkpoint = checkpoints[-1]
     progress = checkpoint.metadata["progress"]
-    if progress["optimizer_step"] != progress.get("epoch", 1) * config.loop.max_optimizer_steps:
+    if progress["optimizer_step"] != progress.get("epoch", 1) * config.epoch_optimizer_steps:
         raise ValueError("Finish the previous epoch before starting a new one")
     # Prepared manifests identify the source data without reopening every task.
     dataset = ArcTrainingDataset(config.data.split_directory, config.data.view_name, tokenizer=None)
@@ -55,7 +55,7 @@ def continuation_config(parent_config, checkpoint, run_directory: Path, *, seed:
     from diffusion_arc.training.run.checkpointing import validate_epoch_continuation
 
     path = run_directory / "training.json"
-    existing = load_training_config(path, expected_type="training_run") if path.exists() else None
+    existing = pod.load_saved_config(path) if path.exists() else None
     if seed is None:
         seed = existing.seed if existing else parent_config.seed + 1
     payload = parent_config.recipe_dict()
@@ -86,27 +86,27 @@ def continuation_config(parent_config, checkpoint, run_directory: Path, *, seed:
 def prepare_next_view(parent_config, config) -> None:
     """Resample augmentation keys over the prepared source pool without reading task files."""
     from scripts.data.prepare_nvarc_benchmark import source_input_hashes
-    from scripts.data.prepare_training_data import prepare_training_view
+    from scripts.data.prepare_training_data import prepare_next_epoch_data
 
     data = config.recipe["data"]
-    parent_manifest = json.loads((parent_config.data.split_directory / "manifest.json").read_text())
+    parent_training_data_manifest = json.loads((parent_config.data.split_directory / "manifest.json").read_text())
     inputs = source_input_hashes(data["source_archive"], data["task_index"], data["official_training_keys"])
-    if inputs != parent_manifest["inputs_sha256"]:
+    if inputs != parent_training_data_manifest["inputs_sha256"]:
         raise ValueError("Training source pool changed since the previous epoch")
     split = config.data.split_directory
     if not split.parent.parent.exists():
-        prepare_training_view(parent_config, config)
-    manifest = json.loads((split / "manifest.json").read_text())
-    if (manifest["inputs_sha256"] != inputs or manifest["seed"] != config.seed
-            or manifest["source_count"] != data["expected_task_count"]
-            or manifest["augmentation"]["geometry"] != "uniform_D4"):
+        prepare_next_epoch_data(parent_config, config)
+    training_data_manifest = json.loads((split / "manifest.json").read_text())
+    if (training_data_manifest["inputs_sha256"] != inputs or training_data_manifest["seed"] != config.seed
+            or training_data_manifest["source_count"] != data["expected_task_count"]
+            or training_data_manifest["augmentation"]["geometry"] != "uniform_D4"):
         raise ValueError("Prepared continuation view differs from its recipe")
     # Identity and original task contents stay fixed; only augmentation keys/order change.
     contents = lambda rows: {row["task_key"]: row["converted_sha256"] for row in rows}
-    if contents(manifest["sources"]) != contents(parent_manifest["sources"]):
+    if contents(training_data_manifest["sources"]) != contents(parent_training_data_manifest["sources"]):
         raise ValueError("The next epoch must use exactly the same underlying training tasks")
-    pod.verify_file(split / f"augmented_keys/{config.data.view_name}.json", manifest["keys_sha256"])
-    print(f"Prepared augmentation seed {config.seed}; reusing {manifest['source_count']} source tasks", flush=True)
+    pod.verify_file(split / f"augmented_keys/{config.data.view_name}.json", training_data_manifest["keys_sha256"])
+    print(f"Prepared augmentation seed {config.seed}; reusing {training_data_manifest['source_count']} source tasks", flush=True)
 
 
 def train(config_path: str, parent_run: str) -> None:
@@ -116,7 +116,7 @@ def train(config_path: str, parent_run: str) -> None:
 
     config = load_training_config(Path(config_path), expected_type="training_run")
     _, checkpoint = load_parent(Path(parent_run))
-    run_training(config, previous_epoch=None if config.recipe["models"]["resume_from"] else checkpoint)
+    run_training(config, previous_epoch_checkpoint=None if config.recipe["models"]["resume_from"] else checkpoint)
 
 
 def check_wandb_run(api, checkpoint, *, last_allowed_step: int) -> None:
@@ -154,10 +154,8 @@ def main(argv=None) -> int:
     os.environ["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"), str(ROOT)))
     os.environ["HF_HOME"] = str(workspace / ".cache/huggingface")
     from huggingface_hub import HfApi
-    from diffusion_arc.training.config import load_training_config
 
-    provider = load_training_config(workspace / "runs" / args.from_run / "training.json",
-                                    expected_type="training_run").recipe["deployment"]["provider"]
+    provider = pod.load_saved_config(workspace / "runs" / args.from_run / "training.json").recipe["deployment"]["provider"]
     with pod.workspace_lock(workspace, local_only=provider == "modal"):
         parent_run = workspace / "runs" / args.from_run
         parent_config, checkpoint = load_parent(parent_run)

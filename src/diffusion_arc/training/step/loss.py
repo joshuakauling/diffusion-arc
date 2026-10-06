@@ -205,7 +205,7 @@ VelocityLoss = Callable[[Tensor, Tensor, Sequence[tuple[int, int]]], LossResult]
 
 def build_velocity_loss(config: TrainingConfig) -> VelocityLoss:
     """Resolve the objective before training; sampling is configured separately."""
-    if config.config_type == "baseline":
+    if config.recipe["loss"]["type"] == "velocity_mse":
         return velocity_mse
     return RegionVelocityLoss(RegionLossWeights(**config.recipe["loss"]["region_weights"]))
 

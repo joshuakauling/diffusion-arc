@@ -15,8 +15,8 @@ import torch
 
 from diffusion_arc.training.profiling import nsight_capture, torch_capture, training_range
 
-from tests.training.test_profile_single_gpu_script import _AcceptAnyModule, _config
-from diffusion_arc.training.setup import TrainingModels
+from tests.training.test_profile_single_gpu_script import CONFIG
+from diffusion_arc.training.config import load_training_config
 
 
 class TorchCaptureTests(unittest.TestCase):
@@ -143,44 +143,42 @@ class NsightCaptureTests(unittest.TestCase):
             self.assertEqual(events[-1], ("stop",))
 
     def test_wrong_step_limit_fails_before_device_or_model_loading(self):
-        config = _config(Path("/tmp"))
+        config = load_training_config(CONFIG)
         config = replace(config, loop=replace(config.loop, max_optimizer_steps=60))
         with patch.object(profile_single_gpu, "load_training_config", return_value=config), \
-             patch.object(profile_single_gpu, "prepare_device") as prepare:
-            with self.assertRaisesRegex(ValueError, "exactly seven"):
+             patch.object(profile_single_gpu, "run_benchmark") as run:
+            with self.assertRaisesRegex(ValueError, "exactly 7"):
                 profile_single_gpu.profile_from_config("unused.json", profiler_kind="nsys")
-            prepare.assert_not_called()
+            run.assert_not_called()
 
     def test_nsys_entrypoint_shares_training_without_torch_profiler(self):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
-            config = _config(root)
-            models = TrainingModels(vae_decoder=object(), flux_packing_backend=object(),tokenizer=object(), nvarc_encoder=_AcceptAnyModule(),
-                vae_encoder=_AcceptAnyModule(), flux_transformer=_AcceptAnyModule(),
-                flux_compute_dtype=torch.bfloat16)
+            config = load_training_config(CONFIG)
+            models = SimpleNamespace(flux_compute_dtype=torch.bfloat16)
             events = self._cuda(stack)
-            for name, result in {
-                "load_training_config": config,
-                "prepare_device": torch.device("cuda:0"),
-                "seed_process": None, "load_models": models,
-                "build_dataloader": [SimpleNamespace(target_grids=(None,) * 6, key=f"s{i}") for i in range(7)],
-                "build_optimizer": object(),
-                "build_lr_scheduler": None, "build_flow_generator": object(),
-                "build_flow_sampler": object(), "build_velocity_loss": object(),
-                "version": "test-version",
-            }.items():
-                stack.enter_context(patch.object(profile_single_gpu, name, return_value=result))
+            stack.enter_context(patch.object(profile_single_gpu, "load_training_config", return_value=config))
+            stack.enter_context(patch.object(profile_single_gpu, "version", return_value="test-version"))
             stack.enter_context(patch.dict("os.environ", {"DIFFUSION_ARC_PROFILER_OUTPUT_ROOT": str(root)}))
             stack.enter_context(patch("torch.cuda.get_device_name", return_value="test GPU"))
             torch_profiler = stack.enter_context(patch("torch.profiler.profile"))
-            def make_trainer(*args, **kwargs):
-                def step(sequences):
-                    with training_range("train/adamw"):
-                        pass
-                    return SimpleNamespace(loss=0.5, target_count=5, flux_forward_calls=2)
-                return SimpleNamespace(step=step)
-            stack.enter_context(patch.object(profile_single_gpu, "Trainer", side_effect=make_trainer))
-            profile_single_gpu.main(["--config", str(root / "run.json"), "--profiler", "nsys"])
+
+            def shared(received, *, experiment):
+                self.assertIs(received, config)
+                experiment.runtime = SimpleNamespace(device=torch.device("cuda:0"))
+                with ExitStack() as capture_stack:
+                    experiment.start(capture_stack, config, models, None)
+                    for step in range(1, 8):
+                        experiment.before_step()
+                        with training_range("train/adamw"):
+                            pass
+                        result = SimpleNamespace(loss=0.5, target_count=5, flux_forward_calls=2)
+                        experiment.completed_step()
+                        experiment.after_step(step, None, result, None)
+                    experiment.finish(None)
+
+            stack.enter_context(patch.object(profile_single_gpu, "run_benchmark", side_effect=shared))
+            profile_single_gpu.main(["--config", str(CONFIG), "--profiler", "nsys"])
             torch_profiler.assert_not_called()
             summary = json.loads((root / "training-summary.json").read_text())
             self.assertEqual(summary["status"], "complete")

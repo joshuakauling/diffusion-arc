@@ -16,8 +16,8 @@ zero and end at the total token count. The interface contains no target metadata
 flat IDs + source offsets
   -> [1, total_tokens] IDs and reset position IDs
   -> int32 GPU cumulative lengths + longest individual source length
-  -> frozen FA3 Varlen blocks 1 through 27; no dense attention mask
-  -> hidden states 9, 18, 27 concatenated per source
+  -> frozen FA3 Varlen blocks through the highest selected layer; no dense mask
+  -> three configured raw block outputs concatenated per source
   -> S independently stored [source_length, 7680] tensors in input order
 ```
 
@@ -27,11 +27,18 @@ per-source RoPE semantics. There are no padding tokens between sources or at
 the end of the packed stream. `encode_training_batch` enforces the call
 budget before invoking the model, separately from the 8,400-token source limit.
 
-The encoder calls the original Qwen embedding, rotary-position module and first
-27 decoder blocks directly. It retains only the states after blocks 9, 18 and
-27, and skips blocks 28–36, the final normalization and the language-model head.
-The last selected state is the original intermediate output: shortening the
-ordinary Hugging Face forward would instead normalize its last returned state.
+The encoder calls the original Qwen embedding, rotary-position module and
+decoder blocks directly. `execution.nvarc_hidden_layers` selects exactly three
+distinct, increasing one-based block indices in `[1, 36]`. The existing configs
+use `[9, 18, 27]`; the alternative `[18, 27, 36]` preserves the 7,680-wide FLUX
+interface. Set `execution.nvarc_early_exit_layer` to the highest selected index;
+config validation rejects a mismatch. The encoder receives the selection from
+the config and runs only through that block.
+
+All selected states are raw block outputs, including layer 36. Final
+normalization and the language-model head never run. The ordinary Hugging Face
+forward instead normalizes its final returned state. With the existing
+`[9, 18, 27]` selection, blocks 28–36 remain skipped.
 The KV cache is disabled and `torch.no_grad()` keeps the output usable by the
 trainable FLUX transformer. The full checkpoint is still loaded and retained;
 this change skips execution and avoids retaining unused intermediate states,
@@ -64,9 +71,11 @@ dtypes are omitted. CUDA-device and checkpoint preflights enforce these
 contracts before training. The extension is not installed in the CPU unit-test
 environment. Local CUDA installations need the same extension and build contract.
 
-NVARC retains vocabulary size 16, 36 layers, hidden width 2560, and the selected
-states `(9, 18, 27)`. The maximum consumed source is 8,400 tokens; the tokenizer
-allows 9,330 before the final target output is trimmed. No checkpoint pad-token
+NVARC retains vocabulary size 16, 36 layers and hidden width 2560. The selected
+layers are recorded in the run recipe and checkpoint identity; full-state
+resume rejects a changed selection even though its tensor width is unchanged.
+The maximum consumed source is 8,400 tokens; the tokenizer allows 9,330 before
+the final target output is trimmed. No checkpoint pad-token
 setting is needed by the packed forward; tokenizer compatibility is still checked.
 
 ## Validation and evidence
@@ -77,9 +86,10 @@ behavior, source isolation, selected layers, compact ownership and freezing.
 Pipeline tests cover source/target order, incomplete windows, the same two
 48-target optimizer batches, loss weights, random draws and parameter updates.
 A tiny 36-block Qwen comparison also requires bitwise-equal selected states
-against the complete forward and checks that later blocks, final normalization
-and the language-model head are never called. These CPU tests verify integration
-semantics, not execution of the CUDA extension.
+against the complete forward for both `[9, 18, 27]` and `[18, 27, 36]`, capturing
+the raw final block before normalization. It checks that blocks above the selected
+range, final normalization and the language-model head are never called. These
+CPU tests verify integration semantics, not execution of the CUDA extension.
 
 The [NVARC report](../performance/b3-nvarc.md) summarizes the real-input backend
 and packing comparisons. The [combined B3 benchmark](../performance/b3.md#benchmark-result)

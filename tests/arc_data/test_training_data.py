@@ -15,7 +15,7 @@ from diffusion_arc.arc_data import ArcGeometry, parse_augmentation_key
 from diffusion_arc.training.data import ArcTrainingDataset
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.data import build_dataloader
-from scripts.data.prepare_training_data import prepare_training_data, prepare_training_view, sha256_file
+from scripts.data.prepare_training_data import prepare_training_data, prepare_next_epoch_data, sha256_file
 from tests.arc_data.test_nvarc_benchmark import DERIVED_GROUP, _fixture, _write_index
 from tests.training.test_data import make_nvarc_tokenizer, write_json
 
@@ -27,9 +27,12 @@ def _config(root: Path, source: Path, *, name: str = "epoch", count: int = 26, s
         data=SimpleNamespace(
             split_directory=root / name / "splits" / "train", view_name="train", shuffle=False,
         ),
+        targets_per_sequence=3,
+        epoch_optimizer_steps=(target_count + 47) // 48,
         loop=SimpleNamespace(optimizer_batch_size=48, max_optimizer_steps=(target_count + 47) // 48),
         recipe={
             "data": {
+                "source": "epoch_pool",
                 "source_archive": source / "nvarc-all-classified.tar.gz",
                 "task_index": source / f"{DERIVED_GROUP}_tasks.jsonl",
                 "official_training_keys": source / "arc_agi_1_training_keys.json",
@@ -78,7 +81,7 @@ class TrainingDataPreparationTest(unittest.TestCase):
                     return original_stat(path, *args, **kwargs)
 
                 with patch.object(Path, "open", reject_task_open), patch.object(Path, "stat", reject_task_stat):
-                    actual_manifest = prepare_training_view(parent, actual)
+                    actual_manifest = prepare_next_epoch_data(parent, actual)
                 self.assertEqual(actual_manifest["keys_sha256"], expected_manifest["keys_sha256"])
                 self.assertEqual(actual_manifest["sources"], expected_manifest["sources"])
                 self.assertEqual(actual_manifest["inputs_sha256"], expected_manifest["inputs_sha256"])
@@ -90,12 +93,12 @@ class TrainingDataPreparationTest(unittest.TestCase):
                 self.assertEqual((root / "actual/raw").resolve(), (root / "parent/raw").resolve())
                 self.assertEqual({path: path.read_bytes() for path in original}, original)
                 with self.assertRaises(FileExistsError):
-                    prepare_training_view(parent, actual)
+                    prepare_next_epoch_data(parent, actual)
 
                 # A later epoch points directly to the original raw directory, not a chain of views.
                 later = _config(root, source, name="later", seed=seed + 1)
                 later.path = config_path
-                prepare_training_view(actual, later)
+                prepare_next_epoch_data(actual, later)
                 self.assertEqual((root / "later/raw").readlink(), (root / "parent/raw").resolve())
 
     def test_metadata_only_view_rejects_incompatible_limits_and_nontraining_parents(self) -> None:
@@ -123,7 +126,7 @@ class TrainingDataPreparationTest(unittest.TestCase):
                 config = _config(root, source, name="next", seed=168)
                 config.path = config_path
                 with self.assertRaises(ValueError):
-                    prepare_training_view(parent, config)
+                    prepare_next_epoch_data(parent, config)
                 self.assertFalse((root / "next").exists())
 
     def test_extracted_tree_matches_archive_tasks_order_and_augmentations(self) -> None:
@@ -193,8 +196,6 @@ class TrainingDataPreparationTest(unittest.TestCase):
                 prepared_split_directory="epoch/splits/train", expected_task_count=26,
                 num_workers=0, prefetch_factor=None,
             )
-            payload["loop"].update(max_optimizer_steps=2, expected_target_count=78,
-                                   expected_final_batch_target_count=30)
             payload["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=0.5)
             config_path = root / "recipe.json"
             write_json(config_path, payload)

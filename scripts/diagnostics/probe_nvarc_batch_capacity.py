@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
@@ -73,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_config(path: Path, *, require_checkpoints: bool = True):
-    config = load_training_config(path, expected_type="baseline")
+    config = load_training_config(path, expected_type="training_run")
     if (
         config.loop.optimizer_batch_size != 48
         or config.loop.min_context_pairs_before_target != 2
@@ -259,7 +258,7 @@ def run_candidate(args) -> dict:
     _write_json(result_path, result)
     try:
         config = _load_config(args.config)
-        result["config"] = asdict(config)
+        result["config"] = config.recipe_dict()
         result["environment"] = _environment_metadata()
         device = prepare_device(config)
         properties = torch.cuda.get_device_properties(device)
@@ -433,7 +432,7 @@ def run_search(
     if provenance is None:
         provenance = _source_metadata()
     manifest = {
-        "status": "running", "command": sys.argv, "config": asdict(config),
+        "status": "running", "command": sys.argv, "config": config.recipe_dict(),
         "config_source": json.loads(args.config.read_text()),
         "config_sha256": config_sha256,
         "sequence_length": args.sequence_length, "max_batch_size": args.max_batch_size,

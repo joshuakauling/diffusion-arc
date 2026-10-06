@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
@@ -27,18 +26,17 @@ from diffusion_arc.arc_data import load_arc_split_config
 from diffusion_arc.arc_data.splits.io import resolve_inside
 from diffusion_arc.arc_data.splits.layout import resolve_split_layout
 from diffusion_arc.training.config import load_training_config
-from diffusion_arc.training.trainer import Trainer, TrainStepResult
-from diffusion_arc.training.step.flow_sampling import build_flow_generator, build_flow_sampler
-from diffusion_arc.training.step.loss import build_velocity_loss
-from diffusion_arc.training.setup import build_optimizer, load_models, prepare_device, seed_process
-from diffusion_arc.training.step.lr_schedule import build_lr_scheduler
-from diffusion_arc.training.data import build_dataloader, iter_optimizer_batches
+from diffusion_arc.training.trainer import TrainStepResult
+from diffusion_arc.training.benchmark_runner import run_benchmark
+from diffusion_arc.training.run.experiment import BenchmarkInstrumentation
 
 
 def check_inputs(config_path: Path):
     """Check required files, without generating data or tokenizing the dataset."""
 
-    config = load_training_config(config_path, expected_type="baseline")
+    config = load_training_config(config_path, expected_type="training_run")
+    if config.recipe["execution"]["distributed_strategy"] != "single_process":
+        raise ValueError("single-GPU benchmark requires distributed_strategy=single_process")
     if config.benchmark is None:
         raise ValueError("benchmark entrypoint requires config.benchmark")
     split_file = config.data.split_directory / "config.json"
@@ -105,12 +103,17 @@ class _StepRecorder:
         torch.cuda.reset_peak_memory_stats(self.device)
         self.started = time.perf_counter()
 
-    def step(self, result: TrainStepResult):
-        torch.cuda.synchronize(self.device)
-        seconds = time.perf_counter() - self.started
+    def step(self, result: TrainStepResult, *, seconds=None, peaks=None):
+        standalone_timing = seconds is None
+        if standalone_timing:
+            torch.cuda.synchronize(self.device)
+            seconds = time.perf_counter() - self.started
+        if peaks is None:
+            peaks = {"peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
+                     "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device)}
         metrics = result.diagnostics.preparation
-        batches = result.diagnostics.flux_batches
-        if len(batches) != result.flux_forward_calls:
+        microbatch_plans = result.diagnostics.flux_microbatch_plans
+        if len(microbatch_plans) != result.flux_forward_calls:
             raise RuntimeError("FLUX schedule and executed microbatch count disagree")
         self.rows.append({
             "step": len(self.rows) + 1,
@@ -124,9 +127,9 @@ class _StepRecorder:
             "targets": result.target_count,
             "flux_microbatches": result.flux_forward_calls,
             "flux_batches": [
-                {"batch_size": len(batch.target_indices), "joint_tokens": batch.joint_tokens,
-                 "target_indices": list(batch.target_indices)}
-                for batch in batches
+                {"batch_size": len(microbatch_plan.target_indices), "joint_tokens": microbatch_plan.joint_tokens,
+                 "target_indices": list(microbatch_plan.target_indices)}
+                for microbatch_plan in microbatch_plans
             ],
             "completed_sources": result.source_count,
             "prepared_sources": [
@@ -147,13 +150,37 @@ class _StepRecorder:
             "flux_image_tokens": result.flux_image_tokens,
             "flux_joint_tokens": result.flux_joint_tokens,
             "target_prefix_tokens": list(result.diagnostics.target_prefix_tokens),
-            "peak_allocated_bytes": torch.cuda.max_memory_allocated(self.device),
-            "peak_reserved_bytes": torch.cuda.max_memory_reserved(self.device),
+            **peaks,
         })
         if result.target_count != self.config.loop.optimizer_batch_size:
             raise RuntimeError("Benchmark exhausted its data with an incomplete optimizer batch")
-        torch.cuda.reset_peak_memory_stats(self.device)
-        self.started = time.perf_counter()
+        if standalone_timing:
+            torch.cuda.reset_peak_memory_stats(self.device)
+            self.started = time.perf_counter()
+
+
+class _SingleGpuExperiment(BenchmarkInstrumentation):
+    """Adapt shared-loop events to the established single-GPU artifact format."""
+
+    def __init__(self, config, manifest):
+        super().__init__(max_steps=config.loop.max_optimizer_steps, emit=lambda record: None)
+        self.config, self.manifest = config, manifest
+        self.recorder = None
+
+    def start(self, stack, config, models, dataset):
+        device = self.runtime.device
+        self.manifest["gpu"] = {
+            "name": torch.cuda.get_device_name(device),
+            "total_memory_bytes": torch.cuda.get_device_properties(device).total_memory,
+            "visible_count": torch.cuda.device_count(),
+        }
+        self.manifest["packages"]["flash-attn-3"] = version("flash-attn-3")
+        self.manifest["execution"].update(flux_backend=models.flux_packing_backend.binding,
+            modulation_reduction="fp32", flux_packed_token_budget=config.flux_packing.max_tokens)
+        self.recorder = _StepRecorder(config, device)
+
+    def after_step(self, run_step, batch_plan, result, progress):
+        self.recorder.step(result, seconds=self.seconds, peaks=self.peaks)
 
 
 def benchmark_once(config_path: Path, output_directory: Path) -> None:
@@ -166,7 +193,7 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
         "status": "failed",
         "command": sys.argv,
         "config_source": json.loads(config_path.read_text()),
-        "config": asdict(config),
+        "config": config.recipe_dict(),
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "split_files_sha256": {
             str(path.relative_to(config.data.split_directory)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -192,58 +219,21 @@ def benchmark_once(config_path: Path, output_directory: Path) -> None:
             ) if path.is_file()
         },
     }
-    recorder = None
+    experiment = _SingleGpuExperiment(config, manifest)
     _write_json(output_directory / "manifest.json", {**manifest, "status": "running"})
     try:
-        device = prepare_device(config)
-        manifest["gpu"] = {
-            "name": torch.cuda.get_device_name(device),
-            "total_memory_bytes": torch.cuda.get_device_properties(device).total_memory,
-            "visible_count": torch.cuda.device_count(),
-        }
-        seed_process(config.seed)
-        models = load_models(config, device=device)
-        manifest["packages"]["flash-attn-3"] = version("flash-attn-3")
-        manifest["execution"].update(flux_backend=models.flux_packing_backend.binding,
-            modulation_reduction="fp32", flux_packed_token_budget=config.flux_packing.max_tokens)
-        samples = build_dataloader(config, tokenizer=models.tokenizer)
-        optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
-        scheduler = build_lr_scheduler(config, optimizer=optimizer)
-        generator = build_flow_generator(config, device=device)
-        recorder = _StepRecorder(config, device)
-        trainer = Trainer(
-            nvarc_encoder=models.nvarc_encoder, vae_encoder=models.vae_encoder,
-            flux_transformer=models.flux_transformer, optimizer=optimizer, scheduler=scheduler,
-            flow_sampler=build_flow_sampler(config, generator=generator),
-            loss_function=build_velocity_loss(config),
-            flux_compute_dtype=models.flux_compute_dtype,
-            flux_packing_backend=models.flux_packing_backend,
-            nvarc_max_tokens=config.nvarc_max_tokens,
-            vae_microbatch_size=config.loop.vae_microbatch_size,
-            flux_max_joint_tokens=config.flux_packing.max_tokens,
-            flux_max_spread_tokens=config.flux_packing.max_spread_tokens,
-            flux_packing_algorithm=config.flux_packing.algorithm,
-            min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
-            max_grad_norm=config.optimizer.max_grad_norm,
-        )
-        recorder.start()
-        for sequences in iter_optimizer_batches(
-            samples, optimizer_batch_size=config.loop.optimizer_batch_size,
-            min_context_pairs_before_target=config.loop.min_context_pairs_before_target,
-            max_optimizer_steps=config.loop.max_optimizer_steps,
-        ):
-            recorder.step(trainer.step(sequences))
-        if len(recorder.rows) != config.loop.max_optimizer_steps:
+        run_benchmark(config, experiment=experiment)
+        rows = experiment.recorder.rows if experiment.recorder else []
+        if len(rows) != config.loop.max_optimizer_steps:
             raise RuntimeError(
-                f"Benchmark requires {config.loop.max_optimizer_steps} full steps; "
-                f"got {len(recorder.rows)}"
+                f"Benchmark requires {config.loop.max_optimizer_steps} full steps; got {len(rows)}"
             )
         manifest["status"] = "complete"
     except BaseException as error:
         manifest["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
-        rows = recorder.rows if recorder else []
+        rows = experiment.recorder.rows if experiment.recorder else []
         manifest["process_seconds"] = time.perf_counter() - started
         with (output_directory / "steps.jsonl").open("w") as handle:
             for row in rows:
@@ -259,7 +249,7 @@ def run_repetitions(config_path: Path, output_directory: Path, *, metadata=None,
     output_directory.mkdir(parents=True, exist_ok=False)
     launch = {
         "status": "running", "command": sys.argv,
-        "config": asdict(config), "metadata": metadata or {},
+        "config": config.recipe_dict(), "metadata": metadata or {},
     }
     _write_json(output_directory / "manifest.json", launch)
     all_rows = []

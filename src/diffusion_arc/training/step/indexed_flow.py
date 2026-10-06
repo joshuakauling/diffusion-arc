@@ -28,13 +28,13 @@ def _seed(seed: int, step: int, stream: str, target: int = 0) -> int:
 
 
 @dataclass(frozen=True)
-class DistributedFlowSampler:
+class IndexedFlowSampler:
     """Bind one global batch's time quotas and local target positions.
 
     Small time/endpoint draws use a shared CPU seed. Only local noise tensors
     are generated, on their latent device, with a seed per global target.
     One and many ranks agree on the same device type and package versions.
-    This deliberately differs from the single-GPU runner's stateful RNG stream.
+    This deliberately differs from the legacy stateful RNG stream.
     """
 
     seed: int
@@ -97,12 +97,12 @@ class DistributedFlowSampler:
         return tuple(flows)
 
 
-def build_distributed_flow_sampler(
+def build_indexed_flow_sampler(
     config: TrainingConfig, *, step: int, global_target_count: int, target_indices: tuple[int, ...],
-) -> DistributedFlowSampler:
-    """Bind globally indexed draws to a native single-process or DDP batch plan."""
+) -> IndexedFlowSampler:
+    """Bind globally indexed draws to a batch plan for any distribution strategy."""
     policy = build_flow_policy(config)
-    return DistributedFlowSampler(
+    return IndexedFlowSampler(
         config.seed, step, global_target_count, target_indices,
         policy.endpoint_count(global_target_count),
         high_noise_count=policy.high_noise_count(global_target_count),

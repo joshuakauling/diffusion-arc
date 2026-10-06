@@ -2,7 +2,6 @@
 """Time the agreed validation round with resident B3 models and Adam states."""
 
 import argparse
-from dataclasses import asdict
 import hashlib
 from importlib.metadata import version
 import json
@@ -44,7 +43,7 @@ def load_config(path: Path):
         raise ValueError("sampling requires two distinct seeds")
     if any(type(seed) is not int or not 0 <= seed < 2**63 for seed in seeds):
         raise ValueError("seeds must be integers in [0, 2**63)")
-    runtime = load_training_config((path.parent / config["training_config"]).resolve(), expected_type="baseline")
+    runtime = load_training_config((path.parent / config["training_config"]).resolve(), expected_type="training_run")
     if runtime.flux_packing is None or runtime.flux_packing.max_tokens != 12288:
         raise ValueError("the benchmark requires B3 packing with 12288 joint tokens")
     if runtime.nvarc_max_tokens != 134400 or runtime.loop.vae_microbatch_size != 48:
@@ -139,7 +138,7 @@ def run(config_path: Path, output: Path):
     output.mkdir(parents=True, exist_ok=False)
     rows = []
     report = {
-        "status": "running", "config": config, "runtime_config": asdict(runtime),
+        "status": "running", "config": config, "runtime_config": runtime.recipe_dict(),
         "dataset_manifest": manifest, "timings": rows, "evaluations": [],
         "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
         "source_sha256": {

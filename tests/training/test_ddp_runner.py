@@ -19,14 +19,13 @@ import torch.multiprocessing as mp
 from torch.utils.data import Dataset
 
 from diffusion_arc.model.flux.packing import PackedFluxForward
-from diffusion_arc.training.config import load_training_config, LinearWarmupConstantConfig
-from diffusion_arc.training.ddp_runner import run_training_ddp
-from diffusion_arc.training.distributed import DistributedRuntime
+from diffusion_arc.training.config import load_training_config, parse_training_config
+from diffusion_arc.training.benchmark_runner import run_training_benchmark
+from diffusion_arc.training.distributed import TrainingRuntime
 from diffusion_arc.training.distributed_data import plan_distributed_batches
-from diffusion_arc.training.run.batch_diagnostics import BatchTrace
 from diffusion_arc.training.run.benchmarking import BenchmarkWindow
 from diffusion_arc.training.setup import build_optimizer
-from diffusion_arc.training.step.distributed_flow import DistributedFlowSampler
+from diffusion_arc.training.step.indexed_flow import IndexedFlowSampler
 from diffusion_arc.training.step.loss import build_velocity_loss
 from diffusion_arc.training.step.lr_schedule import build_lr_scheduler
 from diffusion_arc.training.trainer import Trainer
@@ -40,18 +39,20 @@ from tests.training.test_trainer import _sample
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _config():
+def _config(*, source_count=11, world_size=1):
     base = load_training_config(ROOT / "configs/training/arc_agi_1_epoch.json")
     recipe = base.recipe_dict()
-    recipe["data"]["expected_task_count"] = 11
-    recipe["flow"].update(endpoint_targets_per_full_batch=2, endpoint_targets_in_final_batch=1)
-    recipe["loop"].update(optimizer_batch_size=12, max_optimizer_steps=3,
-                          expected_target_count=33, expected_final_batch_target_count=9)
-    return replace(base, recipe=recipe, data=replace(base.data, num_workers=0),
-                   loop=replace(base.loop, optimizer_batch_size=12, max_optimizer_steps=3),
-                   optimizer=replace(base.optimizer, learning_rate=1e-4, max_grad_norm=0.1),
-                   scheduler=LinearWarmupConstantConfig(warmup_steps=2),
-                   flux_packing=replace(base.flux_packing, max_tokens=9300))
+    recipe.update(validation=None, logging=None, checkpointing=None)
+    recipe["deployment"]["gpu_count"] = world_size
+    recipe["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1",
+                                flux_max_joint_tokens=9300)
+    recipe["data"].update(expected_task_count=source_count, num_workers=0, prefetch_factor=None)
+    recipe["flow"].update(rng_scheme="global_step_target_v1", endpoint_targets_per_full_batch=2,
+                          endpoint_targets_in_final_batch=2 if source_count % 4 == 0 else 1)
+    recipe["loop"]["optimizer_batch_size"] = 12
+    recipe["optimizer"].update(learning_rate=1e-4, max_grad_norm=0.1)
+    recipe["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=0.5)
+    return parse_training_config(recipe, config_path=base.path)
 
 
 class Sources(Dataset):
@@ -77,14 +78,14 @@ def _snapshot(trainer, model, gradients):
                 scheduler=deepcopy(trainer.scheduler.state_dict()))
 
 
-def _plain_reference(initial, source_count=11, diagnostic_batch=None):
+def _plain_reference(initial, source_count=11, diagnostic_batch_number=None):
     """Use the ordinary Trainer without a process group, on each whole global batch."""
-    config, sources, backend = _config(), Sources(source_count=source_count), SegmentedReference()
+    config, sources, backend = _config(source_count=source_count), Sources(source_count=source_count), SegmentedReference()
     model = _model(initial)
     optimizer = build_optimizer(config, flux_transformer=model)
     plans = plan_distributed_batches((3,) * source_count, optimizer_batch_size=12, rank=0, world_size=1)
-    if diagnostic_batch is not None:
-        plans = (plans[diagnostic_batch - 1],) * 3
+    if diagnostic_batch_number is not None:
+        plans = (plans[diagnostic_batch_number - 1],) * 3
     trainer = Trainer(
         nvarc_encoder=FrozenText(), vae_encoder=FrozenVae(),
         flux_transformer=PackedFluxForward(model, compute_dtype=torch.float32, backend=backend),
@@ -96,7 +97,7 @@ def _plain_reference(initial, source_count=11, diagnostic_batch=None):
     snapshots, losses = [], []
     clip = torch.nn.utils.clip_grad_norm_
     for plan in plans:
-        trainer.flow_sampler = DistributedFlowSampler(config.seed, plan.step, plan.global_target_count,
+        trainer.flow_sampler = IndexedFlowSampler(config.seed, plan.epoch_batch_index, plan.global_target_count,
                                                       plan.target_indices, 1 if plan.global_target_count == 9 else 2)
         gradients = {}
         def capture(parameters, **kwargs):
@@ -111,22 +112,19 @@ def _plain_reference(initial, source_count=11, diagnostic_batch=None):
 
 
 def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max_steps=3, benchmark=False,
-             diagnostic_batch=None, trace_directory=None, memory_history=False, profile=False,
-             memory_snapshot_step=None):
+             diagnostic_batch_number=None, trace_directory=None, memory_history=False, profile=False):
     source_count = 12 if benchmark or memory_history or profile else 11
     backend, model, dataset = SegmentedReference(), _model(initial), Sources(source_count=source_count)
-    config = _config()
+    config = _config(source_count=source_count, world_size=world_size)
     if mismatch and rank == 1:
         config = replace(config, optimizer=replace(config.optimizer, learning_rate=0.05))
     records, snapshots = [], []
     options = dict(expected_source_count=source_count, measurement=BenchmarkWindow(1, 2)) if benchmark else {}
-    if diagnostic_batch is not None:
-        options.update(diagnostic_batch=diagnostic_batch, trace_directory=trace_directory)
+    if diagnostic_batch_number is not None:
+        options.update(diagnostic_batch_number=diagnostic_batch_number, trace_directory=trace_directory)
     if memory_history:
         options.update(memory_history=True, trace_directory=trace_directory,
                        expected_source_count=source_count)
-        if memory_snapshot_step is not None:
-            options["memory_snapshot_step"] = memory_snapshot_step
     if profile:
         options.update(profile_warmup_steps=2, trace_directory=trace_directory,
                        expected_source_count=source_count)
@@ -136,28 +134,19 @@ def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max
                              vae_encoder=FrozenVae(), flux_compute_dtype=torch.float32,
                              flux_packing_backend=backend)
 
-    lifecycle, captures = [], []
+    lifecycle = []
 
     @contextmanager
-    def runtime(_):
+    def runtime(_, **kwargs):
         lifecycle.append("runtime_enter")
         try:
-            yield DistributedRuntime(rank, rank, world_size, torch.device("cpu"), dist.group.WORLD)
+            yield TrainingRuntime(rank, rank, world_size, torch.device("cpu"), dist.group.WORLD)
         finally:
             lifecycle.append("runtime_exit")
 
     class CpuMemoryHistory:
-        def __init__(self, directory, trace_rank, device, *, capture_step=None):
-            Path(directory).mkdir(parents=True, exist_ok=True)
-            self.trace = BatchTrace(directory, trace_rank, device, echo=False)
+        def __init__(self, directory, trace_rank, device):
             self.settings = {"max_entries": 100_000}
-            self.capture_step = capture_step
-
-        def observe(self, stage, details):
-            self.trace(stage, details)
-            if (stage == "flux_backward_end" and self.trace.context["pack"] == 1
-                    and self.trace.context["global_batch"] == self.capture_step):
-                captures.append(self.trace.context.copy())
 
         def __enter__(self):
             lifecycle.append("history_enter")
@@ -186,33 +175,30 @@ def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max
             snapshots.append(_snapshot(self, model, gradients))
             return result
 
-    with patch("diffusion_arc.training.ddp_runner.distributed_runtime", runtime), \
-            patch("diffusion_arc.training.runner.load_models", load_models), \
+    with patch("diffusion_arc.training.training_loop.distributed_runtime", runtime), \
+            patch("diffusion_arc.training.training_loop.load_models", load_models), \
             patch("diffusion_arc.training.run.experiment.CudaMemoryHistory", CpuMemoryHistory), \
             patch("diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=dataset), \
-            patch("diffusion_arc.training.runner.Trainer", RecordingTrainer), \
-            patch("diffusion_arc.training.run.batch_diagnostics.print", create=True), \
+            patch("diffusion_arc.training.training_loop.Trainer", RecordingTrainer), \
             patch("diffusion_arc.training.run.experiment.time", SimpleNamespace(perf_counter=lambda: next(clock))), \
             patch("diffusion_arc.training.step.encoding._render_valid_grid_canvas", _render):
         if mismatch:
             try:
-                run_training_ddp(config, max_steps=max_steps, emit=records.append)
+                run_training_benchmark(config, max_steps=max_steps, emit=records.append)
             except ValueError as error:
                 assert "different training settings" in str(error)
             else:
                 raise AssertionError("mismatched effective settings were accepted")
             assert not dataset.visited and not snapshots and not records
             return
-        progress = run_training_ddp(config, max_steps=max_steps, emit=records.append, **options)
+        progress = run_training_benchmark(config, max_steps=max_steps, emit=records.append, **options)
     if memory_history:
         assert lifecycle == ["runtime_enter", "history_enter", "load_models", "history_exit", "runtime_exit"]
-        if memory_snapshot_step is not None:
-            assert len(captures) == 1 and captures[0]["global_batch"] == memory_snapshot_step
-    expected_targets = source_count * 3 if max_steps == 3 and diagnostic_batch is None else 12 * max_steps
+    expected_targets = source_count * 3 if max_steps == 3 and diagnostic_batch_number is None else 12 * max_steps
     assert (progress.optimizer_step, progress.sources_seen, progress.targets_seen) == (max_steps, expected_targets // 3, expected_targets)
     plans = plan_distributed_batches((3,) * source_count, optimizer_batch_size=12, rank=rank, world_size=world_size)[:max_steps]
-    if diagnostic_batch is not None:
-        plans = (plans[diagnostic_batch - 1],) * max_steps
+    if diagnostic_batch_number is not None:
+        plans = (plans[diagnostic_batch_number - 1],) * max_steps
     assert dataset.visited == [index for plan in plans for index in plan.source_indices]
     for actual, reference in zip(snapshots, expected[:max_steps], strict=True):
         torch.testing.assert_close(actual["gradients"], reference["gradients"], **GRAD_TOLERANCE)
@@ -231,7 +217,7 @@ def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max
         assert [record["event"] for record in records] == ["start"] + ["step"] * max_steps + ["complete"]
         assert records[0]["mode"] == ("ddp_torch_profile" if profile else
                                       "ddp_memory_diagnostic" if memory_history else
-                                      "ddp_batch_diagnostic" if diagnostic_batch else
+                                      "ddp_batch_diagnostic" if diagnostic_batch_number else
                                       "ddp_benchmark" if benchmark else "ddp_training_only")
         if memory_history:
             assert records[0]["memory_history"] == {"max_entries": 100_000}
@@ -241,10 +227,15 @@ def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max
             assert [row["global_batch"] for row in records[1:-1]] == list(range(1, max_steps + 1))
         assert records[0]["world_size"] == world_size
         assert records[0]["backend"] == "gloo"
+        assert records[0]["diagnostic_batch"] == diagnostic_batch_number
+        assert "diagnostic_batch_number" not in records[0]
+        if diagnostic_batch_number is not None:
+            assert [row["global_batch"] for row in records[1:-1]] == [diagnostic_batch_number] * max_steps
+            assert [row["optimizer_step"] for row in records[1:-1]] == list(range(1, max_steps + 1))
         for step, record in enumerate(records[1:-1]):
             torch.testing.assert_close(record["loss"], losses[step], atol=3e-6, rtol=3e-5)
             assert sum(r["endpoint_targets"] for r in record["ranks"]) == (
-                1 if step == 2 and not (benchmark or memory_history or profile) and diagnostic_batch is None else 2)
+                1 if step == 2 and not (benchmark or memory_history or profile) and diagnostic_batch_number is None else 2)
             assert sum(r["targets"] for r in record["ranks"]) == record["targets"]
             assert record["max_rank_seconds"] == max(r["seconds"] for r in record["ranks"])
         if benchmark:
@@ -262,21 +253,13 @@ def _execute(rank, world_size, initial, expected, losses, *, mismatch=False, max
             events = json.load(handle)["traceEvents"]
         names = {event["name"] for event in events}
         assert {name for name in names if name.startswith("optimizer_step/")} == {"optimizer_step/3"}
-        assert {"prepare/nvarc", "prepare/vae", "train/flux_forward", "train/flux_backward",
-                "train/adamw", "distributed/metrics", "data/retrieval"} <= names
+        expected_ranges = {"prepare/nvarc", "prepare/vae", "train/flux_forward", "train/flux_backward",
+                           "train/adamw", "distributed/metrics", "data/retrieval"}
+        assert expected_ranges <= names, f"Missing profiler ranges: {sorted(expected_ranges - names)}"
         if rank == 0:
             assert [row["phase"] for row in records[1:-1]] == ["warmup", "warmup", "profile"]
-    if diagnostic_batch is not None or memory_history:
-        rows = [json.loads(line) for line in (trace_directory / f"rank-{rank}-trace.jsonl").read_text().splitlines()]
-        assert [r["repetition"] for r in rows if r["stage"] == "batch_end"] == list(range(1, max_steps + 1))
-        assert all(r["global_batch"] == (r["repetition"] if memory_history else diagnostic_batch) for r in rows)
-        for repetition in range(1, len(snapshots) + 1):
-            trace = [r for r in rows if r["repetition"] == repetition]
-            forward = [r for r in trace if r["stage"] == "flux_forward_start"]
-            backward = [r for r in trace if r["stage"] == "flux_backward_end"]
-            assert len(forward) == len(backward) > 0
-            assert [r["sync"] for r in forward] == [False] * (len(forward) - 1) + [True]
-            assert all(r["rank"] == rank for r in trace)
+    if diagnostic_batch_number is not None or memory_history:
+        assert not list(trace_directory.glob("rank-*-trace.jsonl"))
 
 
 def _worker(rank, directory, initial, expected, losses, benchmark_expected, benchmark_losses,
@@ -288,14 +271,12 @@ def _worker(rank, directory, initial, expected, losses, benchmark_expected, benc
         _execute(rank, 2, initial, expected, losses)
         _execute(rank, 2, initial, expected, losses, mismatch=True)
         _execute(rank, 2, initial, benchmark_expected, benchmark_losses, benchmark=True)
-        _execute(rank, 2, initial, diagnostic_expected, diagnostic_losses, diagnostic_batch=2,
+        _execute(rank, 2, initial, diagnostic_expected, diagnostic_losses, diagnostic_batch_number=2,
                  trace_directory=Path(directory))
         _execute(rank, 2, initial, benchmark_expected, benchmark_losses, memory_history=True,
                  trace_directory=Path(directory) / "memory")
         _execute(rank, 2, initial, benchmark_expected, benchmark_losses, profile=True,
                  trace_directory=Path(directory) / "profile")
-        _execute(rank, 2, initial, benchmark_expected, benchmark_losses, memory_history=True,
-                 memory_snapshot_step=2, max_steps=2, trace_directory=Path(directory) / "selected-memory")
     finally:
         dist.destroy_process_group()
 
@@ -310,7 +291,7 @@ class DdpRunnerTests(unittest.TestCase):
             initial = deepcopy(_model().state_dict())
             expected, losses = _plain_reference(initial)
             benchmark_expected, benchmark_losses = _plain_reference(initial, source_count=12)
-            diagnostic_expected, diagnostic_losses = _plain_reference(initial, diagnostic_batch=2)
+            diagnostic_expected, diagnostic_losses = _plain_reference(initial, diagnostic_batch_number=2)
             with tempfile.TemporaryDirectory(prefix="ddp-runner-") as directory:
                 dist.init_process_group("gloo", init_method=(Path(directory) / "store-one").as_uri(),
                                         rank=0, world_size=1, timeout=timedelta(seconds=30))
@@ -320,16 +301,13 @@ class DdpRunnerTests(unittest.TestCase):
                     _execute(0, 1, initial, benchmark_expected, benchmark_losses, benchmark=True)
                     with tempfile.TemporaryDirectory() as trace_directory:
                         _execute(0, 1, initial, diagnostic_expected, diagnostic_losses,
-                                 diagnostic_batch=2, trace_directory=Path(trace_directory))
+                                 diagnostic_batch_number=2, trace_directory=Path(trace_directory))
                     with tempfile.TemporaryDirectory() as trace_directory:
                         _execute(0, 1, initial, benchmark_expected, benchmark_losses,
                                  memory_history=True, trace_directory=Path(trace_directory))
                     with tempfile.TemporaryDirectory() as trace_directory:
                         _execute(0, 1, initial, benchmark_expected, benchmark_losses,
                                  profile=True, trace_directory=Path(trace_directory))
-                    with tempfile.TemporaryDirectory() as trace_directory:
-                        _execute(0, 1, initial, benchmark_expected, benchmark_losses, memory_history=True,
-                                 memory_snapshot_step=2, max_steps=2, trace_directory=Path(trace_directory))
                 finally:
                     dist.destroy_process_group()
                 processes = mp.spawn(_worker, args=(directory, initial, expected, losses,
@@ -355,18 +333,18 @@ class DdpRunnerTests(unittest.TestCase):
         error = torch.OutOfMemoryError("simulated model allocation failure")
 
         @contextmanager
-        def runtime(_):
+        def runtime(_, **kwargs):
             events.append("runtime_enter")
             try:
-                yield DistributedRuntime(0, 0, 1, torch.device("cpu"), None)
+                yield TrainingRuntime(0, 0, 1, torch.device("cpu"), None)
             finally:
                 events.append("runtime_exit")
 
         @contextmanager
-        def history(directory, rank, device, *, capture_step=None):
+        def history(directory, rank, device):
             events.append("history_enter")
             try:
-                yield SimpleNamespace(trace=BatchTrace(directory, rank, device, echo=False))
+                yield SimpleNamespace()
             except torch.OutOfMemoryError as failure:
                 events.append("snapshot")
                 seen_errors.append(failure)
@@ -379,11 +357,11 @@ class DdpRunnerTests(unittest.TestCase):
             raise error
 
         with tempfile.TemporaryDirectory() as directory, \
-                patch("diffusion_arc.training.ddp_runner.distributed_runtime", runtime), \
+                patch("diffusion_arc.training.training_loop.distributed_runtime", runtime), \
                 patch("diffusion_arc.training.run.experiment.CudaMemoryHistory", history), \
-                patch("diffusion_arc.training.runner.load_models", fail_loading), \
+                patch("diffusion_arc.training.training_loop.load_models", fail_loading), \
                 self.assertRaises(torch.OutOfMemoryError) as raised:
-            run_training_ddp(_config(), max_steps=1, memory_history=True, trace_directory=Path(directory))
+            run_training_benchmark(_config(), max_steps=1, memory_history=True, trace_directory=Path(directory))
         self.assertIs(raised.exception, error)
         self.assertEqual(seen_errors, [error])
         self.assertEqual(events, ["runtime_enter", "history_enter", "load_models", "snapshot",
@@ -391,17 +369,19 @@ class DdpRunnerTests(unittest.TestCase):
 
     def test_rejects_resume_and_bad_step_limits_before_distributed_setup(self):
         config = _config()
-        recipe = deepcopy(config.recipe)
+        recipe = config.recipe_dict()
         recipe["models"]["resume_from"] = "checkpoint"
-        cases = [(replace(config, recipe=recipe), 1), (replace(config, config_type="baseline"), 1)]
-        cases += [(config, steps) for steps in (0, True, 4)]
-        with patch("diffusion_arc.training.ddp_runner.distributed_runtime") as runtime:
-            for config, steps in cases:
-                with self.subTest(steps=steps), self.assertRaises(ValueError):
-                    run_training_ddp(config, max_steps=steps)
+        resume_config = parse_training_config(recipe, config_path=config.path)
+        # Retired config formats are rejected by the parser; the runner receives validated configs.
+        cases = [(resume_config, 1, "do not support resume")]
+        cases += [(config, steps, "max_steps must be between") for steps in (0, True, 4)]
+        with patch("diffusion_arc.training.training_loop.distributed_runtime") as runtime:
+            for config, steps, message in cases:
+                with self.subTest(steps=steps, message=message), self.assertRaisesRegex(ValueError, message):
+                    run_training_benchmark(config, max_steps=steps)
             runtime.assert_not_called()
             with self.assertRaisesRegex(ValueError, "warmup plus measured"):
-                run_training_ddp(_config(), max_steps=1, measurement=BenchmarkWindow(1, 2))
+                run_training_benchmark(_config(), max_steps=1, measurement=BenchmarkWindow(1, 2))
 
 
 if __name__ == "__main__":

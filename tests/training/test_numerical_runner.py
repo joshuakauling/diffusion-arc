@@ -15,7 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from diffusion_arc.training.distributed import DistributedRuntime
+from diffusion_arc.training.distributed import TrainingRuntime
 from diffusion_arc.training.numerical_runner import run_numerical_phase, compare_numerical_phases
 from diffusion_arc.training.run.numerics import NumericalCriteria
 from tests.model.test_flux_packing import SegmentedReference
@@ -38,7 +38,7 @@ def _execute(phase, directory, initial, rank=0, *, changed_initial=False):
         dist.init_process_group("gloo", init_method=(Path(directory) / "gloo-store").as_uri(),
                                 rank=rank, world_size=2, timeout=timedelta(seconds=60))
         try:
-            yield DistributedRuntime(rank, rank, 2, torch.device("cpu"), dist.group.WORLD)
+            yield TrainingRuntime(rank, rank, 2, torch.device("cpu"), dist.group.WORLD)
         finally:
             dist.destroy_process_group()
 
@@ -49,7 +49,7 @@ def _execute(phase, directory, initial, rank=0, *, changed_initial=False):
          patch("diffusion_arc.training.numerical_runner.print", create=True), \
          patch("diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=Sources(source_count=12)), \
          patch("diffusion_arc.training.step.encoding._render_valid_grid_canvas", _render):
-        run_numerical_phase(SimpleNamespace(training=_config(), expected_source_count=12), NumericalCriteria(),
+        run_numerical_phase(SimpleNamespace(training=_config(source_count=12, world_size=2), expected_source_count=12), NumericalCriteria(),
                             phase=phase, output_directory=Path(directory) / "output",
                             scratch_directory=Path(directory) / "scratch",
                             source_identity=dict(source_sha256="test-source"))
@@ -72,6 +72,13 @@ class NumericalRunnerTests(unittest.TestCase):
             root = Path(directory) / "output"
             rows = [json.loads(s) for s in (root / "reference/steps.jsonl").read_text().splitlines()]
             torch.testing.assert_close(torch.tensor([r["loss"] for r in rows]), torch.tensor(losses))
+            for row in rows:
+                for rank in row["ranks"]:
+                    self.assertEqual(set(rank["packs"]),
+                                     {"preparation", "flux_batches", "target_prefix_tokens"})
+                    self.assertEqual(sorted(index for plan in rank["packs"]["flux_batches"]
+                                            for index in plan["target_indices"]),
+                                     list(range(len(rank["target_metrics"]))))
             self.assertFalse(json.loads((root / "reference/manifest.json").read_text())["ddp"])
             self.assertFalse(dist.is_initialized())
             processes = mp.spawn(_worker, args=(directory, initial), nprocs=2, join=False)

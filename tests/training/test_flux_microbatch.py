@@ -44,7 +44,7 @@ class FluxMicrobatchTests(unittest.TestCase):
         microbatch = build_flux_microbatch((inputs[2], inputs[0]), max_joint_tokens=12288)
         self.assertIsInstance(microbatch, FluxMicrobatch)
         self.assertEqual(microbatch.text.shape, (8, 4))
-        self.assertEqual(microbatch.layout.cumulative.tolist(), [0, 906, 1808])
+        self.assertEqual(microbatch.layout.joint_token_offsets.tolist(), [0, 906, 1808])
         self.assertEqual(microbatch.layout.text_positions[:, 3].tolist(), [0, 1, 2, 3, 4, 5, 0, 1])
         self.assertEqual(microbatch.layout.text_lengths, (6, 2))
         self.assertEqual(microbatch.image_position_ids.shape, (2, 900, 4))

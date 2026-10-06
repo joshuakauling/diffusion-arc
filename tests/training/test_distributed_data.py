@@ -9,10 +9,10 @@ from unittest.mock import patch
 import torch
 from torch.utils.data import Dataset
 
-from diffusion_arc.training.config import load_training_config
+from diffusion_arc.training.config import load_training_config, parse_training_config
 from diffusion_arc.training.data import iter_optimizer_batches
 from diffusion_arc.training.distributed_data import (
-    DistributedBatch,
+    RankBatchPlan,
     build_distributed_dataloader,
     plan_distributed_batches,
 )
@@ -50,7 +50,7 @@ class DistributedBatchPlanningTests(unittest.TestCase):
                     self.assertEqual(actual_targets, tuple(range(global_count)))
                     for plans in ranks:
                         plan = plans[step]
-                        self.assertEqual(plan.step, step)
+                        self.assertEqual(plan.epoch_batch_index, step)
                         self.assertEqual(plan.global_target_count, global_count)
                         self.assertTrue(plan.source_indices)
                         self.assertEqual(plan.target_indices, tuple(
@@ -67,11 +67,11 @@ class DistributedBatchPlanningTests(unittest.TestCase):
             counts, optimizer_batch_size=8, rank=rank, world_size=2,
         )[0] for rank in range(2))
         self.assertEqual(plans, (
-            DistributedBatch(0, (0, 1, 2), tuple(range(6)), 8),
-            DistributedBatch(0, (3, 4), (6, 7), 8),
+            RankBatchPlan(0, (0, 1, 2), tuple(range(6)), 8),
+            RankBatchPlan(0, (3, 4), (6, 7), 8),
         ))
         with self.assertRaises(FrozenInstanceError):
-            plans[0].step = 1
+            plans[0].epoch_batch_index = 1
 
     def test_rejects_overshoot_and_insufficient_full_or_final_batches(self):
         for counts, budget, world_size, message in (
@@ -125,10 +125,12 @@ class DistributedDataLoaderTests(unittest.TestCase):
         )
         recipe = base.recipe_dict()
         recipe["data"]["expected_task_count"] = 10
-        self.config = replace(
-            base, recipe=recipe, data=replace(base.data, num_workers=0),
-            loop=replace(base.loop, optimizer_batch_size=18),
-        )
+        recipe.update(validation=None, logging=None, checkpointing=None)
+        recipe["data"].update(num_workers=0, prefetch_factor=None)
+        recipe["loop"]["optimizer_batch_size"] = 18
+        recipe["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=0.5)
+        self.config = parse_training_config(recipe, config_path=base.path)
+
 
     def test_loads_only_owned_sources_in_step_order_without_consuming_global_rng(self):
         all_visited = []
@@ -190,7 +192,7 @@ class DistributedDataLoaderTests(unittest.TestCase):
 
     def test_rejects_invalid_resume_cursor_before_reading_any_source(self):
         for settings in (dict(start_step=-1), dict(start_step=True), dict(start_step=1.5),
-                         dict(start_step=3), dict(start_step=1, diagnostic_batch=2)):
+                         dict(start_step=3), dict(start_step=1, diagnostic_batch_number=2)):
             dataset = RecordingDataset()
             with self.subTest(settings=settings), patch(
                 "diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=dataset,
@@ -204,16 +206,16 @@ class DistributedDataLoaderTests(unittest.TestCase):
             with patch("diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=dataset):
                 loader, plans = build_distributed_dataloader(
                     self.config, tokenizer=object(), rank=rank, world_size=2,
-                    diagnostic_batch=2, diagnostic_repeats=3,
+                    diagnostic_batch_number=2, diagnostic_repeats=3,
                 )
                 tuple(loader)
             self.assertEqual(dataset.visited, expected * 3)
-            self.assertEqual([p.step for p in plans], [1, 1, 1])
+            self.assertEqual([p.epoch_batch_index for p in plans], [1, 1, 1])
         for batch in (0, 3, True):
             with patch("diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=RecordingDataset()), \
                     self.assertRaisesRegex(ValueError, "one-based global batch"):
                 build_distributed_dataloader(self.config, tokenizer=object(), rank=0, world_size=2,
-                                             diagnostic_batch=batch)
+                                             diagnostic_batch_number=batch)
 
     def test_rejects_shuffle_and_missing_recipe(self):
         for config, message in (

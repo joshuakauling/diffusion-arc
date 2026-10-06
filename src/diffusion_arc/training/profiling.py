@@ -21,6 +21,16 @@ def training_range(name: str, *, torch_range: bool = False):
     return torch.profiler.record_function(name) if torch_range or _TORCH_ENABLED.get() else nullcontext()
 
 
+@contextmanager
+def torch_training_ranges():
+    """Annotate shared model preparation and update phases during Torch captures."""
+    token = _TORCH_ENABLED.set(True)
+    try:
+        yield
+    finally:
+        _TORCH_ENABLED.reset(token)
+
+
 def torch_profile_settings(warmup_steps: int) -> dict:
     """Record one update after real training warmup, including one collector warmup."""
     if type(warmup_steps) is not int or warmup_steps < 1:

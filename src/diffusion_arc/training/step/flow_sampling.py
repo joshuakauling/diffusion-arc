@@ -32,7 +32,7 @@ class FlowMatchingBatch:
 
 
 @dataclass(frozen=True)
-class EndpointFlowPolicy:
+class FlowTimeQuotaPolicy:
     """Endpoint and optional high-noise quotas for full batches and the epoch tail."""
 
     full_batch_size: int
@@ -76,14 +76,14 @@ class EndpointFlowPolicy:
             return self.endpoint_targets_per_full_batch
         if target_count == self.final_batch_size:
             return self.endpoint_targets_in_final_batch
-        raise ValueError(f"unexpected optimizer batch size {target_count} for the endpoint policy")
+        raise ValueError(f"unexpected optimizer batch size {target_count} for the flow-time quota policy")
 
     def high_noise_count(self, target_count: int) -> int:
         if target_count == self.full_batch_size:
             return self.high_noise_targets_per_full_batch
         if target_count == self.final_batch_size:
             return self.high_noise_targets_in_final_batch
-        raise ValueError(f"unexpected optimizer batch size {target_count} for the endpoint policy")
+        raise ValueError(f"unexpected optimizer batch size {target_count} for the flow-time quota policy")
 
 
 def _open_interval_lattice_bounds(lower: float, upper: float) -> tuple[int, int]:
@@ -116,7 +116,7 @@ def _sample_quota_timesteps(
     return times
 
 
-def sample_endpoint_flow_batches(
+def sample_quota_flow_batches(
     clean_latents: Sequence[Tensor],
     *,
     endpoint_count: int,
@@ -305,14 +305,14 @@ class UniformFlowSampler:
 
 
 @dataclass(frozen=True)
-class EndpointFlowSampler:
+class QuotaFlowSampler:
     """Bind time-group quotas independently of the selected loss or pack layout."""
 
     generator: torch.Generator
-    policy: EndpointFlowPolicy
+    policy: FlowTimeQuotaPolicy
 
     def __call__(self, clean_latents: Sequence[Tensor]) -> tuple[FlowMatchingBatch, ...]:
-        return sample_endpoint_flow_batches(
+        return sample_quota_flow_batches(
             clean_latents, endpoint_count=self.policy.endpoint_count(len(clean_latents)),
             high_noise_count=self.policy.high_noise_count(len(clean_latents)),
             high_noise_min=self.policy.high_noise_min,
@@ -323,24 +323,24 @@ class EndpointFlowSampler:
 
 def build_flow_sampler(
     config: TrainingConfig, *, generator: torch.Generator,
-) -> UniformFlowSampler | EndpointFlowSampler:
+) -> UniformFlowSampler | QuotaFlowSampler:
     """Resolve the configured time distribution once, before consuming data."""
-    if config.config_type == "baseline":
-        return UniformFlowSampler(generator)
-    if config.recipe["flow"].get("rng_scheme", "legacy_stream_v1") != "legacy_stream_v1":
+    if config.recipe["flow"]["rng_scheme"] != "legacy_stream_v1":
         raise ValueError("global_step_target_v1 requires a sampler bound to its global batch plan")
-    return EndpointFlowSampler(generator, build_flow_policy(config))
+    if config.recipe["flow"]["time_distribution"] == "uniform":
+        return UniformFlowSampler(generator)
+    return QuotaFlowSampler(generator, build_flow_policy(config))
 
 
-def build_flow_policy(config: TrainingConfig) -> EndpointFlowPolicy:
+def build_flow_policy(config: TrainingConfig) -> FlowTimeQuotaPolicy:
     """Resolve the same global full-batch and tail quotas for every strategy."""
     flow = config.recipe["flow"]
     high_noise = flow["time_distribution"] == "uniform_with_fixed_endpoint_and_high_noise_counts"
-    return EndpointFlowPolicy(
+    return FlowTimeQuotaPolicy(
         full_batch_size=config.loop.optimizer_batch_size,
-        endpoint_targets_per_full_batch=flow["endpoint_targets_per_full_batch"],
+        endpoint_targets_per_full_batch=(0 if flow["time_distribution"] == "uniform" else flow["endpoint_targets_per_full_batch"]),
         final_batch_size=config.final_batch_target_count,
-        endpoint_targets_in_final_batch=flow["endpoint_targets_in_final_batch"],
+        endpoint_targets_in_final_batch=(0 if flow["time_distribution"] == "uniform" else flow["endpoint_targets_in_final_batch"]),
         high_noise_targets_per_full_batch=flow["high_noise_targets_per_full_batch"] if high_noise else 0,
         high_noise_targets_in_final_batch=flow["high_noise_targets_in_final_batch"] if high_noise else 0,
         high_noise_min=flow["high_noise_min"] if high_noise else 0.8,
@@ -361,7 +361,7 @@ def select_flow_batch(
 
 
 __all__ = [
-    "FlowMatchingBatch", "EndpointFlowPolicy", "sample_endpoint_flow_batches",
+    "FlowMatchingBatch", "FlowTimeQuotaPolicy", "sample_quota_flow_batches",
     "sample_flow_matching_batch", "sample_stratified_flow_matching_batch", "build_flow_generator",
-    "UniformFlowSampler", "EndpointFlowSampler", "build_flow_sampler", "build_flow_policy", "select_flow_batch",
+    "UniformFlowSampler", "QuotaFlowSampler", "build_flow_sampler", "build_flow_policy", "select_flow_batch",
 ]

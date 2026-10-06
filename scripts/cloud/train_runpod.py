@@ -236,11 +236,31 @@ def prepare_output_repository(api, repo_id: str, repo_type: str) -> None:
             time.sleep(delay)
 
 
+def load_saved_config(path: Path):
+    """Load a published run receipt with explicit historical schema migration."""
+    from diffusion_arc.training.run.checkpointing import load_saved_training_config
+
+    return load_saved_training_config(path)
+
+
+def require_epoch_launch_config(config) -> None:
+    """Keep this launcher explicitly scoped to uploaded, logged full epochs."""
+    recipe = config.recipe
+    if recipe["data"]["source"] != "epoch_pool" or recipe["loop"]["epochs"] != 1:
+        raise ValueError("This cloud launcher requires one complete epoch_pool epoch")
+    if recipe["logging"] is None or recipe["checkpointing"] is None:
+        raise ValueError("This cloud launcher requires logging and checkpointing for weight uploads")
+    if config.benchmark is not None:
+        raise ValueError("Use the benchmark launcher for a configured benchmark")
+
+
 def resolve_config(args, run_directory: Path, *, model_paths: dict[str, Path] | None = None):
     """Change deployment paths and account settings while retaining the training recipe."""
     from diffusion_arc.training.config import load_training_config
 
-    payload = load_training_config(args.config, expected_type="training_run").recipe_dict()
+    template = load_training_config(args.config, expected_type="training_run")
+    require_epoch_launch_config(template)
+    payload = template.recipe_dict()
     root = args.workspace
     payload["models"].update(
         nvarc_checkpoint=str(root / "models/nvarc-qwen3-4b-grids15-sft139"),
@@ -256,7 +276,8 @@ def resolve_config(args, run_directory: Path, *, model_paths: dict[str, Path] | 
     payload["data"]["prepared_split_directory"] = str(root / "data/training/arc_agi_1_epoch/splits/train")
     if payload["models"]["initialization"] == "transformer_weights":
         payload["data"]["prepared_split_directory"] = str(run_directory / "data/splits/train")
-    payload["validation"]["bundle"] = str(root / "data/benchmarks/arc_agi_1_validation")
+    if payload["validation"] is not None:
+        payload["validation"]["bundle"] = str(root / "data/benchmarks/arc_agi_1_validation")
     payload["deployment"]["output_directory"] = str(run_directory)
     payload["logging"].update(project=args.wandb_project, entity=args.wandb_entity)
     # All paths are absolute already. Validate before publishing the resolved file.
@@ -274,14 +295,14 @@ def resolve_config(args, run_directory: Path, *, model_paths: dict[str, Path] | 
 
 def run_checkpoints(config, *, include_weights_only: bool = False) -> list:
     """Verify one run's saves; omit explicitly pruned training states from resume candidates."""
-    from diffusion_arc.training.run.checkpointing import read_checkpoint
+    from diffusion_arc.training.run.checkpointing import load_checkpoint_metadata
 
     root = config.recipe["deployment"]["output_directory"] / "checkpoints"
     paths = sorted(root.glob("*/step-*/checkpoint.json"))
     runs = {path.parent.parent.name for path in paths}
     if len(runs) > 1:
         raise ValueError("Output directory contains multiple W&B runs; use a separate run name")
-    checkpoints = [read_checkpoint(path.parent, config, require_training_state=False) for path in paths]
+    checkpoints = [load_checkpoint_metadata(path.parent, config, require_training_state=False) for path in paths]
     for checkpoint in checkpoints:
         if checkpoint.metadata["wandb_run"]["id"] != checkpoint.path.parent.name:
             raise ValueError("Checkpoint path and W&B run identity disagree")
@@ -300,7 +321,7 @@ def validate_start(config, run_directory: Path, resume: Path | None) -> int:
         if logging["project"] != run["project"] or logging["entity"] not in (None, run["entity"]):
             raise ValueError("Resume W&B project/entity must match the checkpoint")
         progress = checkpoints[-1].metadata["progress"]
-        step = progress["optimizer_step"] - (progress.get("epoch", 1) - 1) * config.loop.max_optimizer_steps
+        step = progress["optimizer_step"] - (progress.get("epoch", 1) - 1) * config.epoch_optimizer_steps
         if step == config.loop.max_optimizer_steps:
             raise ValueError("Epoch is complete; use the upload command to retry weight uploads")
         return step
@@ -350,7 +371,7 @@ def training_command(config, command: list[str]) -> list[str]:
     strategy = config.recipe["execution"]["distributed_strategy"]
     if strategy == "single_process":
         return list(command)
-    if strategy != "ddp":
+    if strategy not in ("ddp", "fsdp2"):
         raise ValueError(f"Unsupported training execution strategy: {strategy}")
     count = config.recipe["deployment"]["gpu_count"]
     return [sys.executable, "-m", "torch.distributed.run", "--standalone", "--nnodes=1",
@@ -395,6 +416,7 @@ def preflight_data_access() -> None:
 
 def prepare_data(config, *, workspace: Path) -> None:
     """Prepare missing bundles; trust recorded source hashes when reusing prepared tasks."""
+    require_epoch_launch_config(config)
     import kagglehub
     from scripts.data.build_nvarc_arc_agi_1_training_only import build_subset
     from scripts.data.prepare_nvarc_benchmark import source_input_hashes
@@ -436,6 +458,8 @@ def prepare_data(config, *, workspace: Path) -> None:
         verify_file(split / f"augmented_keys/{config.data.view_name}.json", manifest["keys_sha256"])
         print(f"Reusing {manifest['source_count']} prepared tasks without scanning task files", flush=True)
     validation = config.recipe["validation"]
+    if validation is None:
+        return
     if not validation["bundle"].exists():
         # A failed transfer or preparation never publishes a partial validation bundle.
         with TemporaryDirectory(dir=workspace) as temporary:
@@ -450,6 +474,27 @@ def prepare_data(config, *, workspace: Path) -> None:
     validate_validation_bundle(validation["bundle"], split_seed=validation["split_seed"])
 
 
+@contextmanager
+def _transformer_upload_files(checkpoint):
+    """Expose HF weights, explicitly consolidating FSDP shards on CPU for export."""
+    if checkpoint.metadata.get("execution", {}).get("strategy") != "fsdp2":
+        names = [Path(name).name for name in sorted(checkpoint.metadata["files"])
+                 if Path(name).parent == Path("transformer")]
+        yield checkpoint.path / "transformer", names
+        return
+    from diffusion_arc.training.run.fsdp_checkpoint import export_sharded_transformer
+
+    model_bytes = sum(size for name, size in checkpoint.metadata["files"].items()
+                      if name.startswith("model/"))
+    if shutil.disk_usage(checkpoint.path.parent).free < 2 * model_bytes + 1024**3:
+        raise ValueError("FSDP2 HF export requires scratch space for CPU weights and safetensors")
+    with TemporaryDirectory(prefix=".fsdp-export-", dir=checkpoint.path.parent) as temporary:
+        exported = Path(temporary) / "transformer"
+        print(f"Exporting FSDP2 model shards to HF weights on CPU: {checkpoint.path.name}", flush=True)
+        export_sharded_transformer(checkpoint.path, exported)
+        yield exported, sorted(path.name for path in exported.iterdir() if path.is_file())
+
+
 def upload_weights(config, *, api, output_repo: str) -> None:
     """Upload all retained transformer versions, never optimizer/RNG states or task data."""
     from huggingface_hub import CommitOperationAdd
@@ -461,19 +506,19 @@ def upload_weights(config, *, api, output_repo: str) -> None:
     for checkpoint in checkpoints:
         run_id = checkpoint.metadata["wandb_run"]["id"]
         prefix = f"{run_id}/{checkpoint.path.name}/transformer"
-        operations = []
-        for name in sorted(checkpoint.metadata["files"]):
-            relative = Path(name)
-            if relative.parent != Path("transformer"):
-                continue
-            if (relative.name == "config.json" or relative.name.endswith(".safetensors")
-                    or relative.name.endswith(".safetensors.index.json")):
-                operations.append(CommitOperationAdd(
-                    path_in_repo=f"{prefix}/{relative.name}", path_or_fileobj=checkpoint.path / name,
-                ))
-        print(f"Uploading weights: {output_repo}/{prefix}", flush=True)
-        commit = api.create_commit(repo_id=output_repo, operations=operations,
-                                   commit_message=f"Save {run_id} {checkpoint.path.name} transformer")
+        with _transformer_upload_files(checkpoint) as (directory, names):
+            operations = []
+            for name in names:
+                if (name == "config.json" or name.endswith(".safetensors")
+                        or name.endswith(".safetensors.index.json")):
+                    operations.append(CommitOperationAdd(
+                        path_in_repo=f"{prefix}/{name}", path_or_fileobj=directory / name,
+                    ))
+            if not any(name.endswith(".safetensors") for name in names):
+                raise ValueError("Transformer upload requires weight tensors, not only a config")
+            print(f"Uploading weights: {output_repo}/{prefix}", flush=True)
+            commit = api.create_commit(repo_id=output_repo, operations=operations,
+                                       commit_message=f"Save {run_id} {checkpoint.path.name} transformer")
         write_json(receipts / f"{checkpoint.path.name}.json", {
             "repo_id": output_repo, "path_in_repo": prefix, "commit": commit.oid,
             "checkpoint": str(checkpoint.path),
@@ -519,7 +564,7 @@ def main(argv=None) -> int:
         if args.command == "upload":
             from diffusion_arc.training.config import load_training_config
 
-            config = load_training_config(run_directory / "training.json", expected_type="training_run")
+            config = load_saved_config(run_directory / "training.json")
             if config.recipe["deployment"]["output_directory"] != run_directory:
                 raise ValueError("Saved config points to another run directory")
             prepare_output_repository(api, output_repo, "model")

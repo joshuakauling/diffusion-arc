@@ -11,11 +11,11 @@ import torch
 
 from diffusion_arc.model import TARGET_LATENT_SHAPE
 from diffusion_arc.training.step.flow_sampling import (
-    EndpointFlowPolicy,
-    EndpointFlowSampler,
+    FlowTimeQuotaPolicy,
+    QuotaFlowSampler,
     FlowMatchingBatch,
     build_flow_sampler,
-    sample_endpoint_flow_batches,
+    sample_quota_flow_batches,
     sample_flow_matching_batch,
     sample_stratified_flow_matching_batch,
     select_flow_batch,
@@ -23,13 +23,13 @@ from diffusion_arc.training.step.flow_sampling import (
 from diffusion_arc.training.step.loss import flow_matching_loss
 
 
-class EndpointFlowSamplingTests(unittest.TestCase):
+class QuotaFlowSamplingTests(unittest.TestCase):
     def test_full_and_tail_batches_have_exact_quota_and_correct_flow(self):
-        policy = EndpointFlowPolicy(48, 4, 30, 3)
+        policy = FlowTimeQuotaPolicy(48, 4, 30, 3)
         for count, quota in ((48, 4), (30, 3)):
             with self.subTest(count=count):
                 clean = tuple(torch.full((2, 128), index / 100) for index in range(count))
-                flows = sample_endpoint_flow_batches(clean, endpoint_count=policy.endpoint_count(count),
+                flows = sample_quota_flow_batches(clean, endpoint_count=policy.endpoint_count(count),
                                                      generator=torch.Generator().manual_seed(167))
                 times = torch.cat([flow.timesteps for flow in flows])
                 self.assertEqual(int((times == 1).sum()), quota)
@@ -49,7 +49,7 @@ class EndpointFlowSamplingTests(unittest.TestCase):
     def test_uniform_lattice_excludes_both_endpoints_exactly(self):
         with patch("diffusion_arc.training.step.flow_sampling.torch.randint",
                    return_value=torch.tensor([1, 2**24 - 1])):
-            flows = sample_endpoint_flow_batches((torch.zeros(1, 128),) * 2, endpoint_count=0,
+            flows = sample_quota_flow_batches((torch.zeros(1, 128),) * 2, endpoint_count=0,
                                                  generator=torch.Generator().manual_seed(9))
         torch.testing.assert_close(torch.cat([f.timesteps for f in flows]),
                                    torch.tensor([2**-24, 1 - 2**-24]), rtol=0, atol=0)
@@ -58,37 +58,37 @@ class EndpointFlowSamplingTests(unittest.TestCase):
         clean = tuple(torch.zeros(2, 128) for _ in range(48))
         generator = torch.Generator().manual_seed(167)
         state = generator.get_state()
-        first = sample_endpoint_flow_batches(clean, endpoint_count=4, generator=generator)
+        first = sample_quota_flow_batches(clean, endpoint_count=4, generator=generator)
         after_first = generator.get_state()
         generator.set_state(state)
-        second = sample_endpoint_flow_batches(clean, endpoint_count=4, generator=generator)
+        second = sample_quota_flow_batches(clean, endpoint_count=4, generator=generator)
         for a, b in zip(first, second):
             torch.testing.assert_close(a.timesteps, b.timesteps, rtol=0, atol=0)
             torch.testing.assert_close(a.noisy_latents, b.noisy_latents, rtol=0, atol=0)
             torch.testing.assert_close(a.target_velocity, b.target_velocity, rtol=0, atol=0)
         torch.testing.assert_close(generator.get_state(), after_first, rtol=0, atol=0)
-        third = sample_endpoint_flow_batches(clean, endpoint_count=4, generator=generator)
+        third = sample_quota_flow_batches(clean, endpoint_count=4, generator=generator)
         self.assertFalse(torch.equal(torch.cat([f.timesteps for f in first]), torch.cat([f.timesteps for f in third])))
 
     def test_policy_and_sampler_reject_invalid_counts_and_precision(self):
         for args in ((0, 0, 0, 0), (48, 49, 30, 3), (48, 4, 30, 31), (48, 4, 49, 3),
                      (48, 4, 48, 3), (True, 0, 1, 0)):
             with self.subTest(args=args), self.assertRaises(ValueError):
-                EndpointFlowPolicy(*args)
+                FlowTimeQuotaPolicy(*args)
         with self.assertRaisesRegex(ValueError, "unexpected"):
-            EndpointFlowPolicy(48, 4, 30, 3).endpoint_count(29)
+            FlowTimeQuotaPolicy(48, 4, 30, 3).endpoint_count(29)
         for clean, quota in (((), 0), ((torch.zeros(2, 128),), 2),
                              ((torch.zeros(2, 128, dtype=torch.bfloat16),), 1),
                              ((torch.zeros(2, 128),), True)):
             with self.subTest(quota=quota), self.assertRaises(ValueError):
-                sample_endpoint_flow_batches(clean, endpoint_count=quota)
+                sample_quota_flow_batches(clean, endpoint_count=quota)
 
 
 class HighNoiseFlowSamplingTests(unittest.TestCase):
     def test_legacy_stream_preserves_recorded_main_draws_and_generator_position(self):
         # Recorded from main 5f42682, before sharing quota draws with DDP.
         generator = torch.Generator().manual_seed(169)
-        flows = sample_endpoint_flow_batches(
+        flows = sample_quota_flow_batches(
             (torch.zeros(2, 128),) * 3, endpoint_count=1, high_noise_count=1, generator=generator,
         )
         torch.testing.assert_close(torch.cat([flow.timesteps for flow in flows]),
@@ -105,7 +105,7 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
                          [444962, 14300187, 4768179])
 
     def test_full_and_tail_quotas_assign_three_groups_before_packing(self):
-        policy = EndpointFlowPolicy(48, 24, 30, 15, 12, 8)
+        policy = FlowTimeQuotaPolicy(48, 24, 30, 15, 12, 8)
         randint = torch.randint
 
         def draw_times(low, high, shape, **kwargs):
@@ -118,7 +118,7 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
         for count, endpoint, high_noise, uniform in ((48, 24, 12, 12), (30, 15, 8, 7)):
             with self.subTest(count=count):
                 clean = tuple(torch.full((2, 128), index / 100) for index in range(count))
-                sampler = EndpointFlowSampler(torch.Generator().manual_seed(169), policy)
+                sampler = QuotaFlowSampler(torch.Generator().manual_seed(169), policy)
                 with patch("diffusion_arc.training.step.flow_sampling.torch.randint", side_effect=draw_times):
                     flows = sampler(clean)
                 times = torch.cat([flow.timesteps for flow in flows])
@@ -145,7 +145,7 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
             return torch.tensor([low, high - 1], device=kwargs["device"])
 
         with patch("diffusion_arc.training.step.flow_sampling.torch.randint", side_effect=edge_draws):
-            flows = sample_endpoint_flow_batches(
+            flows = sample_quota_flow_batches(
                 (torch.zeros(1, 128),) * 2, endpoint_count=0, high_noise_count=2,
                 generator=torch.Generator().manual_seed(9),
             )
@@ -159,7 +159,7 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
 
     def test_restoring_generator_replays_mixture_and_independent_noise(self):
         generator = torch.Generator().manual_seed(169)
-        sampler = EndpointFlowSampler(generator, EndpointFlowPolicy(48, 24, 30, 15, 12, 8))
+        sampler = QuotaFlowSampler(generator, FlowTimeQuotaPolicy(48, 24, 30, 15, 12, 8))
         clean = (torch.zeros(2, 128),) * 48
         state = generator.get_state()
         first = sampler(clean)
@@ -189,20 +189,21 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
             {"high_noise_min": 1.0 - 2**-24},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                EndpointFlowPolicy(48, 24, 30, 15, **kwargs)
+                FlowTimeQuotaPolicy(48, 24, 30, 15, **kwargs)
         with self.assertRaisesRegex(ValueError, "full-batch high-noise"):
-            EndpointFlowPolicy(48, 24, 48, 24, 12, 8)
+            FlowTimeQuotaPolicy(48, 24, 48, 24, 12, 8)
         with self.assertRaisesRegex(ValueError, "unexpected"):
-            EndpointFlowPolicy(48, 24, 30, 15, 12, 8).high_noise_count(29)
+            FlowTimeQuotaPolicy(48, 24, 30, 15, 12, 8).high_noise_count(29)
         for count in (-1, True, 2):
             with self.subTest(count=count), self.assertRaisesRegex(ValueError, "high_noise_count"):
-                sample_endpoint_flow_batches((torch.zeros(2, 128),) * 2,
+                sample_quota_flow_batches((torch.zeros(2, 128),) * 2,
                                              endpoint_count=1, high_noise_count=count)
 
     def test_build_sampler_resolves_new_and_existing_recipe(self):
         for high_noise in (False, True):
             with self.subTest(high_noise=high_noise):
                 flow = {
+                    "rng_scheme": "legacy_stream_v1",
                     "time_distribution": "uniform_with_fixed_endpoint_count",
                     "endpoint_targets_per_full_batch": 4,
                     "endpoint_targets_in_final_batch": 3,
@@ -219,7 +220,7 @@ class HighNoiseFlowSamplingTests(unittest.TestCase):
                     loop=SimpleNamespace(optimizer_batch_size=48), final_batch_target_count=30,
                 )
                 sampler = build_flow_sampler(config, generator=torch.Generator().manual_seed(169))
-                self.assertIsInstance(sampler, EndpointFlowSampler)
+                self.assertIsInstance(sampler, QuotaFlowSampler)
                 self.assertEqual(sampler.policy.endpoint_count(48), 24 if high_noise else 4)
                 self.assertEqual(sampler.policy.high_noise_count(48), 12 if high_noise else 0)
                 self.assertEqual(sampler.policy.high_noise_count(30), 8 if high_noise else 0)

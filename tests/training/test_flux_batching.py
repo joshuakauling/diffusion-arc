@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from diffusion_arc.training.step.flux_batching import (
-    FluxPackingPolicy, FluxTargetBatch, plan_flux_batches,
+    FluxPackingPolicy, FluxMicrobatchPlan, plan_flux_batches,
 )
 
 
@@ -16,16 +16,16 @@ class FluxBatchPlanningTests(unittest.TestCase):
         policy = FluxPackingPolicy(10_000, algorithm="legacy_bfd_v1")
         # Historic BFD leaves a third call; the balanced planner finds two.
         self.assertEqual(plan_flux_batches((5100, 4100, 2100, 1100, 1100, 1100), policy), (
-            FluxTargetBatch((0, 2), 9000), FluxTargetBatch((1, 3, 4), 9000),
-            FluxTargetBatch((5,), 2000),
+            FluxMicrobatchPlan((0, 2), 9000), FluxMicrobatchPlan((1, 3, 4), 9000),
+            FluxMicrobatchPlan((5,), 2000),
         ))
         # Source byte weights must not reorder calls when continuing legacy runs.
         self.assertEqual(plan_flux_batches((5100, 5100, 5100), policy,
                                           source_ids=(0, 1, 2), source_bytes=(1, 10, 100)), (
-            FluxTargetBatch((0,), 6000), FluxTargetBatch((1,), 6000), FluxTargetBatch((2,), 6000),
+            FluxMicrobatchPlan((0,), 6000), FluxMicrobatchPlan((1,), 6000), FluxMicrobatchPlan((2,), 6000),
         ))
         self.assertEqual(plan_flux_batches((6100, 4100, 3100, 100), policy), (
-            FluxTargetBatch((0,), 7000), FluxTargetBatch((1, 2, 3), 10000),
+            FluxMicrobatchPlan((0,), 7000), FluxMicrobatchPlan((1, 2, 3), 10000),
         ))
 
     def test_budget_counts_image_tokens_for_every_target(self):
@@ -34,11 +34,11 @@ class FluxBatchPlanningTests(unittest.TestCase):
         # Text alone fits all three; the three image sequences require two calls.
         self.assertEqual(
             plan_flux_batches((3500, 3500, 3500), policy),
-            (FluxTargetBatch((0, 1), 8800), FluxTargetBatch((2,), 4400)),
+            (FluxMicrobatchPlan((0, 1), 8800), FluxMicrobatchPlan((2,), 4400)),
         )
         self.assertEqual(
             plan_flux_batches((8400,), FluxPackingPolicy(9300)),
-            (FluxTargetBatch((0,), 9300),),
+            (FluxMicrobatchPlan((0,), 9300),),
         )
 
     def test_balances_without_adding_calls_and_breaks_equal_length_ties_by_fifo(self):
@@ -48,13 +48,13 @@ class FluxBatchPlanningTests(unittest.TestCase):
         result = plan_flux_batches((5100, 5100, 3100, 3100), policy)
         self.assertEqual(
             result,
-            (FluxTargetBatch((0, 2), 10_000), FluxTargetBatch((1, 3), 10_000)),
+            (FluxMicrobatchPlan((0, 2), 10_000), FluxMicrobatchPlan((1, 3), 10_000)),
         )
         self.assertEqual(result, plan_flux_batches((5100, 5100, 3100, 3100), policy))
         # Move the small target out of the full pack, then run the largest first.
         self.assertEqual(
             plan_flux_batches((6100, 4100, 3100, 100), policy),
-            (FluxTargetBatch((1, 2), 9000), FluxTargetBatch((0, 3), 8000)),
+            (FluxMicrobatchPlan((1, 2), 9000), FluxMicrobatchPlan((0, 3), 8000)),
         )
 
     def test_exact_coverage_budget_and_tail_without_crossing_windows(self):
@@ -67,11 +67,11 @@ class FluxBatchPlanningTests(unittest.TestCase):
             self.assertEqual(batch.joint_tokens, sum(lengths[i] + 900 for i in batch.target_indices))
             self.assertLessEqual(batch.joint_tokens, policy.max_tokens)
         self.assertEqual(plan_flux_batches((), policy), ())
-        tail = (FluxTargetBatch((0,), 901),)
+        tail = (FluxMicrobatchPlan((0,), 901),)
         self.assertEqual(plan_flux_batches((1,), policy), tail)
         self.assertEqual(
             plan_flux_batches((1, 1), policy),
-            (FluxTargetBatch((0, 1), 1802),),
+            (FluxMicrobatchPlan((0, 1), 1802),),
         )
 
     def test_validates_policy_and_prefixes_at_ingestion(self):

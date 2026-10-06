@@ -9,7 +9,7 @@ from torch import nn
 
 from diffusion_arc.arc_data import render_grid_canvas
 from diffusion_arc.diagnostics import partial_denoising as diagnostic
-from diffusion_arc.inference.conditioning import sample_conditioning_noise
+from diffusion_arc.inference.conditioning import sample_query_latent_noise
 from diffusion_arc.inference.generation import generate_packed_arc_samples, linear_timestep_schedule
 from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
 from diffusion_arc.training.run.validation import ValidationTarget
@@ -64,7 +64,7 @@ class PartialDenoisingTests(unittest.TestCase):
 
     def test_constant_oracle_velocity_recovers_nonzero_target_at_every_start(self):
         clean = self.target.clean_latent.unsqueeze(0)
-        noise = sample_conditioning_noise(
+        noise = sample_query_latent_noise(
             self.target.conditioning, 20167, ("generation", 0), "cpu",
         ).unsqueeze(0)
         true_velocity = noise - clean
@@ -127,7 +127,7 @@ class PartialDenoisingTests(unittest.TestCase):
         self.assertEqual(int((linear[:-1] >= .8).sum()), 11)
         self.assertEqual(int((cosine[:-1] >= .8).sum()), 21)
 
-        noise = sample_conditioning_noise(self.target.conditioning, 20167, ("generation", 0), "cpu").unsqueeze(0)
+        noise = sample_query_latent_noise(self.target.conditioning, 20167, ("generation", 0), "cpu").unsqueeze(0)
         velocity = noise - self.target.clean_latent.unsqueeze(0)
         calls = []
 

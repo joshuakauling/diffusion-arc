@@ -14,7 +14,6 @@ import torch
 from diffusion_arc.model import (
     NVARC_CONTEXT_WIDTH,
     NVARC_HIDDEN_SIZE,
-    NVARC_HIDDEN_STATE_INDICES,
     NVARC_MAX_TOKENS,
     NVARC_PAD_TOKEN_ID,
     NVARC_VOCAB_SIZE,
@@ -32,7 +31,6 @@ class ModelContractTests(unittest.TestCase):
     def test_nvarc_execution_constants_match_the_fixed_interface(self) -> None:
         self.assertEqual(NVARC_PAD_TOKEN_ID, 13)
         self.assertEqual(NVARC_HIDDEN_SIZE, 2560)
-        self.assertEqual(NVARC_HIDDEN_STATE_INDICES, (9, 18, 27))
         self.assertEqual(NVARC_CONTEXT_WIDTH, 7680)
 
     def test_packed_source_validation_returns_individual_lengths(self) -> None:

@@ -15,11 +15,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from diffusion_arc.training import runner
-from diffusion_arc.training.config import load_training_config
-from diffusion_arc.training.distributed import DistributedRuntime
+from diffusion_arc.training import training_loop, runner
+from diffusion_arc.training.config import load_training_config, parse_training_config
+from diffusion_arc.training.distributed import TrainingRuntime
 from diffusion_arc.training.distributed_data import plan_distributed_batches
-from diffusion_arc.training.run.checkpointing import read_checkpoint
+from diffusion_arc.training.run.checkpointing import load_checkpoint_metadata
 from diffusion_arc.training.trainer import Trainer
 from tests.model.test_flux_packing import SegmentedReference
 from tests.training.test_ddp_runner import Sources
@@ -44,8 +44,7 @@ def _config(directory, *, strategy="single_process", epoch=3, resume_from=None, 
                            high_noise_targets_in_final_batch=3)
     payload["data"].update(expected_task_count=7, num_workers=0, prefetch_factor=None,
                            prepared_split_directory=str(directory / f"epoch-{epoch}"))
-    payload["loop"].update(optimizer_batch_size=12, max_optimizer_steps=2,
-                           expected_target_count=21, expected_final_batch_target_count=9)
+    payload["loop"]["optimizer_batch_size"] = 12
     payload["optimizer"].update(learning_rate=1e-4, max_grad_norm=0.1)
     payload["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=0.5)
     payload["validation"].update(expected_task_count=1, expected_query_count=1)
@@ -53,14 +52,10 @@ def _config(directory, *, strategy="single_process", epoch=3, resume_from=None, 
     for cadence in (payload["validation"]["loss"], payload["validation"]["sampling"], payload["checkpointing"]):
         cadence.update(every_optimizer_steps=1, replace_last_periodic_with_final=False)
     payload["logging"].update(resume_parent_run=False)
-    # Every rank validates the same recipe without concurrently writing a file.
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", dir=directory) as handle:
-        json.dump(payload, handle)
-        handle.flush()
-        return load_training_config(handle.name, expected_type="training_run")
+    return parse_training_config(payload, config_path=directory / "fixture.json")
 
 
-def _execute(config, runtime, *, previous_epoch=None, stop_after=None):
+def _execute(config, runtime, *, previous_epoch_checkpoint=None, stop_after=None):
     """Replace external services while preserving the complete runner lifecycle."""
     snapshots, records, events, loaded = [], [], [], []
     dataset = Sources(source_count=7)
@@ -146,7 +141,7 @@ def _execute(config, runtime, *, previous_epoch=None, stop_after=None):
             result = super().step(sequences)
             snapshots.append(dict(parameters=deepcopy(models.flux_transformer.state_dict()),
                 optimizer=deepcopy(self.optimizer.state_dict()), scheduler=deepcopy(self.scheduler.state_dict()),
-                times=tuple(target.timestep for target in result.targets), loss=result.loss,
+                times=tuple(target.timestep for target in result.target_metrics), loss=result.loss,
                 target_count=result.target_count, high_noise_quota=self.flow_sampler.high_noise_count,
                 rng=torch.random.get_rng_state().clone()))
             return result
@@ -159,11 +154,11 @@ def _execute(config, runtime, *, previous_epoch=None, stop_after=None):
             load_sampling_input_grids=lambda *a, **kw: {(target.task_id, 0): ((1,),)},
             evaluate_packed_loss=evaluate, generate_packed_samples=generate)
         for name, value in replacements.items():
-            stack.enter_context(patch.object(runner, name, value))
+            stack.enter_context(patch.object(training_loop if hasattr(training_loop, name) else runner, name, value))
         stack.enter_context(patch("diffusion_arc.training.distributed_data.ArcTrainingDataset", return_value=dataset))
         stack.enter_context(patch("diffusion_arc.training.step.encoding._render_valid_grid_canvas", _render))
         try:
-            progress = runner.run_training(config, runtime=runtime, previous_epoch=previous_epoch)
+            progress = runner.run_training(config, runtime=runtime, previous_epoch_checkpoint=previous_epoch_checkpoint)
         except RuntimeError as error:
             if stop_after is None or "intentional interruption" not in str(error):
                 raise
@@ -209,7 +204,7 @@ def _worker(rank, directory, native, next_native):
     directory = Path(directory)
     dist.init_process_group("gloo", init_method=(directory / "rendezvous").as_uri(),
                             rank=rank, world_size=2, timeout=timedelta(seconds=45))
-    runtime = DistributedRuntime(rank, rank, 2, torch.device("cpu"), dist.group.WORLD)
+    runtime = TrainingRuntime(rank, rank, 2, torch.device("cpu"), dist.group.WORLD)
     try:
         config = _config(directory, strategy="ddp")
         full = _execute(config, runtime)
@@ -255,9 +250,9 @@ def _worker(rank, directory, native, next_native):
         if rank == 0:
             _assert_services(resumed, steps=1, initial=False)
 
-        previous = read_checkpoint(_checkpoint(config, 6), config)
+        previous = load_checkpoint_metadata(_checkpoint(config, 6), config)
         next_config = _config(directory, strategy="ddp", epoch=4)
-        continued = _execute(next_config, runtime, previous_epoch=previous)
+        continued = _execute(next_config, runtime, previous_epoch_checkpoint=previous)
         _compare_updates(continued.snapshots, next_native)
         assert continued.loaded == [previous.path / "transformer"]
         assert (continued.progress.epoch, continued.progress.optimizer_step,
@@ -277,16 +272,16 @@ class UnifiedRunnerTests(unittest.TestCase):
             directory = Path(directory).resolve()
             torch.manual_seed(167)
             _model().save_pretrained(directory / "selected-transformer", safe_serialization=True)
-            runtime = DistributedRuntime(0, 0, 1, torch.device("cpu"), None, "single_process")
+            runtime = TrainingRuntime(0, 0, 1, torch.device("cpu"), None, "single_process")
             config = _config(directory)
             native = _execute(config, runtime)
             assert not dist.is_initialized()
             _assert_services(native, steps=2, initial=True)
             assert native.loaded == [directory / "selected-transformer"]
             assert native.visited == list(range(7))
-            checkpoint = read_checkpoint(_checkpoint(config, 6), config)
+            checkpoint = load_checkpoint_metadata(_checkpoint(config, 6), config)
             next_config = _config(directory, epoch=4)
-            next_native = _execute(next_config, runtime, previous_epoch=checkpoint)
+            next_native = _execute(next_config, runtime, previous_epoch_checkpoint=checkpoint)
             _assert_services(next_native, steps=2, initial=False)
 
             processes = mp.spawn(_worker, args=(str(directory), native.snapshots, next_native.snapshots),

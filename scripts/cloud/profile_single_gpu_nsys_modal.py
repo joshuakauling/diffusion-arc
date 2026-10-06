@@ -40,19 +40,27 @@ def validate_config(repository: Path, config: str) -> Path:
         raise ValueError("config must be a repository-relative path")
     from diffusion_arc.training.config import load_training_config
 
-    validated = load_training_config(path, expected_type="baseline")
+    validated = load_training_config(path, expected_type="training_run")
     payload = json.loads(path.read_text())
-    expected = {
-        "seed": 167, "device": "cuda:0", "nvarc_max_tokens": 134400,
-        "loop": {"max_optimizer_steps": 7, "optimizer_batch_size": 48,
-                 "min_context_pairs_before_target": 2,
-                 "vae_microbatch_size": 48},
-        "flux_packing": {"max_tokens": 12288}, "benchmark": None,
-        "optimizer": {"learning_rate": 1e-5, "beta1": 0.9, "beta2": 0.999,
-                      "epsilon": 1e-8, "weight_decay": 0.01},
-        "scheduler": {"type": "cosine", "warmup_steps": 213, "total_steps": 7245},
-    }
-    if any(payload[key] != value for key, value in expected.items()):
+    expected = (
+        validated.seed == 167, validated.device == "cuda:0",
+        validated.nvarc_max_tokens == 134400,
+        validated.loop.max_optimizer_steps == 7,
+        validated.loop.optimizer_batch_size == 48,
+        validated.loop.min_context_pairs_before_target == 2,
+        validated.loop.vae_microbatch_size == 48,
+        validated.flux_packing.max_tokens == 12288,
+        validated.benchmark is None,
+        validated.optimizer.learning_rate == 1e-5,
+        validated.optimizer.beta1 == 0.9, validated.optimizer.beta2 == 0.999,
+        validated.optimizer.epsilon == 1e-8, validated.optimizer.weight_decay == 0.01,
+        payload["scheduler"] == {"type": "cosine", "warmup_steps": 213, "total_steps": 7245},
+        payload["execution"]["distributed_strategy"] == "single_process",
+        payload["loss"]["type"] == "velocity_mse",
+        payload["flow"]["time_distribution"] == "uniform",
+        payload["flow"]["rng_scheme"] == "legacy_stream_v1",
+    )
+    if not all(expected):
         raise ValueError("Nsight launcher requires the seven-update B3 profiler configuration")
     expected_models = {"nvarc_dtype": "bfloat16", "vae_dtype": "float32",
                        "flux_parameter_dtype": "float32", "flux_compute_dtype": "bfloat16"}

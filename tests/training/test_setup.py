@@ -81,6 +81,7 @@ class _FakeNvarc(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.embedding = nn.Embedding(NVARC_VOCAB_SIZE, NVARC_HIDDEN_SIZE, dtype=torch.bfloat16)
+        self.layers = nn.ModuleList(nn.Identity() for _ in range(36))
         self.config = SimpleNamespace(
             vocab_size=NVARC_VOCAB_SIZE,
             hidden_size=NVARC_HIDDEN_SIZE,
@@ -89,6 +90,10 @@ class _FakeNvarc(nn.Module):
             _attn_implementation="nvarc_fa3",
             head_dim=128, num_attention_heads=32, num_key_value_heads=8, attention_dropout=0.0,
         )
+
+    @property
+    def base_model(self):
+        return self
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embedding
@@ -151,6 +156,7 @@ def _config(root: Path, *, shuffle: bool = False) -> TrainingConfig:
             min_context_pairs_before_target=1,
         ),
         flux_packing=FluxPackingPolicy(),
+        nvarc_hidden_layers=(9, 18, 27),
         optimizer=AdamWConfig(
             learning_rate=1e-5,
             beta1=0.8,
@@ -165,7 +171,7 @@ class SingleGpuSetupTests(unittest.TestCase):
     def test_packed_backend_is_preflighted_before_loading_and_returned_with_models(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = _config(root)
+            config = replace(_config(root), nvarc_hidden_layers=(18, 27, 36))
             config.models.nvarc_checkpoint.mkdir()
             config.models.flux_checkpoint.mkdir()
             backend = object()
@@ -183,6 +189,7 @@ class SingleGpuSetupTests(unittest.TestCase):
             validate.assert_called_once_with(transformer, torch.bfloat16)
             self.assertIs(models.flux_packing_backend, backend)
             self.assertIs(models.flux_transformer, transformer)
+            self.assertEqual(models.nvarc_encoder.hidden_state_indices, (18, 27, 36))
             self.register_attention.assert_called_once_with()
             self.assertFalse(any(p.requires_grad for p in models.nvarc_encoder.parameters()))
             self.assertFalse(any(p.requires_grad for p in models.vae_encoder.parameters()))

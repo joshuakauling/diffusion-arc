@@ -7,33 +7,41 @@ import json
 from pathlib import Path
 
 from .config import (
-    TrainingConfig, _natural, _path, _positive_integer, _string, _unique_fields,
-    _validate, load_training_config,
+    TrainingConfig, load_training_config, parse_training_config,
+    _choice_validator, _reject_duplicate_json_fields,
+    _resolve_config_path, _validate_against_schema, _validate_nonempty_string,
+    _validate_nonnegative_integer, _validate_positive_integer,
 )
 
 
 _SCHEMA = {
     "config_type": "ddp_benchmark",
     "schema_version": 1,
-    "training_recipe": _string,
-    "data": {
-        "split_directory": _string,
-        "view_name": _string,
-        "expected_source_count": _positive_integer,
+    "training_recipe": _validate_nonempty_string,
+    "execution": {
+        "distributed_strategy": _choice_validator("single_process", "ddp", "fsdp2"),
+        "gpu_count": _validate_positive_integer,
+        "flux_packing_algorithm": _choice_validator("legacy_bfd_v1", "balanced_release_v1"),
+        "rng_scheme": _choice_validator("legacy_stream_v1", "global_step_target_v1"),
     },
-    "repetitions": _positive_integer,
-    "smoke_steps": _positive_integer,
-    "warmup_steps": _natural,
-    "measured_steps": _positive_integer,
+    "data": {
+        "split_directory": _validate_nonempty_string,
+        "view_name": _validate_nonempty_string,
+        "expected_source_count": _validate_positive_integer,
+    },
+    "repetitions": _validate_positive_integer,
+    "smoke_steps": _validate_positive_integer,
+    "warmup_steps": _validate_nonnegative_integer,
+    "measured_steps": _validate_positive_integer,
 }
 
 
 @dataclass(frozen=True)
-class DdpBenchmarkConfig:
+class TrainingBenchmarkConfig:
     """A bounded run with global batch size and the original training schedule.
 
-    Only ``training.data`` points at the benchmark view. ``training.recipe`` and
-    ``training.path`` retain the complete input recipe for provenance; its epoch
+    The wrapper explicitly selects its execution strategy and benchmark view.
+    The recipe retains the original training schedule and objective; its epoch
     counts and validation/checkpoint cadences are not benchmark instructions.
     """
 
@@ -50,34 +58,43 @@ class DdpBenchmarkConfig:
         return self.warmup_steps + self.measured_steps
 
 
-def load_ddp_benchmark_config(path: str | Path) -> DdpBenchmarkConfig:
+def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
     """Validate the benchmark contract without loading checkpoints or data.
 
     All paths are relative to the file that declares them. The referenced
-    training_run is loaded normally, then only its normalized data selection is
-    replaced. Timing warmup never changes the learning-rate warmup schedule.
+    training_run is loaded normally, then explicit execution choices are validated
+    and the data view is selected. Timing warmup never changes the LR schedule.
     """
 
     config_path = Path(path).resolve()
     with config_path.open(encoding="utf-8") as handle:
-        payload = _validate(
-            json.load(handle, object_pairs_hook=_unique_fields), _SCHEMA, name="config",
+        payload = _validate_against_schema(
+            json.load(handle, object_pairs_hook=_reject_duplicate_json_fields), _SCHEMA, name="config",
         )
-    recipe_path = _path(
+    recipe_path = _resolve_config_path(
         payload["training_recipe"], base_directory=config_path.parent, name="training_recipe",
     )
     training = load_training_config(recipe_path, expected_type="training_run")
     if training.recipe["models"]["resume_from"] is not None:
         raise ValueError("DDP benchmarks require base checkpoints; resume_from must be null")
+    execution = payload["execution"]
+    recipe = training.recipe_dict()
+    recipe["execution"].update(
+        distributed_strategy=execution["distributed_strategy"],
+        flux_packing_algorithm=execution["flux_packing_algorithm"],
+    )
+    recipe["deployment"]["gpu_count"] = execution["gpu_count"]
+    recipe["flow"]["rng_scheme"] = execution["rng_scheme"]
+    training = parse_training_config(recipe, config_path=recipe_path)
     data = payload["data"]
     training = replace(training, data=replace(
         training.data,
-        split_directory=_path(
+        split_directory=_resolve_config_path(
             data["split_directory"], base_directory=config_path.parent, name="data.split_directory",
         ),
         view_name=data["view_name"],
     ))
-    config = DdpBenchmarkConfig(
+    config = TrainingBenchmarkConfig(
         training=training, expected_source_count=data["expected_source_count"],
         repetitions=payload["repetitions"],
         smoke_steps=payload["smoke_steps"], warmup_steps=payload["warmup_steps"],
@@ -96,4 +113,4 @@ def load_ddp_benchmark_config(path: str | Path) -> DdpBenchmarkConfig:
     return config
 
 
-__all__ = ["DdpBenchmarkConfig", "load_ddp_benchmark_config"]
+__all__ = ["TrainingBenchmarkConfig", "load_training_benchmark_config"]

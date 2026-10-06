@@ -15,7 +15,7 @@ from diffusion_arc.arc_data.augmentation import ArcAugmentationKey, ArcAugmentat
 from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model import NvarcBatchOutput, TARGET_LATENT_CHANNELS, TARGET_LATENT_TOKEN_COUNT
 from diffusion_arc.training.config import load_training_config
-from diffusion_arc.training.step.flow_sampling import EndpointFlowPolicy, EndpointFlowSampler, UniformFlowSampler, build_flow_sampler
+from diffusion_arc.training.step.flow_sampling import FlowTimeQuotaPolicy, QuotaFlowSampler, UniformFlowSampler, build_flow_sampler
 from diffusion_arc.training.step.flux_microbatch import build_flux_microbatch, compute_flux_microbatch_loss
 from diffusion_arc.training.step.flux_batching import FluxPackingPolicy
 from diffusion_arc.training.step.loss import LossResult, RegionLossWeights, RegionVelocityLoss, compute_region_velocity_loss, velocity_mse, build_velocity_loss
@@ -186,12 +186,12 @@ class PackedTrainerTests(unittest.TestCase):
         self.assertEqual(first.diagnostics.preparation.nvarc_batches, ((0,), (1,)))
         self.assertEqual((first.nvarc_calls, first.nvarc_tokens, first.vae_calls), (2,6,2))
         self.assertEqual((first.flux_text_tokens, first.flux_image_tokens, first.flux_joint_tokens), (8,2700,2708))
-        self.assertEqual(first.flux_forward_calls, len(first.diagnostics.flux_batches))
+        self.assertEqual(first.flux_forward_calls, len(first.diagnostics.flux_microbatch_plans))
         self.assertEqual(first.diagnostics.target_prefix_tokens, (2,4,2))
-        self.assertEqual(first.diagnostics.flux_batches[0].target_indices, (1,0,2))
-        self.assertEqual(tuple(target.loss for target in first.targets), (1.0,2.0,3.0))
-        self.assertEqual(tuple(target.context_pair_count for target in first.targets), (1,2,1))
-        for target in first.targets:
+        self.assertEqual(first.diagnostics.flux_microbatch_plans[0].target_indices, (1,0,2))
+        self.assertEqual(tuple(target.loss for target in first.target_metrics), (1.0,2.0,3.0))
+        self.assertEqual(tuple(target.context_pair_count for target in first.target_metrics), (1,2,1))
+        for target in first.target_metrics:
             self.assertLess(target.timestep, 1)
             self.assertTrue(target.has_boundary)
             for field in ('mse_canvas', 'mse_grid', 'mse_boundary', 'contribution_canvas',
@@ -268,7 +268,7 @@ class PackedTrainerTests(unittest.TestCase):
         self.assertEqual(float(model.weight.detach()), 1.0)
         self.assertIsNone(model.weight.grad)
 
-    def test_single_execution_never_requires_a_process_group(self):
+    def test_single_device_strategy_never_requires_a_process_group(self):
         model = ScalarTransformer()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
         with patch('torch.distributed.get_world_size', side_effect=AssertionError('process group used')), \
@@ -317,7 +317,7 @@ class PackedTrainerTests(unittest.TestCase):
             for regional in (False, True):
                 model = ToyVelocity()
                 generator = torch.Generator().manual_seed(167)
-                sampler = (EndpointFlowSampler(generator, EndpointFlowPolicy(6,2,3,1)) if endpoint
+                sampler = (QuotaFlowSampler(generator, FlowTimeQuotaPolicy(6,2,3,1)) if endpoint
                            else UniformFlowSampler(generator))
                 draws = []
                 def sample(latents):
@@ -332,13 +332,13 @@ class PackedTrainerTests(unittest.TestCase):
                 with patch('diffusion_arc.training.step.encoding._render_valid_grid_canvas', return_value=torch.zeros(1,1,1)), \
                      patch('diffusion_arc.model.flux.packing.predict_packed_flux_velocity', side_effect=lambda m,z,*a,**k:m(z)):
                     metrics = [trainer.step(_samples(3)[:2]), trainer.step(_samples(3)[2:])]
-                self.assertEqual([sum(t.timestep == 1 for t in m.targets) for m in metrics],
+                self.assertEqual([sum(t.timestep == 1 for t in m.target_metrics) for m in metrics],
                                  [2,1] if endpoint else [0,0])
                 for step, boundaries in zip(metrics, ((True,False,True,True,True,True),
                                                      (True,False,True)), strict=True):
-                    for target in step.targets:
+                    for target in step.target_metrics:
                         self.assertEqual(target.mse_grid is not None, regional)
-                    self.assertEqual(tuple(t.has_boundary for t in step.targets), boundaries)
+                    self.assertEqual(tuple(t.has_boundary for t in step.target_metrics), boundaries)
                 results[endpoint,regional] = draws, generator.get_state(), metrics
         for endpoint in (False,True):
             plain, regional = results[endpoint,False], results[endpoint,True]
@@ -353,8 +353,6 @@ class TrainingRecipeTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         payload = json.loads((ROOT / 'configs/training/arc_agi_1_epoch.json').read_text())
         payload['data']['expected_task_count'] = 26
-        payload['loop'].update(max_optimizer_steps=2, expected_target_count=78,
-                               expected_final_batch_target_count=30)
         payload['scheduler'].update(warmup_steps=2, first_update_warmup_fraction=0.5)
         path = Path(self.temp.name) / 'recipe.json'
         path.write_text(json.dumps(payload))
@@ -386,7 +384,7 @@ class TrainingRecipeTests(unittest.TestCase):
             for sources in (self.samples[:16], self.samples[16:]):
                 step = trainer.step(sources)
                 metrics.append(step)
-                plans.append(step.diagnostics.flux_batches)
+                plans.append(step.diagnostics.flux_microbatch_plans)
                 updates.append(tuple(p.detach().clone() for p in model.parameters()))
         return metrics, plans, flows, shapes, updates, generator.get_state()
 
@@ -413,9 +411,9 @@ class TrainingRecipeTests(unittest.TestCase):
             self.assertAlmostEqual(float(norm),step.gradient_norm,delta=3e-6)
             self.assertEqual(step.gradient_clipped,bool(norm>1))
             self.assertEqual(step.flux_forward_calls,len(plans[index]))
-            self.assertEqual(len(step.targets), step.target_count)
-            self.assertEqual(sum(t.timestep == 1 for t in step.targets),4 if index==0 else 3)
-            for slot, target in enumerate(step.targets):
+            self.assertEqual(len(step.target_metrics), step.target_count)
+            self.assertEqual(sum(t.timestep == 1 for t in step.target_metrics),4 if index==0 else 3)
+            for slot, target in enumerate(step.target_metrics):
                 self.assertEqual(target.timestep, float(times[slot]))
                 self.assertEqual(target.context_pair_count, 2 + slot % 3)
                 self.assertEqual(target.has_boundary, bool(regions.has_boundary[slot]))
@@ -449,7 +447,7 @@ class TrainingRecipeTests(unittest.TestCase):
                     self.assertAlmostEqual(actual.loss,expected.loss,delta=3e-6)
                     self.assertAlmostEqual(actual.gradient_norm,expected.gradient_norm,delta=3e-6)
                     torch.testing.assert_close(update,ref_update,rtol=2e-6,atol=1e-7)
-                    for target, ref_target in zip(actual.targets, expected.targets, strict=True):
+                    for target, ref_target in zip(actual.target_metrics, expected.target_metrics, strict=True):
                         self.assertEqual(target.timestep, ref_target.timestep)
                         self.assertEqual(target.context_pair_count, ref_target.context_pair_count)
                         self.assertEqual(target.has_boundary, ref_target.has_boundary)
@@ -466,7 +464,7 @@ class TrainingRecipeTests(unittest.TestCase):
                                     for _ in range(4))) for sample in self.samples)
         metrics, *_ = self.run_core()
         for step in metrics:
-            for target in step.targets:
+            for target in step.target_metrics:
                 self.assertFalse(target.has_boundary)
                 self.assertIsNone(target.mse_boundary)
                 self.assertEqual(target.contribution_boundary,0)

@@ -40,13 +40,15 @@ Construction clears gradients once
 before the first step and sets FLUX to training mode; NVARC/VAE remain frozen.
 
 `TrainStepResult` contains total loss, gradient/LR metrics, total step time
-including encoding and workload counters. Its `targets` tuple holds CPU-only
+including encoding and workload counters. Its `target_metrics` tuple holds CPU-only
 measurements in source order, then eligible target order: loss, sampled time,
 demonstration count, boundary presence, regional MSEs and weighted contributions.
 The tuple index also identifies the target in the packing diagnostics. Regional
 measurements are `None` when the objective does not provide them; a 30×30 target
 has `has_boundary=False`, no boundary MSE and zero regional boundary contribution.
 Detailed preparation and packing metadata live separately under `diagnostics`.
+Its `flux_microbatch_plans` describe target assignments; the distribution strategy
+turns them into a call schedule that can include FSDP padding calls.
 No tensors or autograd graphs leave the step.
 
 The outer loop owns global progress, logging and event timing. Logging derives
@@ -54,8 +56,13 @@ endpoint/uniform and demonstration groups from individual target measurements,
 including their counts and combinations across steps. The
 [training entrypoint](../../scripts/train.py) loads a validated
 `TrainingConfig` and passes it to
-[`run_training`](../../src/diffusion_arc/training/runner.py). The runner builds
-the components, consumes one complete epoch and checks its progress totals.
+[`run_training`](../../src/diffusion_arc/training/runner.py). The training runner attaches configured services to the shared
+[`training_loop.py`](../../src/diffusion_arc/training/training_loop.py), which builds components
+and executes the selected update count. The separate
+[`benchmark_runner.py`](../../src/diffusion_arc/training/benchmark_runner.py)
+uses the same `run_training_loop` function with `_BenchmarkCallbacks` instead of
+`_TrainingCallbacks`. These callback methods run synchronously at defined points
+in the loop; benchmark callbacks add measurements without training services.
 [`logging.py`](../../src/diffusion_arc/training/run/logging.py) derives the configured
 training scalars, reads selected hardware counters and sends one combined W&B
 record per update. Validation prepares fixed CPU caches once and evaluates them
@@ -71,16 +78,15 @@ and is not part of the production step.
 
 ## Selecting single-GPU or DDP execution
 
-Both strategies use the same runner and training services. Training-run recipes
-select execution explicitly. The new RNG and packing fields are optional and
-preserve historical defaults when omitted:
+Both strategies use the same training loop. Schema v2 recipes require explicit
+execution, RNG and packing choices; missing fields fail validation:
 
 | Recipe field | Native single GPU | DDP |
 | --- | --- | --- |
 | `execution.distributed_strategy` | `single_process` | `ddp` |
 | `deployment.gpu_count` | `1` | Requested rank count |
-| `flow.rng_scheme` | `legacy_stream_v1` (default), or `global_step_target_v1` | `global_step_target_v1` |
-| `execution.flux_packing_algorithm` | `legacy_bfd_v1` (default), or `balanced_release_v1` | `balanced_release_v1` (default), or `legacy_bfd_v1` |
+| `flow.rng_scheme` | `legacy_stream_v1`, or `global_step_target_v1` | `global_step_target_v1` |
+| `execution.flux_packing_algorithm` | `legacy_bfd_v1`, or `balanced_release_v1` | `balanced_release_v1`, or `legacy_bfd_v1` |
 
 Use `python scripts/train.py --config <recipe>` for native execution and
 `torchrun --standalone --nproc-per-node=N scripts/train.py --config <recipe>`
@@ -155,19 +161,30 @@ explicitly registers NVARC attention and selects the FLUX packing backend.
 
 ## Training module map
 
-`trainer.py` and `runner.py` are the two entrypoints. `step/` contains the
-components of one optimizer update; `run/` contains validation, logging and
+`runner.py` and `benchmark_runner.py` select training services or measurement
+hooks around `training_loop.py`. Both execute `Trainer.step()` for each optimizer update.
+`step/` contains update components; `run/` contains validation, logging and
 checkpoint services. Shared configuration, setup, data loading and optional
 profiling remain at the package root.
 
+`Trainer.distribution_strategy` is selected by `build_distribution_strategy()`.
+`DdpStrategy` and `FsdpStrategy` inherit shared rank communication and loss checks
+from `DistributedStrategy`, which extends `SingleDeviceStrategy`. These classes
+coordinate device/process execution; they do not select the loss or training recipe.
+The training loop creates `PackedFluxForward` before applying DDP or FSDP2.
+The trainer clips and clears gradients; the strategy only specifies whether
+clearing may set gradients to `None`, preserving DDP gradient bucket views.
+
 | Module | Responsibility |
 | --- | --- |
-| [`config.py`](../../src/diffusion_arc/training/config.py) | Parse baseline and run JSON formats directly into one `TrainingConfig`. |
+| [`config.py`](../../src/diffusion_arc/training/config.py) | Validate one strict schema v2 and construct `TrainingConfig`. |
 | [`setup.py`](../../src/diffusion_arc/training/setup.py) | Select the device, seed RNGs, load frozen/trainable models, and construct AdamW. |
 | [`data.py`](../../src/diffusion_arc/training/data.py) | Build the dataset, DataLoader and whole-sequence optimizer batches; retain auxiliary CPU collation. |
-| [`trainer.py`](../../src/diffusion_arc/training/trainer.py) | Execute one complete update from supplied sequences and return aggregated step metrics. |
-| [`execution/`](../../src/diffusion_arc/training/execution/) | Implement native and DDP forward, synchronization, loss scaling, clipping and gradient cleanup. |
-| [`runner.py`](../../src/diffusion_arc/training/runner.py) | Build or restore components, iterate the remaining epoch and run scheduled evaluation/checkpoint events. |
+| [`trainer.py`](../../src/diffusion_arc/training/trainer.py) | Execute one complete update from supplied sequences, clip and clear gradients, and return aggregated step metrics. |
+| [`distribution_strategy/`](../../src/diffusion_arc/training/distribution_strategy/) | Provide `SingleDeviceStrategy`, `DdpStrategy` and `FsdpStrategy` for model calls, microbatch coordination, gradient synchronization, loss scaling and gradient cleanup settings. |
+| [`runner.py`](../../src/diffusion_arc/training/runner.py) | Attach optional logging, validation and checkpoint services to the shared training loop. |
+| [`benchmark_runner.py`](../../src/diffusion_arc/training/benchmark_runner.py) | Attach timing and profiling hooks without changing training settings. |
+| [`training_loop.py`](../../src/diffusion_arc/training/training_loop.py) | Build models, data and optimizer; execute the common update loop and resume cursor. |
 | [`distributed.py`](../../src/diffusion_arc/training/distributed.py) | Own rank/device context, process-group lifetime and coordinated primary-rank services. |
 | [`distributed_data.py`](../../src/diffusion_arc/training/distributed_data.py) | Plan global batches and assign complete sources to ranks, including resume cursors. |
 | [`profiling.py`](../../src/diffusion_arc/training/profiling.py) | Record explicit benchmark measurements and optional profiler ranges. |
@@ -181,6 +198,11 @@ profiling remain at the package root.
 | [`run/validation.py`](../../src/diffusion_arc/training/run/validation.py) | Verify the held-out bundle, prepare fixed CPU caches, evaluate loss and score generated predictions. |
 | [`run/checkpointing.py`](../../src/diffusion_arc/training/run/checkpointing.py) | Save HF transformer weights and training state, verify checkpoint contracts, restore RNG/optimizer state and apply retention. |
 | [`run/experiment.py`](../../src/diffusion_arc/training/run/experiment.py) | Attach bounded benchmark, memory and profiler measurements to the shared runner. |
+
+Trainer phases use `training_range(...)` for Torch Profiler and Nsight. There is
+no per-microbatch stage-log callback. CUDA memory history still captures allocator
+events and saves snapshots on failure or run completion; selected first-backward
+snapshots are no longer supported.
 
 Import components from their owning modules. Loading `training.config` requires
 neither PyTorch nor model initialization. The outer caller selects and constructs
@@ -206,20 +228,22 @@ uses standard DDP averaging without custom communication hooks or `join()`.
 Returned losses, targets, timings and workload counters describe the local rank;
 the outer caller owns aggregation. Gradient norms describe synchronized gradients.
 
-### Bounded DDP runner
+### Bounded training benchmark
 
-[`scripts/train_ddp.py`](../../scripts/train_ddp.py) starts a training-only
-experiment from the existing recipe. Run it with `torchrun`; `--max-steps`
-defaults to three global updates:
+[`scripts/benchmark_training.py`](../../scripts/benchmark_training.py) starts a
+benchmark with the recipe's configured execution strategy. For a DDP recipe,
+run it with `torchrun`; `--max-steps` defaults to three global updates:
 
 ```bash
-torchrun --standalone --nproc-per-node=2 scripts/train_ddp.py \
+torchrun --standalone --nproc-per-node=2 scripts/benchmark_training.py \
   --config configs/training/arc_agi_1_epoch.json --max-steps 3
 ```
 
-Use `--nproc-per-node=1` for the same execution path on one GPU. The runtime
-selects `cuda:LOCAL_RANK`, initializes NCCL, wraps `PackedFluxForward` in DDP
-and destroys the process group on exit. Existing Hopper/FA3 requirements apply.
+For a one-GPU DDP recipe, use `--nproc-per-node=1` and
+`deployment.gpu_count=1`. `TrainingRuntime` selects `cuda:LOCAL_RANK`, initializes
+NCCL and destroys the process group on exit; the DDP execution strategy wraps
+`PackedFluxForward`. Existing Hopper/FA3 requirements apply.
+`scripts/train_ddp.py` remains a compatibility alias for this benchmark entrypoint.
 
 [`distributed_data.py`](../../src/diffusion_arc/training/distributed_data.py)
 plans global target batches from the ordered dataset keys and divides whole
@@ -227,25 +251,32 @@ sources between ranks. Each rank loads only its assigned sequences. The global
 batch size, source order and final partial batch are preserved; sources are
 never repeated or dropped to balance ranks. A batch with fewer sources than
 ranks is rejected during preflight, including an undersized epoch tail.
+`RankBatchPlan.epoch_batch_index` is zero-based and retains the original batch
+identity during diagnostic replay. The one-based `diagnostic_batch_number`
+selects that batch; completed optimizer updates are counted separately.
 
-[`step/distributed_flow.py`](../../src/diffusion_arc/training/step/distributed_flow.py)
+[`step/indexed_flow.py`](../../src/diffusion_arc/training/step/indexed_flow.py)
 assigns times and exact endpoint/high-noise quotas globally, then generates only local
 noise tensors. Seeds depend on the global step and target position, so target
 draws agree across rank layouts on the same device type and package versions.
 Native execution can select the same indexed draws; historical recipes retain
 their stateful RNG stream. The step limit preserves the recipe's full-epoch
 learning-rate schedule and endpoint policy.
+`FlowTimeQuotaPolicy` defines the endpoint and high-noise quotas shared by
+`QuotaFlowSampler` and `IndexedFlowSampler`; the latter derives draws from explicit
+batch and target identities independently of the distribution strategy.
 
-[`ddp_runner.py`](../../src/diffusion_arc/training/ddp_runner.py) emits JSON on
-rank zero: input recipe, effective training settings, runtime/source identity,
-and target-weighted global loss with per-rank counts, times and peak allocation
+[`run_training_benchmark`](../../src/diffusion_arc/training/benchmark_runner.py)
+attaches `BenchmarkInstrumentation`, which emits JSON on rank zero: input recipe,
+effective training settings, runtime/source identity, and target-weighted global
+loss with per-rank counts, times and peak allocation
 and reservation. Rank and CUDA synchronization precede each timed step; CUDA
 completion precedes its end timestamp. The maximum rank duration includes data
 retrieval and `Trainer.step`, including its communication, but excludes the outer
 barrier, diagnostic-record collective and output. CPU prefetch starts before the
 loop, as in the single-GPU benchmark.
-This compatibility entrypoint attaches bounded experiment services to the common
-runner. It explicitly omits validation, sampling, W&B and checkpoint saves, and
+The benchmark entrypoint attaches bounded measurement callbacks to the common
+training loop. It explicitly omits validation, sampling, W&B and checkpoint saves, and
 rejects resume requests. Use `scripts/train.py` for the complete DDP lifecycle.
 
 ### Prepared smoke and benchmark runs
@@ -390,11 +421,16 @@ doubles; full-model GPU behavior is outside this test.
   a full-model GPU smoke run of that lifecycle remains pending. The separate
   [DDP report](../performance/ddp.md) records prior bounded GPU/NCCL/FA3 and
   profiling experiments. FSDP2 and activation checkpointing remain pending.
-- Baseline JSON uses schema v10; the finite epoch recipe uses schema v1 with
-  `config_type="training_run"`. Both normalize to `TrainingConfig`; entrypoints
-  explicitly restrict the supported type. Older baseline schemas and NVARC
-  scheduler/bucket options and `loop.nvarc_source_batch_size` remain rejected.
-  NVARC execution uses `nvarc_max_tokens`; optimizer size remains a target count.
+- All training, benchmark and profiling workloads use schema v2 with
+  `config_type="training_run"`. Loss, timestep sampling, scheduler, execution
+  strategy and packing are explicit choices. `validation`, `logging`,
+  `checkpointing`, `scheduler` and `benchmark` accept explicit `null` when
+  disabled. `loop.epochs: 1` selects one complete prepared augmentation epoch;
+  `loop.max_steps` selects a bounded prefix, with the other field set to `null`.
+  Further epochs require separately prepared augmentations and continuation.
+  Derived target and step counts are not user inputs. Historical saved epoch
+  recipes have an explicit checkpoint migration; new input files are never
+  silently completed or migrated.
 - Training always uses FLUX packing with an explicit token budget. Padded
   training, fixed FLUX microbatch sizes, and measured padding-cost catalogs
   have been removed; retired fields are rejected even when set to null.

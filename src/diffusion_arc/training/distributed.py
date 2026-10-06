@@ -13,7 +13,9 @@ from .setup import prepare_device
 
 
 @dataclass(frozen=True)
-class DistributedRuntime:
+class TrainingRuntime:
+    """Device, rank information, and collectives for single-process or distributed training."""
+
     rank: int
     local_rank: int
     world_size: int
@@ -25,7 +27,7 @@ class DistributedRuntime:
     def is_primary(self) -> bool:
         return self.rank == 0
 
-    def gather(self, value):
+    def all_gather_objects(self, value):
         """Gather small CPU metadata, leaving model tensors on their devices."""
         if self.process_group is None:
             return [value]
@@ -33,7 +35,7 @@ class DistributedRuntime:
         dist.all_gather_object(values, value, group=self.process_group)
         return values
 
-    def primary(self, action):
+    def run_on_primary_and_broadcast(self, action):
         """Run a side effect on rank zero and share its result or failure."""
         if self.process_group is None:
             return action()
@@ -63,7 +65,7 @@ def _torchrun_ranks() -> tuple[int, int, int]:
             int(os.environ[name]) for name in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE")
         )
     except (KeyError, ValueError) as error:
-        raise ValueError("start the DDP runner with torchrun (RANK, LOCAL_RANK, WORLD_SIZE, LOCAL_WORLD_SIZE)") from error
+        raise ValueError("start the distributed runner with torchrun (RANK, LOCAL_RANK, WORLD_SIZE, LOCAL_WORLD_SIZE)") from error
     if not (0 <= rank < world_size and 0 <= local_rank < local_world_size <= world_size):
         raise ValueError("invalid torchrun rank/world-size settings")
     if local_world_size > torch.cuda.device_count():
@@ -80,15 +82,18 @@ def distributed_runtime(config: TrainingConfig, *, timeout_seconds: int = 120):
     No barrier is used during error cleanup.
     """
     if dist.is_initialized():
-        raise RuntimeError("the DDP runner must own its process group")
+        raise RuntimeError("the distributed runner must own its process group")
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
+    strategy = config.recipe["execution"]["distributed_strategy"]
+    if strategy not in ("ddp", "fsdp2"):
+        raise ValueError("distributed_runtime requires ddp or fsdp2 execution")
     rank, local_rank, world_size = _torchrun_ranks()
     # Each rank gets the same CPU tensor parallelism, independent of container size.
     torch.set_num_threads(8)
     device = prepare_device(replace(config, device=f"cuda:{local_rank}"))
     dist.init_process_group("nccl", device_id=device, timeout=timedelta(seconds=timeout_seconds))
     try:
-        yield DistributedRuntime(rank, local_rank, world_size, device, dist.group.WORLD)
+        yield TrainingRuntime(rank, local_rank, world_size, device, dist.group.WORLD, strategy)
     finally:
         dist.destroy_process_group()

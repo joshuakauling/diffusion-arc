@@ -20,7 +20,6 @@ import torch
 from diffusion_arc._constants import (
     NVARC_CONTEXT_WIDTH,
     NVARC_HIDDEN_SIZE,
-    NVARC_HIDDEN_STATE_INDICES,
     NVARC_MAX_TOKENS,
     NVARC_PAD_TOKEN_ID,
     NVARC_VOCAB_SIZE,
@@ -189,7 +188,6 @@ __all__ = [
     "validate_target_latents",
     "NVARC_CONTEXT_WIDTH",
     "NVARC_HIDDEN_SIZE",
-    "NVARC_HIDDEN_STATE_INDICES",
     "NVARC_MAX_TOKENS",
     "NVARC_PAD_TOKEN_ID",
     "NVARC_VOCAB_SIZE",

@@ -31,7 +31,7 @@ class PackingLayout:
     """
     text_lengths: tuple[int, ...]
     image_tokens: int
-    cumulative: torch.Tensor
+    joint_token_offsets: torch.Tensor
     joint_order: torch.Tensor
     text_indices: torch.Tensor
     image_indices: torch.Tensor
@@ -41,7 +41,7 @@ class PackingLayout:
     text_positions: torch.Tensor
 
     @property
-    def maximum(self):
+    def max_joint_sequence_length(self):
         return max(self.text_lengths) + self.image_tokens
 
 
@@ -124,8 +124,8 @@ class Flash3Backend:
 
     def __call__(self, q, k, v, layout):
         return self.kernel(
-            q, k, v, cu_seqlens_q=layout.cumulative, cu_seqlens_k=layout.cumulative,
-            max_seqlen_q=layout.maximum, max_seqlen_k=layout.maximum,
+            q, k, v, cu_seqlens_q=layout.joint_token_offsets, cu_seqlens_k=layout.joint_token_offsets,
+            max_seqlen_q=layout.max_joint_sequence_length, max_seqlen_k=layout.max_joint_sequence_length,
             softmax_scale=q.shape[-1] ** -0.5, causal=False,
         )
 
@@ -202,7 +202,7 @@ class PackedSingleProcessor:
 
 
 @contextmanager
-def packed_processors(model, layout, backend):
+def use_packed_attention_processors(model, layout, backend):
     """Use the existing processor extension point; restore even after failure."""
     if model.gradient_checkpointing:
         raise ValueError("packed FLUX does not support gradient checkpointing")
@@ -260,6 +260,11 @@ def predict_packed_flux_velocity(
     All inputs and layout metadata must already share the transformer device.
     Model parameters and their names remain unchanged, including checkpoint keys.
     """
+    if isinstance(transformer, PackedFluxForward):
+        if transformer.compute_dtype != compute_dtype or transformer.backend is not backend:
+            raise ValueError("packed forward precision/backend must match the caller")
+        # Enter the outer FSDP hooks during validation and sampling as in training.
+        return transformer(latents, text, image_positions, timesteps, layout)
     batch = len(layout.text_lengths)
     if tuple(latents.shape) != (batch, layout.image_tokens, transformer.config.in_channels):
         raise ValueError("latents disagree with the packed example/image layout")
@@ -270,11 +275,11 @@ def predict_packed_flux_velocity(
     if timesteps.shape != (batch,) or not timesteps.is_floating_point():
         raise ValueError("timesteps must contain one floating-point value per example")
     device = next(transformer.parameters()).device
-    if any(tensor.device != device for tensor in (latents, text, image_positions, timesteps, layout.cumulative)):
+    if any(tensor.device != device for tensor in (latents, text, image_positions, timesteps, layout.joint_token_offsets)):
         raise ValueError("packed inputs, layout and transformer must share one device")
     if compute_dtype not in (torch.bfloat16, torch.float32):
         raise ValueError("packed velocity supports BF16 compute or explicit FP32 reference tests")
-    with packed_processors(transformer, layout, backend), torch.autocast(
+    with use_packed_attention_processors(transformer, layout, backend), torch.autocast(
         device_type=device.type, dtype=compute_dtype, enabled=compute_dtype != torch.float32,
     ):
         output = _forward_packed_flux(transformer, text, latents, image_positions, timesteps, layout)

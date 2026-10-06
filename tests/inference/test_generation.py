@@ -14,7 +14,7 @@ from diffusion_arc.arc_data import (
     render_grid_canvas,
 )
 from diffusion_arc.inference import generation
-from diffusion_arc.inference.conditioning import PackedGenerationInput, sample_conditioning_noise
+from diffusion_arc.inference.conditioning import PackedGenerationInput, sample_query_latent_noise
 from diffusion_arc.inference import (
     continue_arc_batch,
     generate_arc_batch,
@@ -308,7 +308,7 @@ class GenerationTests(unittest.TestCase):
 def _packed_input(index=0, *, task_id=None, query_index=0, length=2, value=0.0):
     return PackedGenerationInput(
         task_id=task_id or f"task-{index}", query_index=query_index,
-        text=torch.full((length, 7680), value, dtype=torch.bfloat16),
+        text_hidden_states=torch.full((length, 7680), value, dtype=torch.bfloat16),
     )
 
 
@@ -351,15 +351,15 @@ class PackedGenerationTests(unittest.TestCase):
         torch.set_num_threads(1)
         self.addCleanup(torch.set_num_threads, old_threads)
         model = tiny_model(in_channels=128, out_channels=128, joint_attention_dim=7680)
-        targets = tuple(replace(_packed_input(i, length=i + 2), text=_packed_input(i, length=i + 2).text.float())
+        targets = tuple(replace(_packed_input(i, length=i + 2), text_hidden_states=_packed_input(i, length=i + 2).text_hidden_states.float())
                         for i in range(2))
         decoder = _PackedDecoder()
         generation.generate_packed_arc_samples(model, decoder, targets, ((0, 1),), steps=2,
             seeds=(50, 51), compute_dtype=torch.float32, backend=SegmentedReference())
         for index, target in enumerate(targets):
             for sample_index, seed in enumerate((50, 51)):
-                initial = sample_conditioning_noise(target, seed, ("generation", sample_index), "cpu").unsqueeze(0)
-                reference = continue_arc_batch(model, _PackedDecoder(), pad_flux_text_prefixes((target.text,)),
+                initial = sample_query_latent_noise(target, seed, ("generation", sample_index), "cpu").unsqueeze(0)
+                reference = continue_arc_batch(model, _PackedDecoder(), pad_flux_text_prefixes((target.text_hidden_states,)),
                     initial_latents=initial, timestep_schedule=linear_timestep_schedule(2),
                     compute_dtype=torch.float32)
                 torch.testing.assert_close(decoder.states[sample_index][index], reference.final_latents[0],

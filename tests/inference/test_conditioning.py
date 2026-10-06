@@ -9,7 +9,7 @@ from torch import nn
 
 from diffusion_arc.arc_data import ArcTokenizedEvaluationSample
 from diffusion_arc.inference import PackedGenerationInput, prepare_evaluation_text_inputs
-from diffusion_arc.inference.conditioning import sample_conditioning_noise
+from diffusion_arc.inference.conditioning import sample_query_latent_noise
 from diffusion_arc.model.contracts import TARGET_LATENT_SHAPE
 from diffusion_arc.model import NvarcBatchOutput
 
@@ -109,7 +109,7 @@ class EvaluationConditioningTests(unittest.TestCase):
                     TARGET_LATENT_SHAPE,
                     generator=torch.Generator().manual_seed(expected_seed),
                 )
-                actual = sample_conditioning_noise(query, seed, purpose, "cpu")
+                actual = sample_query_latent_noise(query, seed, purpose, "cpu")
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 

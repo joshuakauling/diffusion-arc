@@ -61,17 +61,17 @@ def source_snapshot(root: Path) -> tuple[bytes, dict]:
                     "scripts/cloud/train_runpod.py", "scripts/cloud/launch_runpod.py"}
         if missing := required - files.keys():
             raise ValueError(f"Source snapshot is incomplete: {sorted(missing)}")
-        manifest = {
+        source_snapshot_manifest = {
             "schema_version": 1, "files": files,
             "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
             "git_branch": subprocess.check_output(["git", "branch", "--show-current"], cwd=root, text=True).strip(),
             "working_tree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=root)),
         }
-        content = json.dumps(manifest, sort_keys=True).encode()
+        content = json.dumps(source_snapshot_manifest, sort_keys=True).encode()
         info = tarfile.TarInfo("_source.json")
         info.size, info.mode = len(content), 0o644
         archive.addfile(info, io.BytesIO(content))
-    return gzip.compress(buffer.getvalue(), mtime=0), manifest
+    return gzip.compress(buffer.getvalue(), mtime=0), source_snapshot_manifest
 
 
 def ssh_arguments(command: str) -> list[str]:
@@ -182,10 +182,10 @@ def receive_and_start(digest: str, workspace: str, request_json: str) -> None:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.extractfile(member) as source, target.open("wb") as output:
                     output.write(source.read())
-        manifest = json.loads((staged / "_source.json").read_text())
-        if seen != set(manifest["files"]) | {"_source.json"}:
+        source_snapshot_manifest = json.loads((staged / "_source.json").read_text())
+        if seen != set(source_snapshot_manifest["files"]) | {"_source.json"}:
             raise ValueError("Source archive differs from its file inventory")
-        for name, item in manifest["files"].items():
+        for name, item in source_snapshot_manifest["files"].items():
             if hashlib.sha256((staged / name).read_bytes()).hexdigest() != item["sha256"]:
                 raise ValueError(f"Source file checksum mismatch: {name}")
         if destination.exists() or destination.is_symlink():
@@ -531,16 +531,16 @@ def main(argv=None) -> int:
         recipe_config = load_training_config(args.config, expected_type="training_run")
         if recipe_config.recipe["models"]["initialization"] != "transformer_weights":
             parser.error("finetune requires a transformer_weights initialization config")
-    content, manifest = source_snapshot(ROOT)
+    content, source_snapshot_manifest = source_snapshot(ROOT)
     try:
         relative_config = args.config.resolve().relative_to(ROOT)
     except ValueError:
         parser.error("--config must be inside this repository")
-    if relative_config.as_posix() not in manifest["files"]:
+    if relative_config.as_posix() not in source_snapshot_manifest["files"]:
         parser.error("--config must be a non-ignored JSON file inside this repository's configs directory")
     if args.command == "diagnose":
         dependency = (args.config.resolve().parent / diagnostic["training_config"]).resolve().relative_to(ROOT)
-        if dependency.as_posix() not in manifest["files"]:
+        if dependency.as_posix() not in source_snapshot_manifest["files"]:
             parser.error("diagnostic training_config must be included in the source snapshot")
     digest = hashlib.sha256(content).hexdigest()
     arguments = [args.command, "--run-name", args.run_name, "--workspace", args.workspace]
@@ -555,7 +555,7 @@ def main(argv=None) -> int:
     job_id = args.run_name + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     request = {"job_id": job_id, "arguments": arguments}
     plan = {**request, "source_sha256": digest, "source_bytes": len(content),
-            "source_file_count": len(manifest["files"]), "ssh": ssh, "workspace": args.workspace}
+            "source_file_count": len(source_snapshot_manifest["files"]), "ssh": ssh, "workspace": args.workspace}
     if args.command == "diagnose":
         plan["diagnostic"] = diagnostic
     if args.command == "finetune":
@@ -570,7 +570,7 @@ def main(argv=None) -> int:
     artifacts.mkdir(parents=True)
     (artifacts / "source.tar.gz").write_bytes(content)
     (artifacts / "launch.json").write_text(json.dumps(plan, indent=2) + "\n")
-    print(f"Job {job_id}: uploading {len(manifest['files'])} source files ({len(content) / 1024**2:.2f} MiB)", flush=True)
+    print(f"Job {job_id}: uploading {len(source_snapshot_manifest['files'])} source files ({len(content) / 1024**2:.2f} MiB)", flush=True)
     try:
         result = remote_python(ssh, args.python, (pod_environment, receive_and_start),
                                "receive_and_start(*sys.argv[1:])", [digest, args.workspace, json.dumps(request)],

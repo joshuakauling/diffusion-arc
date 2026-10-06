@@ -14,15 +14,16 @@ from .data import ArcTrainingDataset
 
 
 @dataclass(frozen=True)
-class DistributedBatch:
+class RankBatchPlan:
     """One rank's ordered sources and targets in a global optimizer batch.
 
-    ``step`` is zero-based. Source indices address the complete dataset; target
+    ``epoch_batch_index`` is zero-based and retains the original batch identity
+    when replayed for diagnostics. Source indices address the complete dataset; target
     indices address the eligible targets in this global batch, before packing.
     Every rank receives at least one whole source, without padding or dropping.
     """
 
-    step: int
+    epoch_batch_index: int
     source_indices: tuple[int, ...]
     target_indices: tuple[int, ...]
     global_target_count: int
@@ -34,7 +35,7 @@ def plan_distributed_batches(
     optimizer_batch_size: int,
     rank: int,
     world_size: int,
-) -> tuple[DistributedBatch, ...]:
+) -> tuple[RankBatchPlan, ...]:
     """Preserve ordered, whole-source batch boundaries across world sizes.
 
     Like ``iter_optimizer_batches``, a source must fit the current target
@@ -63,7 +64,7 @@ def plan_distributed_batches(
         if count <= 0:
             raise ValueError(f"target_counts[{index}] must be positive")
 
-    plans: list[DistributedBatch] = []
+    plans: list[RankBatchPlan] = []
 
     def append_batch(start: int, end: int, global_count: int) -> None:
         source_count = end - start
@@ -77,8 +78,8 @@ def plan_distributed_batches(
         local_end = local_start + quotient + int(rank < remainder)
         target_start = sum(counts[start:local_start])
         target_end = target_start + sum(counts[local_start:local_end])
-        plans.append(DistributedBatch(
-            step=len(plans),
+        plans.append(RankBatchPlan(
+            epoch_batch_index=len(plans),
             source_indices=tuple(range(local_start, local_end)),
             target_indices=tuple(range(target_start, target_end)),
             global_target_count=global_count,
@@ -108,9 +109,9 @@ def build_distributed_dataloader(
     world_size: int,
     expected_source_count: int | None = None,
     start_step: int = 0,
-    diagnostic_batch: int | None = None,
+    diagnostic_batch_number: int | None = None,
     diagnostic_repeats: int = 3,
-) -> tuple[DataLoader, tuple[DistributedBatch, ...]]:
+) -> tuple[DataLoader, tuple[RankBatchPlan, ...]]:
     """Preflight the global view, then materialize only this rank's sources.
 
     The prepared recipe already defines the global source order. The returned
@@ -118,7 +119,8 @@ def build_distributed_dataloader(
     exactly ``len(plan.source_indices)`` sequences for each optimizer step.
     Workers use an independent RNG and never initialize a CUDA context.
     start_step skips completed epoch-relative updates without renumbering the
-    remaining plans or reading their source payloads.
+    remaining plans or reading their source payloads. ``diagnostic_batch_number``
+    selects a one-based batch number to replay with its original flow RNG identity.
     """
 
     if config.config_type != "training_run" or config.recipe is None:
@@ -127,8 +129,8 @@ def build_distributed_dataloader(
         raise ValueError("distributed batch planning requires shuffle=False")
     if type(start_step) is not int or start_step < 0:
         raise ValueError("start_step must be a nonnegative integer")
-    if diagnostic_batch is not None and start_step:
-        raise ValueError("diagnostic_batch cannot be combined with a resume start_step")
+    if diagnostic_batch_number is not None and start_step:
+        raise ValueError("diagnostic_batch_number cannot be combined with a resume start_step")
     dataset = ArcTrainingDataset(
         split_directory=config.data.split_directory,
         view_name=config.data.view_name,
@@ -136,10 +138,10 @@ def build_distributed_dataloader(
     )
     expected_sources = (config.recipe["data"]["expected_task_count"]
                         if expected_source_count is None else expected_source_count)
-    if type(expected_sources) is not int or expected_sources <= 0:
+    if expected_sources is not None and (type(expected_sources) is not int or expected_sources <= 0):
         raise ValueError("expected_source_count must be a positive integer")
     keys = dataset.keys
-    if len(keys) != expected_sources or len({key.task_id for key in keys}) != expected_sources:
+    if expected_sources is not None and (len(keys) != expected_sources or len({key.task_id for key in keys}) != expected_sources):
         raise ValueError(f"training view must contain exactly {expected_sources} distinct tasks")
     if any(len(key.augmentation.pair_indices) != config.recipe["data"]["pairs_per_sequence"]
            for key in keys):
@@ -153,13 +155,13 @@ def build_distributed_dataloader(
     )
     if start_step > len(plans):
         raise ValueError("start_step exceeds the epoch's optimizer batch count")
-    if diagnostic_batch is not None:
-        if type(diagnostic_batch) is not int or not 1 <= diagnostic_batch <= len(plans):
-            raise ValueError("diagnostic_batch must select an existing one-based global batch")
+    if diagnostic_batch_number is not None:
+        if type(diagnostic_batch_number) is not int or not 1 <= diagnostic_batch_number <= len(plans):
+            raise ValueError("diagnostic_batch_number must select an existing one-based global batch")
         if type(diagnostic_repeats) is not int or diagnostic_repeats <= 0:
             raise ValueError("diagnostic_repeats must be positive")
-        # Preserve the original step/target identities for flow RNG; load only this batch.
-        plans = (plans[diagnostic_batch - 1],) * diagnostic_repeats
+        # Preserve the original batch/target identities for flow RNG; load only this batch.
+        plans = (plans[diagnostic_batch_number - 1],) * diagnostic_repeats
     else:
         plans = plans[start_step:]
     local_indices = tuple(index for plan in plans for index in plan.source_indices)
@@ -183,4 +185,4 @@ def build_distributed_dataloader(
     return loader, plans
 
 
-__all__ = ["DistributedBatch", "plan_distributed_batches", "build_distributed_dataloader"]
+__all__ = ["RankBatchPlan", "plan_distributed_batches", "build_distributed_dataloader"]

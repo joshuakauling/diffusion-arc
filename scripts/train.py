@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train or resume a configured single-GPU or torchrun DDP epoch."""
+"""Train or resume a configured single-GPU, DDP, or FSDP2 epoch."""
 
 from __future__ import annotations
 

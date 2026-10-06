@@ -1,4 +1,4 @@
-"""Global endpoint quotas and exact flow assignment across rank and pack layouts."""
+"""Global time quotas and exact flow assignment across rank and pack layouts."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 import torch
 
-from diffusion_arc.training.step.distributed_flow import DistributedFlowSampler, build_distributed_flow_sampler
+from diffusion_arc.training.step.indexed_flow import IndexedFlowSampler, build_indexed_flow_sampler
 
 
-class DistributedFlowTests(unittest.TestCase):
+class IndexedFlowTests(unittest.TestCase):
     def test_existing_ddp_seed_version_preserves_recorded_endpoint_draws(self):
         # Recorded from the original DDP implementation at 62674fd on CPU.
-        flows = DistributedFlowSampler(167, 2, 3, (0, 1, 2), 1)((torch.zeros(900, 128),) * 3)
+        flows = IndexedFlowSampler(167, 2, 3, (0, 1, 2), 1)((torch.zeros(900, 128),) * 3)
         torch.testing.assert_close(torch.cat([flow.timesteps for flow in flows]),
                                    torch.tensor([1.0, 0.2697577476501465, 0.959400475025177]),
                                    atol=0, rtol=0)
@@ -47,7 +47,7 @@ class DistributedFlowTests(unittest.TestCase):
         ):
             with self.subTest(count=count):
                 clean = tuple(torch.full((900, 128), i / 100) for i in range(count))
-                native = build_distributed_flow_sampler(
+                native = build_indexed_flow_sampler(
                     config, step=7, global_target_count=count, target_indices=tuple(range(count)),
                 )
                 self.assertEqual((native.endpoint_count, native.high_noise_count), (endpoints, high_noise))
@@ -58,7 +58,7 @@ class DistributedFlowTests(unittest.TestCase):
                     self.assertEqual(int(((times > 0.8) & (times < 1)).sum()), high_noise)
                     self.assertEqual(int((times == 0.25).sum()), count - endpoints - high_noise)
                     for indices in partitions:
-                        sampler = build_distributed_flow_sampler(
+                        sampler = build_indexed_flow_sampler(
                             config, step=7, global_target_count=count, target_indices=indices,
                         )
                         for index, actual in zip(indices, sampler(tuple(clean[i] for i in indices))):
@@ -68,7 +68,7 @@ class DistributedFlowTests(unittest.TestCase):
 
     def test_observer_receives_actual_draws_without_changing_sampling(self):
         clean = tuple(torch.full((900, 128), i / 10) for i in range(3))
-        sampler = DistributedFlowSampler(167, 0, 3, (0, 1, 2), 1)
+        sampler = IndexedFlowSampler(167, 0, 3, (0, 1, 2), 1)
         captured = []
         observed = replace(sampler, observe_draw=lambda i, t, n: captured.append((i, t.clone(), n.clone())))(clean)
         for expected, actual, (index, time, noise) in zip(sampler(clean), observed, captured, strict=True):
@@ -78,7 +78,7 @@ class DistributedFlowTests(unittest.TestCase):
 
     def test_global_draws_survive_partition_reordering_and_unrelated_rng_draws(self):
         clean = tuple(torch.full((900, 128), i / 10) for i in range(7))
-        sampler = DistributedFlowSampler(167, 2, 7, tuple(range(7)), 3)
+        sampler = IndexedFlowSampler(167, 2, 7, tuple(range(7)), 3)
         before = torch.random.get_rng_state().clone()
         reference = sampler(clean)
         torch.testing.assert_close(torch.random.get_rng_state(), before, atol=0, rtol=0)
@@ -100,7 +100,7 @@ class DistributedFlowTests(unittest.TestCase):
         self.assertFalse(torch.equal(reference[0].target_velocity, reference[1].target_velocity))
 
     def test_rejects_invalid_plan_and_encoding_count(self):
-        sampler = DistributedFlowSampler(167, 0, 4, (0, 1), 1)
+        sampler = IndexedFlowSampler(167, 0, 4, (0, 1), 1)
         for settings in (dict(seed=-1), dict(step=-1), dict(global_target_count=0),
                          dict(endpoint_count=5), dict(target_indices=()),
                          dict(high_noise_count=4), dict(high_noise_count=-1), dict(high_noise_count=True),

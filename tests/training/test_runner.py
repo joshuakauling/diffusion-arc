@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
-from diffusion_arc.training import runner
+from diffusion_arc.model.flux.packing import PackedFluxForward
+from diffusion_arc.training import training_loop, runner
 from diffusion_arc.training.run import validation as validation_module
 from diffusion_arc.training.config import load_training_config
 from diffusion_arc.training.step.loss import RegionLossWeights
@@ -41,7 +42,7 @@ def _step_result(sources):
         nvarc_tokens=len(sources) * 100, nvarc_calls=1, vae_calls=1,
         flux_text_tokens=target_count * 200, flux_image_tokens=target_count * 900,
         flux_joint_tokens=target_count * 1100, flux_forward_calls=6,
-        targets=tuple(TargetMetrics(
+        target_metrics=tuple(TargetMetrics(
             loss=1.0, timestep=1.0 if index < (4 if target_count == 48 else 3) else 0.5,
             context_pair_count=2 + index % 3, has_boundary=True,
             mse_canvas=1.0, mse_grid=1.0, mse_boundary=1.0,
@@ -63,8 +64,8 @@ class RunnerTests(unittest.TestCase):
             self.config.path.write_text(json.dumps(recipe))
             config = load_training_config(self.config.path)
             parent = {"wandb_run": self.logger.run_identity, "workload_totals": {"train/nvarc_tokens": 500}}
-            restore = stack.enter_context(patch.object(runner, "restore_training_state"))
-            progress = runner.run_training(config, weights_parent=parent)
+            restore = stack.enter_context(patch.object(training_loop, "restore_training_state"))
+            progress = runner.run_training(config, parent_run_metadata=parent)
         self.assertEqual((progress.epoch, progress.optimizer_step, progress.optimizer_start_step), (3, 6, 4))
         self.assertEqual((progress.sources_seen, progress.targets_seen), (78, 234))
         self.assertEqual(progress.workload_totals["train/nvarc_tokens"], 3100)
@@ -83,8 +84,6 @@ class RunnerTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         payload = json.loads(RECIPE.read_text())
         payload["data"]["expected_task_count"] = 26
-        payload["loop"].update(max_optimizer_steps=2, expected_target_count=78,
-                               expected_final_batch_target_count=30)
         payload["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=0.5)
         path = Path(temp.name) / "run.json"
         path.write_text(json.dumps(payload))
@@ -150,7 +149,7 @@ class RunnerTests(unittest.TestCase):
             "prepare_validation_cache": self.validation_targets,
             "load_sampling_input_grids": self.input_grids,
         }
-        bindings = {name: stack.enter_context(patch.object(runner, name, return_value=value))
+        bindings = {name: stack.enter_context(patch.object(training_loop if hasattr(training_loop, name) else runner, name, return_value=value))
                     for name, value in patches.items()}
         bindings["plan_validation_packs"] = stack.enter_context(patch.object(
             runner, "plan_validation_packs", side_effect=[self.validation_packs, self.sampling_packs],
@@ -255,8 +254,13 @@ class RunnerTests(unittest.TestCase):
         bindings["build_dataloader"].assert_called_once_with(self.config, tokenizer=self.models.tokenizer,
                                                             start_index=0)
         supplied = bindings["Trainer"].call_args.kwargs
-        for name in ("nvarc_encoder", "vae_encoder", "flux_transformer", "flux_packing_backend"):
+        for name in ("nvarc_encoder", "vae_encoder", "flux_packing_backend"):
             self.assertIs(supplied[name], getattr(self.models, name))
+        flux_model = supplied["flux_transformer"]
+        self.assertIsInstance(flux_model, PackedFluxForward)
+        self.assertIs(flux_model.transformer, self.models.flux_transformer)
+        self.assertIs(flux_model.backend, self.models.flux_packing_backend)
+        self.assertEqual(flux_model.compute_dtype, self.models.flux_compute_dtype)
         self.assertIs(supplied["flow_sampler"], self.sampler)
         self.assertIs(supplied["loss_function"], self.loss)
         self.assertIs(supplied["optimizer"], self.optimizer)
@@ -296,7 +300,12 @@ class RunnerTests(unittest.TestCase):
                 self._setup(stack)
                 if fault == "reported_count":
                     self.step.side_effect = lambda sources: replace(_step_result(sources), target_count=48)
-                with self.assertRaisesRegex(RuntimeError, "epoch counts differ"):
+                error, message = {
+                    "empty": (ValueError, "data exhausted"),
+                    "truncated": (RuntimeError, "training counts differ"),
+                    "reported_count": (RuntimeError, "target count differs"),
+                }[fault]
+                with self.assertRaisesRegex(error, message):
                     runner.run_training(self.config)
 
     def test_step_failure_propagates_without_retry_or_later_updates(self):
@@ -330,14 +339,14 @@ class RunnerTests(unittest.TestCase):
         checkpoint = SimpleNamespace(path=path, metadata={
             "schema_version": 1, "recipe": self.config.recipe_dict(),
             "progress": asdict(progress), "wandb_run": self.logger.run_identity,
-            "identity": runner.checkpoint_identity(
+            "identity": training_loop.checkpoint_identity(
                 config, data_fingerprint=self.samples.dataset.fingerprint,
                 validation_manifest=bindings["validate_validation_bundle"].return_value,
             ),
         })
         self.samples[:] = self.samples[16:]  # The loader keeps the full dataset and starts at its cursor.
-        read = stack.enter_context(patch.object(runner, "read_checkpoint", return_value=checkpoint))
-        restore = stack.enter_context(patch.object(runner, "restore_training_state"))
+        read = stack.enter_context(patch.object(runner, "load_checkpoint_metadata", return_value=checkpoint))
+        restore = stack.enter_context(patch.object(training_loop, "restore_training_state"))
         self.events.attach_mock(bindings["prepare_validation_cache"], "prepare_cache")
         self.events.attach_mock(restore, "restore")
         return config, checkpoint, bindings, read, restore
@@ -396,7 +405,7 @@ class RunnerTests(unittest.TestCase):
             "schema_version": 1, "recipe": self.config.recipe_dict(),
             "progress": asdict(runner.RunProgress(2, 26, 78, {"train/flux_forward_calls": 12})),
             "wandb_run": self.logger.run_identity,
-            "identity": runner.checkpoint_identity(
+            "identity": training_loop.checkpoint_identity(
                 self.config, data_fingerprint="parent-view",
                 validation_manifest=bindings["validate_validation_bundle"].return_value),
         })
@@ -407,13 +416,13 @@ class RunnerTests(unittest.TestCase):
         path.write_text(json.dumps(payload))
         config = load_training_config(path, expected_type="training_run")
         self.logger.run.step = 3
-        restore = stack.enter_context(patch.object(runner, "restore_training_state"))
+        restore = stack.enter_context(patch.object(training_loop, "restore_training_state"))
         return config, parent, bindings, restore
 
     def test_next_epoch_keeps_global_counters_and_resets_only_the_data_cursor(self):
         with ExitStack() as stack:
             config, parent, bindings, restore = self._next_epoch(stack)
-            progress = runner.run_training(config, previous_epoch=parent)
+            progress = runner.run_training(config, previous_epoch_checkpoint=parent)
         self.assertEqual((progress.epoch, progress.optimizer_step, progress.sources_seen, progress.targets_seen),
                          (2, 4, 52, 156))
         bindings["build_dataloader"].assert_called_once_with(config, tokenizer=self.models.tokenizer, start_index=0)
@@ -447,7 +456,7 @@ class RunnerTests(unittest.TestCase):
                 else:
                     parent.metadata["progress"]["optimizer_step"] = 1
                 with self.assertRaises(ValueError):
-                    runner.run_training(config, previous_epoch=parent)
+                    runner.run_training(config, previous_epoch_checkpoint=parent)
                 restore.assert_not_called()
                 self.step.assert_not_called()
 
@@ -537,8 +546,6 @@ class RunnerTests(unittest.TestCase):
     def test_sampling_cadence_final_replacement_and_optional_initial_check(self):
         payload = json.loads(self.config.path.read_text())
         payload["data"]["expected_task_count"] = 75
-        payload["loop"].update(max_optimizer_steps=5, expected_target_count=225,
-                               expected_final_batch_target_count=33)
         payload["validation"]["sampling"]["every_optimizer_steps"] = 2
         payload["checkpointing"]["every_optimizer_steps"] = 2
         for at_start in (True, False):
@@ -563,8 +570,6 @@ class RunnerTests(unittest.TestCase):
     def test_periodic_validation_final_replacement_and_optional_initial_check(self):
         payload = json.loads(self.config.path.read_text())
         payload["data"]["expected_task_count"] = 75
-        payload["loop"].update(max_optimizer_steps=5, expected_target_count=225,
-                               expected_final_batch_target_count=33)
         payload["validation"]["loss"]["every_optimizer_steps"] = 2
         payload["loss"]["region_weights"] = {"canvas": .2, "grid": .7, "boundary": .1}
         for at_start in (True, False):
@@ -628,7 +633,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_baseline_config_is_rejected_before_device_or_model_work(self):
         config = replace(self.config, config_type="baseline", recipe=None)
-        with patch.object(runner, "prepare_device") as prepare:
+        with patch.object(training_loop, "prepare_device") as prepare:
             with self.assertRaisesRegex(ValueError, "training_run config"):
                 runner.run_training(config)
         prepare.assert_not_called()

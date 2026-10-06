@@ -48,6 +48,12 @@ For substantial implementations, architectural changes, or unclear scope:
   docstrings for purpose and contracts, and short comments at meaningful phase
   boundaries or where intent is not obvious. Explain the flow through combined
   components; avoid narrating every line or repeating self-explanatory code.
+- Make names reveal the domain, stored value, and action: qualify metadata
+  such as `validation_manifest`, distinguish batch plans from tensor batches,
+  and expose side effects such as loading or broadcasting in function names.
+  Avoid generic names such as `core` and stale strategy names for shared code.
+  Update callers and documentation together; preserve persisted format names
+  and explicitly required compatibility entrypoints when renaming code.
 - Validate external inputs, configuration, and checkpoint contracts at ingestion
   or explicit preflight. Make frozen/trainable boundaries testable. Trust
   validated internal objects instead of repeating checks in every forward.

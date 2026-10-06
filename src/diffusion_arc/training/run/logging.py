@@ -39,31 +39,35 @@ def build_training_metrics(
         "train/step_seconds": result.step_seconds,
         "train/targets_per_second": result.target_count / result.step_seconds,
         "train/targets": result.target_count,
-        "train/boundary_target_count": sum(target.has_boundary for target in result.targets),
+        "train/boundary_target_count": sum(target.has_boundary for target in result.target_metrics),
         "progress/optimizer_step": progress.optimizer_step,
-        "progress/epoch_fraction": progress.targets_seen / config.recipe["loop"]["expected_target_count"],
         "progress/targets_seen": progress.targets_seen,
     }
+    if config.recipe["data"]["expected_task_count"] is not None:
+        metrics["progress/epoch_fraction"] = progress.targets_seen / (
+            config.recipe["data"]["expected_task_count"] * config.targets_per_sequence)
+    if config.recipe["execution"]["distributed_strategy"] == "fsdp2":
+        metrics["train/padding_forward_calls"] = result.padding_forward_calls
     for region in ("canvas", "grid", "boundary"):
         for kind in ("mse", "contribution"):
             field = f"{kind}_{region}"
-            values = [getattr(target, field) for target in result.targets
+            values = [getattr(target, field) for target in result.target_metrics
                       if getattr(target, field) is not None
                       and (field != "mse_boundary" or target.has_boundary)]
             if values:
                 metrics[f"train/{field}"] = fmean(values)
 
     groups = {
-        "t1": [target.loss for target in result.targets if target.timestep == 1.0],
-        "uniform": [target.loss for target in result.targets if target.timestep != 1.0],
-        **{f"demos_{count}": [target.loss for target in result.targets
+        "t1": [target.loss for target in result.target_metrics if target.timestep == 1.0],
+        "uniform": [target.loss for target in result.target_metrics if target.timestep != 1.0],
+        **{f"demos_{count}": [target.loss for target in result.target_metrics
                              if target.context_pair_count == count] for count in (2, 3, 4)},
     }
     if "high_noise_min" in config.recipe["flow"]:
         threshold = config.recipe["flow"]["high_noise_min"]
         groups.pop("uniform")
-        groups["high_noise"] = [target.loss for target in result.targets if threshold < target.timestep < 1]
-        groups["lower_noise"] = [target.loss for target in result.targets if target.timestep <= threshold]
+        groups["high_noise"] = [target.loss for target in result.target_metrics if threshold < target.timestep < 1]
+        groups["lower_noise"] = [target.loss for target in result.target_metrics if target.timestep <= threshold]
     for name, losses in groups.items():
         metrics[f"train/targets_{name}"] = len(losses)
         if losses:
@@ -211,12 +215,16 @@ class WandbLogger:
         if not os.environ.get(self.options["api_key_environment_variable"]):
             raise ValueError("set WANDB_API_KEY in the environment before training")
         self.allowed_metrics = _metric_names(self.options)
-        if config.recipe["execution"]["distributed_strategy"] == "ddp":
+        if config.recipe["execution"]["distributed_strategy"] in ("ddp", "fsdp2"):
             for rank in range(config.recipe["deployment"]["gpu_count"]):
                 self.allowed_metrics.add(f"train/rank_{rank}/step_seconds")
                 self.allowed_metrics.update(
                     f"system/rank_{rank}/{name.removeprefix('system/')}"
                     for name in self.options["hardware"]["per_step_metrics"])
+        if config.recipe["execution"]["distributed_strategy"] == "fsdp2":
+            self.allowed_metrics.add("train/padding_forward_calls")
+            self.allowed_metrics.update(f"train/rank_{rank}/padding_forward_calls"
+                                        for rank in range(config.recipe["deployment"]["gpu_count"]))
 
     def __enter__(self) -> WandbLogger:
         """Check hardware support, then start the explicitly configured SDK run."""

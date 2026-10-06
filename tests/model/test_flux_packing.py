@@ -195,8 +195,8 @@ class PackedFluxTests(unittest.TestCase):
             with self.subTest(lengths=lengths, image_tokens=image_tokens), self.assertRaises(ValueError):
                 packing.packing_layout(lengths, image_tokens, "cpu")
         layout = packing.packing_layout((2, 5), 3, "cpu")
-        self.assertEqual(layout.cumulative.tolist(), [0, 5, 13])
-        self.assertEqual(layout.cumulative.dtype, torch.int32)
+        self.assertEqual(layout.joint_token_offsets.tolist(), [0, 5, 13])
+        self.assertEqual(layout.joint_token_offsets.dtype, torch.int32)
         self.assertEqual(layout.text_positions[:, 3].tolist(), [0, 1, 0, 1, 2, 3, 4])
         joint = torch.arange(13).index_select(0, layout.joint_order)
         torch.testing.assert_close(joint[layout.text_indices], torch.arange(7))
@@ -206,17 +206,17 @@ class PackedFluxTests(unittest.TestCase):
         layout = packing.packing_layout((2, 5), 3, "cpu")
         def kernel(q, k, v, **kwargs):
             self.assertFalse(kwargs["causal"])
-            self.assertIs(kwargs["cu_seqlens_q"], layout.cumulative)
-            self.assertIs(kwargs["cu_seqlens_k"], layout.cumulative)
+            self.assertIs(kwargs["cu_seqlens_q"], layout.joint_token_offsets)
+            self.assertIs(kwargs["cu_seqlens_k"], layout.joint_token_offsets)
             self.assertEqual(kwargs["max_seqlen_q"], 8)
             self.assertEqual(kwargs["max_seqlen_k"], 8)
             self.assertEqual(kwargs["softmax_scale"], 128 ** -.5)
             return q + k + v
         module = SimpleNamespace(__name__=packing.Flash3Backend.module_name, flash_attn_varlen_func=kernel)
-        with patch.object(torch.cuda, "is_available", return_value=True), \
-             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)), \
-             patch.object(torch.version, "cuda", "13.0"), \
-             patch.object(packing, "import_module", return_value=module) as imported, \
+        with patch.object(torch.cuda, "is_available", return_value=True),\
+             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)),\
+             patch.object(torch.version, "cuda", "13.0"),\
+             patch.object(packing, "import_module", return_value=module) as imported,\
              patch.object(packing.Flash3Backend, "_preflight") as preflight:
             backend = packing.Flash3Backend(torch.device("cuda"))
         imported.assert_called_once_with("flash_attn_3.flash_attn_interface")
@@ -228,8 +228,8 @@ class PackedFluxTests(unittest.TestCase):
     def test_backend_preflight_rejects_missing_module_wrong_hardware_and_failed_kernel(self):
         with self.assertRaisesRegex(RuntimeError, "CUDA Hopper"):
             packing.Flash3Backend("cpu")
-        with patch.object(torch.cuda, "is_available", return_value=True), \
-             patch.object(torch.cuda, "get_device_capability", return_value=(8, 0)), \
+        with patch.object(torch.cuda, "is_available", return_value=True),\
+             patch.object(torch.cuda, "get_device_capability", return_value=(8, 0)),\
              self.assertRaisesRegex(RuntimeError, "Hopper"):
             packing.Flash3Backend("cuda")
 
@@ -255,18 +255,18 @@ class PackedFluxTests(unittest.TestCase):
         torch.testing.assert_close(torch.get_rng_state(), rng, atol=0, rtol=0)
 
     def test_missing_fa3_build_and_failed_backward_do_not_fall_back(self):
-        with patch.object(torch.cuda, "is_available", return_value=True), \
-             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)), \
-             patch.object(torch.version, "cuda", "13.0"), \
-             patch.object(packing, "import_module", side_effect=ImportError("missing")), \
+        with patch.object(torch.cuda, "is_available", return_value=True),\
+             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)),\
+             patch.object(torch.version, "cuda", "13.0"),\
+             patch.object(packing, "import_module", side_effect=ImportError("missing")),\
              self.assertRaisesRegex(RuntimeError, "build is unavailable"):
             packing.Flash3Backend("cuda")
-        with patch.object(torch.cuda, "is_available", return_value=True), \
-             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)), \
-             patch.object(torch.version, "cuda", "13.0"), \
+        with patch.object(torch.cuda, "is_available", return_value=True),\
+             patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)),\
+             patch.object(torch.version, "cuda", "13.0"),\
              patch.object(packing, "import_module", return_value=SimpleNamespace(
-                 __name__="test_module", flash_attn_varlen_func=lambda *args: None)), \
-             patch.object(packing.Flash3Backend, "_preflight", side_effect=RuntimeError("backward unavailable")), \
+                 __name__="test_module", flash_attn_varlen_func=lambda *args: None)),\
+             patch.object(packing.Flash3Backend, "_preflight", side_effect=RuntimeError("backward unavailable")),\
              self.assertRaisesRegex(RuntimeError, "backward unavailable"):
             packing.Flash3Backend("cuda")
 
@@ -285,7 +285,7 @@ class PackedFluxTests(unittest.TestCase):
         packing.validate_packed_transformer(production_shape, torch.bfloat16)
         production_shape.enable_gradient_checkpointing()
         with self.assertRaisesRegex(ValueError, "checkpointing"):
-            with packing.packed_processors(production_shape, packing.packing_layout((2,), 3, "cpu"), SegmentedReference()):
+            with packing.use_packed_attention_processors(production_shape, packing.packing_layout((2,), 3, "cpu"), SegmentedReference()):
                 self.fail("checkpointing must fail before installing processors")
         with self.assertRaisesRegex(ValueError, "guidance embeddings"):
             packing.validate_packed_transformer(tiny_model(guidance_embeds=True), torch.bfloat16)

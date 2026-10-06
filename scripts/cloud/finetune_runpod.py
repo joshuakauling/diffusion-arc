@@ -33,7 +33,7 @@ def check_parent_run(api, config) -> dict:
     options = config.recipe["logging"]
     entity = options["entity"] or api.default_entity
     run = api.run(f"{entity}/{options['project']}/{options['parent_run_id']}")
-    expected_step = config.recipe["models"]["completed_epochs"] * config.loop.max_optimizer_steps
+    expected_step = config.recipe["models"]["completed_epochs"] * config.epoch_optimizer_steps
     if run.state == "running":
         raise ValueError("The parent W&B run is still active")
     if run.lastHistoryStep != expected_step:
@@ -42,6 +42,10 @@ def check_parent_run(api, config) -> dict:
     recipe = config.recipe_dict()
     previous_recipe = normalize_checkpoint_recipe(dict(run.config))
     for key in ("loop", "loss", "optimizer", "scheduler", "execution", "canvas", "validation"):
+        if previous_recipe[key] is None or recipe[key] is None:
+            if previous_recipe[key] != recipe[key]:
+                raise ValueError(f"Parent W&B {key} differs from the agreed recipe")
+            continue
         previous, current = dict(previous_recipe[key]), dict(recipe[key])
         if key == "validation":
             previous.pop("bundle")
@@ -75,7 +79,7 @@ def train(config_path: str, startup_path: str) -> None:
 
     config = load_training_config(Path(config_path), expected_type="training_run")
     startup = json.loads(Path(startup_path).read_text())
-    run_training(config, weights_parent=startup["parent_run"])
+    run_training(config, parent_run_metadata=startup["parent_run"])
 
 
 def main(argv=None) -> int:
@@ -103,6 +107,7 @@ def main(argv=None) -> int:
         parser.error("invalid run name")
     from diffusion_arc.training.config import load_training_config
     template = load_training_config(args.config, expected_type="training_run")
+    pod.require_epoch_launch_config(template)
     if template.recipe["models"]["initialization"] != "transformer_weights":
         raise ValueError("finetune requires a transformer_weights initialization recipe")
     pod.require_secrets("HF_TOKEN", "WANDB_API_KEY", "KAGGLE_API_TOKEN")
@@ -119,7 +124,7 @@ def main(argv=None) -> int:
         if previous is None and (args.use_prepared or args.resume):
             raise ValueError("Completed preparation requires this stage's saved startup receipt")
         if previous:
-            saved = load_training_config(directory / "training.json", expected_type="training_run")
+            saved = pod.load_saved_config(directory / "training.json")
             model_paths = {name: saved.recipe["models"][name] for name in (
                 "nvarc_checkpoint", "flux_checkpoint", "transformer_checkpoint")}
         else:
@@ -146,7 +151,7 @@ def main(argv=None) -> int:
             from scripts.cloud.continue_runpod import check_wandb_run
             latest = pod.run_checkpoints(config)[-1]
             check_wandb_run(wandb_api, latest, last_allowed_step=latest.metadata["progress"]["epoch"]
-                            * config.loop.max_optimizer_steps)
+                            * config.epoch_optimizer_steps)
             parent = previous["parent_run"]
         else:
             parent = check_parent_run(wandb_api, config)
@@ -187,11 +192,12 @@ def main(argv=None) -> int:
                                if (ROOT / "_source.json").exists() else None,
         })
         flow = config.recipe["flow"]
-        endpoint, high = flow["endpoint_targets_per_full_batch"], flow["high_noise_targets_per_full_batch"]
+        endpoint = flow.get("endpoint_targets_per_full_batch", 0)
+        high = flow.get("high_noise_targets_per_full_batch", 0)
         print(f"Ready: {config.loop.max_optimizer_steps} updates, seed {config.seed}, "
               f"{config.loop.optimizer_batch_size}-target batches with {endpoint} endpoint / {high} high-noise / "
               f"{config.loop.optimizer_batch_size - endpoint - high} uniform draws; "
-              f"{config.scheduler.warmup_steps}-step warmup. Config: {config.path}", flush=True)
+              f"{getattr(config.scheduler, 'warmup_steps', 0)}-step warmup. Config: {config.path}", flush=True)
         if args.prepare_only:
             return 0
         pod.write_json(directory / "training-started.json", {"resume_from": config.recipe_dict()["models"]["resume_from"]})

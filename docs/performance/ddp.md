@@ -12,8 +12,9 @@ packing, and finally used memory snapshots to identify allocator fragmentation.
 VAE, plus the complete trainable FLUX transformer. DDP wraps the packed FLUX
 forward; our sampler assigns complete sources to ranks. The global optimizer
 batch remains 48 targets from 16 sources, split into 24 targets from 8 sources
-per rank on two GPUs. The [DDP runner](../../src/diffusion_arc/training/ddp_runner.py)
-connects these components.
+per rank on two GPUs. The benchmark entrypoint is now named
+[`run_training_benchmark`](../../src/diffusion_arc/training/benchmark_runner.py);
+`ddp_runner.run_training_ddp` remains a compatibility alias for historical callers.
 
 Our main adaptation is gradient accumulation across several FLUX packs. The
 [trainer](../../src/diffusion_arc/training/trainer.py) places both forward and

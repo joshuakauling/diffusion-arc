@@ -10,5 +10,11 @@
   "repetitions": 3,
   "smoke_steps": 3,
   "warmup_steps": 10,
-  "measured_steps": 50
+  "measured_steps": 50,
+  "execution": {
+    "distributed_strategy": "ddp",
+    "gpu_count": 2,
+    "flux_packing_algorithm": "balanced_release_v1",
+    "rng_scheme": "global_step_target_v1"
+  }
 }

@@ -9,6 +9,8 @@ import time
 
 import torch
 from torch import Tensor, nn
+from torch.distributed.fsdp import FSDPModule
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -16,12 +18,13 @@ from diffusion_arc._constants import DEFAULT_NVARC_MAX_TOKENS
 from diffusion_arc.arc_data.image.canvas import CANVAS_SIZE
 from diffusion_arc.arc_data.text.tokenization import ArcTokenizedTrainingSample
 from diffusion_arc.model.contracts import TARGET_LATENT_TOKEN_COUNT
+from diffusion_arc.model.flux.packing import PackedFluxForward
 
-from .execution import build_execution
+from .distribution_strategy import build_distribution_strategy
 from .step.encoding import FluxInput, PreparationMetrics, encode_training_batch
 from .step.flow_sampling import FlowMatchingBatch, select_flow_batch
-from .step.flux_microbatch import compute_flux_microbatch_loss
-from .step.flux_batching import FluxPackingPolicy, FluxTargetBatch, plan_flux_batches
+from .step.flux_microbatch import compute_flux_microbatch_loss, compute_fsdp_dummy_loss
+from .step.flux_batching import FluxPackingPolicy, FluxMicrobatchPlan, plan_flux_batches
 from .step.loss import LossResult, VelocityLoss
 from .profiling import training_range
 
@@ -56,13 +59,13 @@ class StepDiagnostics:
     """Batch layout details used to inspect and compare benchmark runs.
 
     ``preparation`` records source identities, lengths and NVARC/VAE batching.
-    ``flux_batches`` records which targets shared each FLUX call. Its target
+    ``flux_microbatch_plans`` records which targets shared each FLUX call. Its target
     indices and ``target_prefix_tokens`` refer to positions in
-    ``TrainStepResult.targets``. These details contain no model tensors.
+    ``TrainStepResult.target_metrics``. These details contain no model tensors.
     """
 
     preparation: PreparationMetrics
-    flux_batches: tuple[FluxTargetBatch, ...]
+    flux_microbatch_plans: tuple[FluxMicrobatchPlan, ...]
     target_prefix_tokens: tuple[int, ...]
 
 
@@ -74,12 +77,15 @@ class TrainStepResult:
     work in this step. DDP callers aggregate these in the outer loop; the
     gradient norm describes the synchronized gradients. Learning rates are the
     values used for the update; the gradient norm is measured before clipping.
-    ``targets`` contains individual measurements in input sequence order, then
+    ``target_metrics`` contains individual measurements in input sequence order, then
     target order within each sequence. Its tuple position is the target index.
 
     The caller can group these measurements for logging and track run progress.
     Detailed batch layouts are separate under ``diagnostics``. The result holds
     ordinary Python values, with no tensors or gradient graphs.
+
+    Work counters include FSDP padding calls; ``padding_forward_calls`` separates
+    their overhead from real targets, which alone determine the loss and cursor.
     """
 
     loss: float
@@ -96,11 +102,12 @@ class TrainStepResult:
     flux_image_tokens: int
     flux_joint_tokens: int
     flux_forward_calls: int
-    targets: tuple[TargetMetrics, ...]
+    target_metrics: tuple[TargetMetrics, ...]
     diagnostics: StepDiagnostics
+    padding_forward_calls: int = 0
 
 
-class _StepLosses:
+class _StepLossMetrics:
     """Collect already-computed losses across the FLUX microbatches of one step.
 
     Store measurements in original target order and detach them from autograd.
@@ -132,7 +139,7 @@ class _StepLosses:
             ), dim=1).detach()
 
     def target_metrics(
-        self, targets: Sequence[FluxInput], flows: Sequence[FlowMatchingBatch],
+        self, flux_inputs: Sequence[FluxInput], flows: Sequence[FlowMatchingBatch],
     ) -> tuple[TargetMetrics, ...]:
         """Combine recorded losses, flow times and context counts into CPU records.
 
@@ -144,8 +151,8 @@ class _StepLosses:
         rows = torch.cat((self.per_target[:, None], times[:, None],
                           *(() if self.regions is None else (self.regions,))), dim=1).cpu().tolist()
         metrics = []
-        for target, row in zip(targets, rows, strict=True):
-            has_boundary = target.grid_shape != (CANVAS_SIZE, CANVAS_SIZE)
+        for flux_input, row in zip(flux_inputs, rows, strict=True):
+            has_boundary = flux_input.grid_shape != (CANVAS_SIZE, CANVAS_SIZE)
             regions = {}
             if self.regions is not None:
                 canvas, grid, boundary, canvas_part, grid_part, boundary_part = row[2:]
@@ -156,7 +163,7 @@ class _StepLosses:
                     contribution_boundary=boundary_part,
                 )
             metrics.append(TargetMetrics(
-                loss=row[0], timestep=row[1], context_pair_count=target.context_pair_count,
+                loss=row[0], timestep=row[1], context_pair_count=flux_input.context_pair_count,
                 has_boundary=has_boundary, **regions,
             ))
         return tuple(metrics)
@@ -198,7 +205,6 @@ class Trainer:
         flux_packing_algorithm: str = "balanced_release_v1",
         min_context_pairs_before_target: int = 1,
         max_grad_norm: float | None = None,
-        trace: Callable[[str, dict], None] | None = None,
     ) -> None:
         """Check the supplied components and prepare them for training.
 
@@ -225,10 +231,15 @@ class Trainer:
             raise TypeError("flow_sampler and loss_function must be callable")
         if any(p.requires_grad for model in (nvarc_encoder, vae_encoder) for p in model.parameters()):
             raise ValueError("NVARC and VAE must already be frozen")
-        self.execution = build_execution(
-            flux_transformer, compute_dtype=flux_compute_dtype, backend=flux_packing_backend,
+        # Direct single-device callers may supply a raw transformer instead of a prepared model.
+        flux_model = flux_transformer
+        if not isinstance(flux_model, (PackedFluxForward, DDP, FSDPModule)):
+            flux_model = PackedFluxForward(flux_model, compute_dtype=flux_compute_dtype,
+                                           backend=flux_packing_backend)
+        self.distribution_strategy = build_distribution_strategy(
+            flux_model, compute_dtype=flux_compute_dtype, backend=flux_packing_backend,
         )
-        self.flux_forward = self.execution.forward
+        self.flux_model = self.distribution_strategy.flux_model
         self.packing = FluxPackingPolicy(flux_max_joint_tokens, flux_max_spread_tokens, flux_packing_algorithm)
         self.nvarc_encoder, self.vae_encoder, self.flux_transformer = nvarc_encoder, vae_encoder, flux_transformer
         self.optimizer, self.scheduler = optimizer, scheduler
@@ -236,18 +247,13 @@ class Trainer:
         self.flux_compute_dtype, self.flux_packing_backend = flux_compute_dtype, flux_packing_backend
         self.nvarc_max_tokens, self.vae_microbatch_size = nvarc_max_tokens, vae_microbatch_size
         self.min_context_pairs_before_target, self.max_grad_norm = min_context_pairs_before_target, max_grad_norm
-        self.parameters = self.execution.parameters
-        self.device = self.execution.device
-        self.trace = trace
+        self.parameters = self.distribution_strategy.parameters
+        self.device = self.distribution_strategy.device
         nvarc_encoder.eval()
         vae_encoder.eval()
         flux_transformer.train()
-        self.execution.zero_grad(optimizer)
+        self.optimizer.zero_grad(set_to_none=self.distribution_strategy.set_grad_to_none)
         self.completed_update = True
-
-    def _trace(self, stage: str, **details) -> None:
-        if self.trace is not None:
-            self.trace(stage, details)
 
     def step(self, sequences: Sequence[ArcTokenizedTrainingSample]) -> TrainStepResult:
         """Train on the supplied sequences with one optimizer update.
@@ -258,8 +264,9 @@ class Trainer:
         optionally clip them, update parameters once and advance the supplied
         scheduler once.
 
-        DDP synchronizes accumulated gradients during the last local backward.
-        It also reduces target counts before encoding and loss-finiteness afterward.
+        DDP synchronizes during the last local backward. FSDP2 synchronizes every
+        backward, padding shorter rank schedules with zero-weight model calls.
+        Both reduce target counts before encoding and loss-finiteness afterward.
         Non-finite losses/gradients abort every rank before the update. Other
         failures require the caller's process supervision; this is not a
         distributed recovery loop.
@@ -277,8 +284,7 @@ class Trainer:
             for sequence in sequences
         )
         with training_range("train/target_count"):
-            global_target_count = self.execution.global_target_count(local_target_count)
-        self._trace("prepare_start")
+            global_target_count = self.distribution_strategy.all_reduce_target_count(local_target_count)
         # Frozen preparation includes token-bounded NVARC and image-bounded VAE calls.
         with training_range("prepare/sources"):
             encoded = encode_training_batch(
@@ -286,74 +292,72 @@ class Trainer:
                 min_context_pairs_before_target=self.min_context_pairs_before_target,
                 nvarc_max_tokens=self.nvarc_max_tokens, vae_microbatch_size=self.vae_microbatch_size,
             )
-        targets = encoded.inputs
-        prefixes = tuple(target.prefix_end for target in targets)
+        flux_inputs = encoded.inputs
+        prefixes = tuple(flux_input.prefix_end for flux_input in flux_inputs)
         # Assign time and noise to each target before grouping targets into microbatches.
-        flows = self.flow_sampler(tuple(target.clean_latent for target in targets))
-        owners = dict.fromkeys(target.nvarc_sequence_state for target in targets)
-        source_ids = {owner: index for index, owner in enumerate(owners)}
-        batches = plan_flux_batches(
+        flows = self.flow_sampler(tuple(flux_input.clean_latent for flux_input in flux_inputs))
+        nvarc_sequence_states = dict.fromkeys(flux_input.nvarc_sequence_state for flux_input in flux_inputs)
+        nvarc_sequence_state_ids = {state: index for index, state in enumerate(nvarc_sequence_states)}
+        microbatch_plans = plan_flux_batches(
             prefixes, self.packing,
-            source_ids=tuple(source_ids[target.nvarc_sequence_state] for target in targets),
-            source_bytes=tuple(owner.allocated_bytes for owner in owners),
+            source_ids=tuple(nvarc_sequence_state_ids[flux_input.nvarc_sequence_state] for flux_input in flux_inputs),
+            source_bytes=tuple(state.allocated_bytes for state in nvarc_sequence_states),
         )
-        losses = _StepLosses(len(targets), self.device)
-        self._trace("prepare_end", pack_count=len(batches), target_count=len(targets))
+        step_loss_metrics = _StepLossMetrics(len(flux_inputs), self.device)
+        # FSDP sorts packs and adds dummy calls; single-device and DDP keep the plans unchanged.
+        microbatch_schedule = self.distribution_strategy.plan_microbatch_calls(microbatch_plans)
 
         # Run FLUX microbatches and accumulate gradients for one optimizer update.
-        for index, batch in enumerate(batches):
-            inputs = tuple(targets[index] for index in batch.target_indices)
-            flow = select_flow_batch(flows, batch.target_indices)
-            # DDP prepares backward during forward, so both belong in no_sync.
-            with self.execution.microbatch_context(is_last=index == len(batches) - 1):
-                if self.trace is not None:
-                    self._trace("flux_forward_start", pack=index + 1, pack_count=len(batches),
-                                sync=index == len(batches) - 1, joint_tokens=batch.joint_tokens,
-                                target_indices=batch.target_indices,
-                                prefix_tokens=tuple(prefixes[i] for i in batch.target_indices))
-                result = compute_flux_microbatch_loss(
-                    inputs, flow, transformer=self.flux_forward,
-                    max_joint_tokens=self.packing.max_tokens, loss_function=self.loss_function,
-                )
-                self._trace("flux_forward_end")
-                self.execution.check_microbatch_loss(result.loss)
-                losses.record(batch.target_indices, result)
+        for index, microbatch_plan in enumerate(microbatch_schedule):
+            # DDP syncs gradients only on the last microbatch; FSDP syncs on every microbatch.
+            with self.distribution_strategy.microbatch_context(is_last=index == len(microbatch_schedule) - 1):
+                if microbatch_plan is None:
+                    backward_loss = compute_fsdp_dummy_loss(self.flux_model, device=self.device)
+                else:
+                    inputs = tuple(flux_inputs[i] for i in microbatch_plan.target_indices)
+                    flow = select_flow_batch(flows, microbatch_plan.target_indices)
+                    result = compute_flux_microbatch_loss(
+                        inputs, flow, transformer=self.flux_model,
+                        max_joint_tokens=self.packing.max_tokens, loss_function=self.loss_function,
+                    )
+                    self.distribution_strategy.check_microbatch_loss(result.loss)
+                    step_loss_metrics.record(microbatch_plan.target_indices, result)
+                    weight = self.distribution_strategy.loss_weight(len(microbatch_plan.target_indices), global_target_count)
+                    backward_loss = result.loss * weight
                 with training_range("train/flux_backward"):
-                    weight = self.execution.loss_weight(len(batch.target_indices), global_target_count)
-                    self._trace("flux_backward_start")
-                    (result.loss * weight).backward()
-                    self._trace("flux_backward_end")
-            del result, flow, inputs
+                    backward_loss.backward()
+            del backward_loss
+            if microbatch_plan is not None:
+                del result, flow, inputs
 
-        self._trace("loss_check_start")
         # Distributed execution must finish all backwards before rejecting a loss.
         with training_range("train/loss_check"):
-            self.execution.check_step_loss(losses.total)
+            self.distribution_strategy.check_step_loss(step_loss_metrics.total)
 
         # Capture the pre-clip norm and used LR, then advance exactly one update.
-        self._trace("clip_start")
         with training_range("train/clip_grad"):
-            norm = self.execution.clip_gradients(self.max_grad_norm)
+            norm = self._clip_gradients()
             gradient_norm = float(norm)
         with training_range("train/adamw"):
-            self._trace("optimizer_start")
             self.optimizer.step()
-            self._trace("optimizer_end")
         if self.scheduler is not None:
             self.scheduler.step()
         # Keep DDP bucket views for the next accumulation; release other gradient storage.
         with training_range("train/zero_grad"):
-            self.execution.zero_grad(self.optimizer)
+            self.optimizer.zero_grad(set_to_none=self.distribution_strategy.set_grad_to_none)
         self.completed_update = True
-        self._trace("zero_grad_end")
 
-        target_metrics = losses.target_metrics(targets, flows)
-        loss = float(losses.total)
+        # Collect step metrics and packing diagnostics.
+        executed_microbatch_plans = tuple(plan for plan in microbatch_schedule if plan is not None)
+        dummy_call_count = len(microbatch_schedule) - len(executed_microbatch_plans)
+        target_metrics = step_loss_metrics.target_metrics(flux_inputs, flows)
+        loss = float(step_loss_metrics.total)
         preparation = encoded.preparation
-        target_count = len(targets)
-        text_tokens = sum(prefixes)
-        image_tokens = target_count * TARGET_LATENT_TOKEN_COUNT
-        del encoded, targets, flows, losses, norm
+        target_count = len(flux_inputs)
+        # Work counters include synthetic calls; target/loss metrics never do.
+        text_tokens = sum(prefixes) + dummy_call_count
+        image_tokens = (target_count + dummy_call_count) * TARGET_LATENT_TOKEN_COUNT
+        del encoded, flux_inputs, flows, step_loss_metrics, norm
         elapsed = self._time() - started
         return TrainStepResult(
             loss=loss, learning_rates=learning_rates, gradient_norm=gradient_norm,
@@ -361,9 +365,17 @@ class Trainer:
             step_seconds=elapsed, source_count=len(preparation.sources), target_count=target_count,
             nvarc_tokens=sum(preparation.source_lengths), nvarc_calls=len(preparation.nvarc_batches),
             vae_calls=preparation.vae_calls, flux_text_tokens=text_tokens, flux_image_tokens=image_tokens,
-            flux_joint_tokens=text_tokens + image_tokens, flux_forward_calls=len(batches),
-            targets=target_metrics,
-            diagnostics=StepDiagnostics(preparation, batches, prefixes),
+            flux_joint_tokens=text_tokens + image_tokens, flux_forward_calls=len(microbatch_schedule),
+            target_metrics=target_metrics,
+            diagnostics=StepDiagnostics(preparation, executed_microbatch_plans, prefixes),
+            padding_forward_calls=dummy_call_count,
+        )
+
+    def _clip_gradients(self) -> Tensor:
+        """Check the gradient norm and apply the optional clipping limit."""
+        return torch.nn.utils.clip_grad_norm_(
+            self.parameters, max_norm=math.inf if self.max_grad_norm is None else self.max_grad_norm,
+            error_if_nonfinite=True, foreach=False,
         )
 
     def _time(self) -> float:

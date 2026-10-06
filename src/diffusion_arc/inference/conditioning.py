@@ -10,6 +10,7 @@ import json
 
 import torch
 from torch import Tensor, nn
+from torch.distributed.fsdp import FSDPModule
 
 from diffusion_arc._constants import NVARC_CONTEXT_WIDTH, NVARC_MAX_TOKENS
 
@@ -64,24 +65,24 @@ class PackedGenerationInput:
 
     task_id: str
     query_index: int
-    text: Tensor
+    text_hidden_states: Tensor
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id:
             raise ValueError("task_id must be a non-empty string")
         if type(self.query_index) is not int or self.query_index < 0:
             raise ValueError("query_index must be a non-negative integer")
-        if not isinstance(self.text, Tensor):
-            raise TypeError("text must be a torch.Tensor")
-        if self.text.device.type != "cpu" or self.text.requires_grad:
-            raise ValueError("text must be a detached CPU cache")
-        if self.text.dtype not in (torch.bfloat16, torch.float32):
-            raise ValueError("text must have BF16 or FP32 dtype")
-        if (self.text.ndim != 2 or self.text.shape[1] != NVARC_CONTEXT_WIDTH
-                or not 1 <= self.text.shape[0] <= NVARC_MAX_TOKENS):
-            raise ValueError(f"text must have shape [1..{NVARC_MAX_TOKENS}, {NVARC_CONTEXT_WIDTH}]")
-        if not bool(torch.isfinite(self.text).all().item()):
-            raise ValueError("text must contain only finite values")
+        if not isinstance(self.text_hidden_states, Tensor):
+            raise TypeError("text_hidden_states must be a torch.Tensor")
+        if self.text_hidden_states.device.type != "cpu" or self.text_hidden_states.requires_grad:
+            raise ValueError("text_hidden_states must be a detached CPU cache")
+        if self.text_hidden_states.dtype not in (torch.bfloat16, torch.float32):
+            raise ValueError("text_hidden_states must have BF16 or FP32 dtype")
+        if (self.text_hidden_states.ndim != 2 or self.text_hidden_states.shape[1] != NVARC_CONTEXT_WIDTH
+                or not 1 <= self.text_hidden_states.shape[0] <= NVARC_MAX_TOKENS):
+            raise ValueError(f"text_hidden_states must have shape [1..{NVARC_MAX_TOKENS}, {NVARC_CONTEXT_WIDTH}]")
+        if not bool(torch.isfinite(self.text_hidden_states).all().item()):
+            raise ValueError("text_hidden_states must contain only finite values")
 
 
 def plan_conditioning_packs(
@@ -92,7 +93,7 @@ def plan_conditioning_packs(
     values = _conditioning_sequence(inputs)
     if type(max_joint_tokens) is not int or max_joint_tokens <= 0:
         raise ValueError("max_joint_tokens must be a positive integer")
-    lengths = tuple(query.text.shape[0] + TARGET_LATENT_SHAPE[0] for query in values)
+    lengths = tuple(query.text_hidden_states.shape[0] + TARGET_LATENT_SHAPE[0] for query in values)
     for query, length in zip(values, lengths, strict=True):
         if length > max_joint_tokens:
             raise ValueError(
@@ -153,8 +154,8 @@ def stage_packed_conditioning(
 ) -> tuple[Tensor, PackingLayout, Tensor]:
     """Stage one already validated pack, preserving its query and token order."""
 
-    text = torch.cat(tuple(query.text for query in batch)).to(device)
-    layout = packing_layout(tuple(query.text.shape[0] for query in batch), 900, device)
+    text = torch.cat(tuple(query.text_hidden_states for query in batch)).to(device)
+    layout = packing_layout(tuple(query.text_hidden_states.shape[0] for query in batch), 900, device)
     return text, layout, build_flux_image_position_ids(len(batch), device)
 
 
@@ -165,7 +166,7 @@ def validate_sampling_seed(seed: int) -> None:
         raise ValueError("seeds must be integers in [0, 2**63)")
 
 
-def sample_conditioning_noise(
+def sample_query_latent_noise(
     query: PackedGenerationInput,
     seed: int,
     purpose: tuple[str, int | float],
@@ -186,14 +187,20 @@ def evaluation_mode(transformer: nn.Module) -> Iterator[None]:
     previous = transformer.training
     transformer.eval()
     try:
-        with torch.inference_mode():
+        # FSDP buffers may be reused by a later training forward; keep normal
+        # tensor version tracking while disabling the evaluation autograd graph.
+        with torch.no_grad() if isinstance(transformer, FSDPModule) else torch.inference_mode():
             yield
     finally:
+        if isinstance(transformer, FSDPModule):
+            for module in reversed(tuple(transformer.modules())):
+                if isinstance(module, FSDPModule):
+                    module.reshard()
         transformer.train(previous)
 
 
 __all__ = [
     "PackedGenerationInput", "prepare_evaluation_text_inputs", "plan_conditioning_packs",
-    "validate_packed_execution", "stage_packed_conditioning", "sample_conditioning_noise",
+    "validate_packed_execution", "stage_packed_conditioning", "sample_query_latent_noise",
     "validate_sampling_seed", "evaluation_mode",
 ]

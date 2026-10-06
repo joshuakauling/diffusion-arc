@@ -16,7 +16,7 @@ import torch
 from diffusion_arc.training.config import BenchmarkConfig, load_training_config
 from diffusion_arc.training.step.encoding import PreparationMetrics, PreparedSource
 from diffusion_arc.training.step.flux_batching import (
-    FluxTargetBatch,
+    FluxMicrobatchPlan,
 )
 from diffusion_arc.training.trainer import StepDiagnostics, TargetMetrics, TrainStepResult
 
@@ -26,7 +26,7 @@ from tests.training.test_data import build_layout
 def _config():
     config = load_training_config(
         Path(__file__).resolve().parents[2] / "configs/training/benchmarks/single_gpu_b3.json"
-    , expected_type="baseline")
+    , expected_type="training_run")
     return replace(
         config,
         loop=replace(config.loop, max_optimizer_steps=3, optimizer_batch_size=3,
@@ -40,25 +40,25 @@ def _samples(count):
                             target_grids=(None,) * 4) for i in range(count)]
 
 
-def _result(samples, *, nvarc_batches=None, flux_batches=None, learning_rates=(1e-5,)):
+def _result(samples, *, nvarc_batches=None, flux_microbatch_plans=None, learning_rates=(1e-5,)):
     """CPU result fixture; target metadata belongs entirely to this update."""
     sources = tuple(PreparedSource(str(sample.key), sample.prefix_token_ends[1:]) for sample in samples)
     lengths = tuple(sample.prefix_token_ends[-1] for sample in samples)
     prefixes = tuple(length for source in sources for length in source.prefix_ends)
     if nvarc_batches is None:
         nvarc_batches = (tuple(range(len(samples))),)
-    if flux_batches is None:
-        flux_batches = tuple(FluxTargetBatch((i,), prefix + 900) for i, prefix in enumerate(prefixes))
+    if flux_microbatch_plans is None:
+        flux_microbatch_plans = tuple(FluxMicrobatchPlan((i,), prefix + 900) for i, prefix in enumerate(prefixes))
     preparation = PreparationMetrics(sources, lengths, nvarc_batches, vae_calls=1)
     return TrainStepResult(
         loss=0.5, learning_rates=learning_rates, gradient_norm=0.25, gradient_clipped=False,
         step_seconds=1.5, source_count=len(samples), target_count=len(prefixes),
-        diagnostics=StepDiagnostics(preparation, flux_batches, prefixes),
-        targets=tuple(TargetMetrics(loss=0.5, timestep=0.5, context_pair_count=i % 3 + 2,
+        diagnostics=StepDiagnostics(preparation, flux_microbatch_plans, prefixes),
+        target_metrics=tuple(TargetMetrics(loss=0.5, timestep=0.5, context_pair_count=i % 3 + 2,
                                     has_boundary=True) for i in range(len(prefixes))),
         nvarc_tokens=sum(lengths), nvarc_calls=len(nvarc_batches), vae_calls=1,
         flux_text_tokens=sum(prefixes), flux_image_tokens=900 * len(prefixes),
-        flux_joint_tokens=sum(prefixes) + 900 * len(prefixes), flux_forward_calls=len(flux_batches),
+        flux_joint_tokens=sum(prefixes) + 900 * len(prefixes), flux_forward_calls=len(flux_microbatch_plans),
     )
 
 
@@ -81,11 +81,11 @@ class BenchmarkTests(unittest.TestCase):
         recorder = bench._StepRecorder(config, "cuda:0")
         samples = _samples(2)
         samples[0].prefix_token_ends = (10, 256, 257, 513)
-        batches = (FluxTargetBatch((0, 1, 2), 3726), FluxTargetBatch((3, 4, 5), 2790))
+        microbatch_plans = (FluxMicrobatchPlan((0, 1, 2), 3726), FluxMicrobatchPlan((3, 4, 5), 2790))
         with ExitStack() as stack:
             self._mock_cuda(stack)
             recorder.start()
-            recorder.step(_result(samples, flux_batches=batches))
+            recorder.step(_result(samples, flux_microbatch_plans=microbatch_plans))
         row = recorder.rows[0]
         self.assertEqual(row["nvarc_processed_tokens"], 513 + 40)
         self.assertEqual(row["target_prefix_tokens"], [256, 257, 513, 20, 30, 40])
@@ -157,7 +157,7 @@ class BenchmarkTests(unittest.TestCase):
             config = replace(_config(), data=replace(_config().data, split_directory=Path(directory) / "missing"))
             with (
                 patch.object(bench, "load_training_config", return_value=config),
-                patch.object(bench, "prepare_device") as prepare,
+                patch.object(bench, "run_benchmark") as prepare,
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "not prepared"):
                     bench.benchmark_once(Path("config.json"), Path(directory) / "result")
@@ -191,50 +191,31 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             self.assertEqual(json.loads((root / "failed/summary.json").read_text())["status"], "failed")
 
-    def test_trainer_wiring_and_incomplete_run_is_not_a_result(self):
+    def test_shared_loop_delegation_preserves_results_and_incomplete_run_failure(self):
         for completed_steps in (3, 2):
             with self.subTest(completed_steps=completed_steps), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 config_path = root / "config.json"
                 config_path.write_text("{}")
-                models = SimpleNamespace(
-                    tokenizer=object(), nvarc_encoder=object(), vae_encoder=object(),
-                    flux_transformer=object(), flux_compute_dtype=torch.bfloat16,
-                    flux_packing_backend=SimpleNamespace(binding="flash_attn_3.flash_attn_interface.flash_attn_varlen_func"),
-                )
-                optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
-                scheduler = Mock()
+                models = SimpleNamespace(flux_packing_backend=SimpleNamespace(binding="test-backend"))
                 config = _config()
-                flow_sampler, loss_function = object(), object()
-                executed = []
-                def make_trainer(**kwargs):
-                    self.assertIs(kwargs["nvarc_encoder"], models.nvarc_encoder)
-                    self.assertIs(kwargs["vae_encoder"], models.vae_encoder)
-                    self.assertIs(kwargs["flux_transformer"], models.flux_transformer)
-                    self.assertIs(kwargs["optimizer"], optimizer)
-                    self.assertIs(kwargs["scheduler"], scheduler)
-                    self.assertIs(kwargs["flow_sampler"], flow_sampler)
-                    self.assertIs(kwargs["loss_function"], loss_function)
-                    self.assertEqual(kwargs["nvarc_max_tokens"], config.nvarc_max_tokens)
-                    self.assertFalse(any(name.startswith("on_") for name in kwargs))
-                    def step(sequences):
-                        executed.append(sequences)
-                        return _result(sequences, flux_batches=(FluxTargetBatch((2, 0, 1), 2790),))
-                    return SimpleNamespace(step=step)
+                def run_common(received, *, experiment):
+                    self.assertIs(received, config)
+                    self.assertEqual(experiment.max_steps, 3)
+                    with ExitStack() as stack:
+                        experiment.open(stack, SimpleNamespace(device="cuda:0"))
+                        experiment.start(stack, config, models, None)
+                        for index in range(completed_steps):
+                            experiment.seconds = 2.0
+                            experiment.peaks = dict(peak_allocated_bytes=100, peak_reserved_bytes=200)
+                            experiment.after_step(index + 1, None, _result(_samples(1),
+                                flux_microbatch_plans=(FluxMicrobatchPlan((2, 0, 1), 2790),)), None)
                 with ExitStack() as stack:
-                    self._mock_cuda(stack)
-                    for name, result in {
-                        "check_inputs": (config, []), "prepare_device": "cuda:0",
-                        "seed_process": None, "load_models": models,
-                        "build_dataloader": _samples(completed_steps), "build_optimizer": optimizer,
-                        "build_lr_scheduler": scheduler, "build_flow_generator": object(),
-                        "build_flow_sampler": flow_sampler, "build_velocity_loss": loss_function,
-                    }.items():
-                        stack.enter_context(patch.object(bench, name, return_value=result))
+                    stack.enter_context(patch.object(bench, "check_inputs", return_value=(config, [])))
+                    stack.enter_context(patch.object(bench, "run_benchmark", side_effect=run_common))
                     stack.enter_context(patch.object(torch.cuda, "get_device_name", return_value="fake GPU"))
                     stack.enter_context(patch.object(torch.cuda, "get_device_properties", return_value=SimpleNamespace(total_memory=1024)))
                     stack.enter_context(patch.object(torch.cuda, "device_count", return_value=1))
-                    stack.enter_context(patch.object(bench, "Trainer", side_effect=make_trainer))
                     stack.enter_context(patch.object(bench, "version", return_value="test-pinned"))
                     profiler = stack.enter_context(patch.object(torch.profiler, "profile", side_effect=AssertionError("no profiler")))
                     if completed_steps == 3:
@@ -243,16 +224,33 @@ class BenchmarkTests(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "requires 3 full steps"):
                             bench.benchmark_once(config_path, root / "result")
                     profiler.assert_not_called()
-                    scheduler.step.assert_not_called()
                 manifest = json.loads((root / "result/manifest.json").read_text())
                 self.assertEqual(manifest["status"], "complete" if completed_steps == 3 else "failed")
                 rows = [json.loads(line) for line in (root / "result/steps.jsonl").read_text().splitlines()]
                 self.assertEqual(len(rows), completed_steps)
-                self.assertEqual(len(executed), completed_steps)
                 self.assertEqual(manifest["execution"]["flux_packed_token_budget"], 12288)
                 self.assertEqual(manifest["execution"]["modulation_reduction"], "fp32")
                 self.assertEqual(rows[0]["flux_batches"], [dict(batch_size=3,
                     joint_tokens=2790, target_indices=[2, 0, 1])])
+                self.assertEqual(rows[0]["seconds"], 2.0)
+
+    def test_shared_loop_failure_keeps_finished_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text("{}")
+            def fail(config, *, experiment):
+                experiment.recorder = SimpleNamespace(rows=[dict(phase="warmup", loss=0.5)])
+                raise RuntimeError("update failed")
+            with patch.object(bench, "check_inputs", return_value=(_config(), [])),\
+                    patch.object(bench, "version", return_value="test"),\
+                    patch.object(bench, "run_benchmark", side_effect=fail),\
+                    self.assertRaisesRegex(RuntimeError, "update failed"):
+                bench.benchmark_once(config_path, root / "result")
+            self.assertEqual(len((root / "result/steps.jsonl").read_text().splitlines()), 1)
+            manifest = json.loads((root / "result/manifest.json").read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertIn("update failed", manifest["error"])
 
 
 if __name__ == "__main__":

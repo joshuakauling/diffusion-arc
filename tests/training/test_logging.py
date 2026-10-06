@@ -40,8 +40,8 @@ class _Run:
 class LoggingTests(unittest.TestCase):
     def test_high_noise_recipe_does_not_mislabel_nonuniform_draws_as_uniform(self):
         config = load_training_config(RECIPE.with_name("arc_agi_1_epoch3_high_noise.json"))
-        targets = tuple(replace(target, timestep=t) for target, t in zip(self.result.targets, (1., .95, .5)))
-        metrics = logging.build_training_metrics(replace(self.result, targets=targets), self.progress, config)
+        targets = tuple(replace(target, timestep=t) for target, t in zip(self.result.target_metrics, (1., .95, .5)))
+        metrics = logging.build_training_metrics(replace(self.result, target_metrics=targets), self.progress, config)
         self.assertEqual(metrics["train/targets_high_noise"], 1)
         self.assertEqual(metrics["train/targets_lower_noise"], 1)
         self.assertEqual(metrics["train/loss_high_noise"], 6)
@@ -63,7 +63,7 @@ class LoggingTests(unittest.TestCase):
             nvarc_tokens=100, nvarc_calls=1, vae_calls=1,
             flux_text_tokens=120, flux_image_tokens=2700,
             flux_joint_tokens=2820, flux_forward_calls=2,
-            targets=(
+            target_metrics=(
                 TargetMetrics(3, 1.0, 2, True, 2, 3, 4, 0.2, 2.4, 0.4),
                 TargetMetrics(6, 0.4, 3, False, 6, 6, None, 2 / 3, 16 / 3, 0),
                 TargetMetrics(9, 0.8, 4, True, 8, 10, 2, 0.8, 8, 0.2),
@@ -100,7 +100,7 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(metrics["train/flux_joint_tokens_total"], 2820)
 
     def test_absent_boundary_and_empty_groups_have_no_invented_mean(self):
-        result = replace(self.result, targets=(self.result.targets[1],), loss=6, target_count=1)
+        result = replace(self.result, target_metrics=(self.result.target_metrics[1],), loss=6, target_count=1)
         metrics = logging.build_training_metrics(result, self.progress, self.config)
         for name in ("mse_boundary", "loss_t1", "loss_demos_2", "loss_demos_4"):
             self.assertNotIn(f"train/{name}", metrics)
@@ -109,7 +109,7 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(metrics["train/contribution_boundary"], 0)
 
     def test_raw_mse_result_omits_unavailable_regional_measurements(self):
-        result = replace(self.result, targets=(TargetMetrics(6, 0.5, 2, True),), target_count=1)
+        result = replace(self.result, target_metrics=(TargetMetrics(6, 0.5, 2, True),), target_count=1)
         metrics = logging.build_training_metrics(result, self.progress, self.config)
         self.assertFalse(any(key.startswith(("train/mse_", "train/contribution_")) for key in metrics))
 

@@ -33,7 +33,6 @@ class ContinuationTests(unittest.TestCase):
             task_index=str(self.source / f"{DERIVED_GROUP}_tasks.jsonl"),
             official_training_keys=str(self.source / "arc_agi_1_training_keys.json"),
             prepared_split_directory=str(self.workspace / "first-data/splits/train"))
-        payload["loop"].update(max_optimizer_steps=2, expected_target_count=78, expected_final_batch_target_count=30)
         payload["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=.5)
         payload["deployment"]["output_directory"] = str(self.parent_run)
         payload["logging"].update(project="test-project", entity="test-owner")

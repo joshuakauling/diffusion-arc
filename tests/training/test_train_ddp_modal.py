@@ -383,45 +383,6 @@ class TrainDdpModalTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.launcher.run_worker(["torchrun"], timeout=510)
 
-    def test_memory_snapshot_dispatch_checks_bounds_and_requires_all_rank_snapshots(self):
-        for missing_rank in (None, 1):
-            with self.subTest(missing_rank=missing_rank), tempfile.TemporaryDirectory() as directory:
-                repository = self.make_repository(Path(directory) / "repository")
-                volume = Path(directory).resolve() / "volume"
-                experiment = self.launcher.check_inputs(repository, self.launcher.CONFIG)
-                for checkpoint in (experiment.training.models.nvarc_checkpoint,
-                                   experiment.training.models.flux_checkpoint):
-                    (volume / checkpoint.name).mkdir(parents=True)
-                with patch.object(self.launcher, "LOCAL_ROOT", repository), \
-                        patch.object(self.launcher, "train_ddp") as remote:
-                    self.launcher.main(gpus=2, mode="memory", memory_snapshot_step=1)
-                    self.assertEqual(remote.with_options.call_args.kwargs["timeout"], 1800)
-                    self.assertEqual(remote.with_options.return_value.remote.call_args.kwargs["memory_snapshot_step"], 1)
-                    remote.reset_mock()
-                    for mode, step in (("memory", 2), ("memory", -1), ("memory", True), ("benchmark", 1)):
-                        with self.assertRaises(ValueError):
-                            self.launcher.main(gpus=2, mode=mode, memory_snapshot_step=step)
-                    remote.with_options.assert_not_called()
-
-                def worker(command, *, timeout):
-                    self.assertEqual(timeout, 1710)
-                    self.assertEqual(command[command.index("--memory-snapshot-step") + 1], "1")
-                    output = Path(command[command.index("--output-dir") + 1])
-                    write_json(output / "summary.json", dict(event="complete", optimizer_steps=1))
-                    for rank in range(2):
-                        if rank != missing_rank:
-                            (output / f"rank-{rank}-step-1-pack-1-backward.pickle").write_bytes(b"snapshot")
-
-                with patch.object(self.launcher, "REMOTE_ROOT", repository), \
-                        patch.object(self.launcher, "VOLUME_ROOT", volume), \
-                        patch.object(self.launcher, "run_worker", side_effect=worker) as run:
-                    if missing_rank is None:
-                        self.launcher.train_ddp(self.launcher.CONFIG, 2, "memory", {}, memory_snapshot_step=1)
-                    else:
-                        with self.assertRaisesRegex(RuntimeError, "snapshot missing for rank 1"):
-                            self.launcher.train_ddp(self.launcher.CONFIG, 2, "memory", {}, memory_snapshot_step=1)
-                    run.assert_called_once()
-
 
 if __name__ == "__main__":
     unittest.main()

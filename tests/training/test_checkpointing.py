@@ -16,8 +16,8 @@ import numpy as np
 import torch
 
 from diffusion_arc.training.run import checkpointing
-from diffusion_arc.training.config import load_training_config
-from diffusion_arc.training.step.lr_schedule import LinearWarmupConstantLR
+from diffusion_arc.training.config import load_training_config, parse_training_config
+from diffusion_arc.training.step.lr_schedule import LinearWarmupConstantLR, build_lr_scheduler
 from diffusion_arc.training.runner import RunProgress
 
 
@@ -49,12 +49,12 @@ class CheckpointRuntime:
         self.gathered = gathered
         self.publication = publication
 
-    def gather(self, value):
+    def all_gather_objects(self, value):
         values = deepcopy(self.gathered)
         values[self.rank] = value
         return values
 
-    def primary(self, callback):
+    def run_on_primary_and_broadcast(self, callback):
         if self.is_primary:
             self.publication["result"] = callback()
         return self.publication["result"]
@@ -90,7 +90,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertNestedEqual(components[0].state_dict(), restored[0].state_dict())
         self._rewrite_metadata(path, lambda m: m["progress"].update(optimizer_start_step=0))
         with self.assertRaisesRegex(ValueError, "optimizer start"):
-            checkpointing.read_checkpoint(path, self.config)
+            checkpointing.load_checkpoint_metadata(path, self.config)
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -99,8 +99,6 @@ class CheckpointTests(unittest.TestCase):
         payload = json.loads((ROOT / "configs/training/arc_agi_1_epoch.json").read_text())
         payload["deployment"]["output_directory"] = str(self.directory / "output")
         payload["data"]["expected_task_count"] = 58
-        payload["loop"].update(max_optimizer_steps=4, expected_target_count=174,
-                               expected_final_batch_target_count=30)
         payload["scheduler"].update(warmup_steps=3, first_update_warmup_fraction=1 / 3)
         payload["optimizer"]["learning_rate"] = .001
         path = self.directory / "recipe.json"
@@ -138,7 +136,7 @@ class CheckpointTests(unittest.TestCase):
             betas=(settings.beta1, settings.beta2), eps=settings.epsilon,
             weight_decay=settings.weight_decay,
         )
-        scheduler = LinearWarmupConstantLR(optimizer, warmup_steps=3)
+        scheduler = build_lr_scheduler(self.config, optimizer=optimizer)
         generator = torch.Generator(device="cpu").manual_seed(45)
         return model, optimizer, scheduler, generator
 
@@ -159,7 +157,8 @@ class CheckpointTests(unittest.TestCase):
                 "learning_rate": optimizer.param_groups[0]["lr"],
             })
             optimizer.step()
-            scheduler.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad(set_to_none=True)
         return records
 
@@ -181,7 +180,7 @@ class CheckpointTests(unittest.TestCase):
 
     def _restore(self, path, components, **kwargs):
         model, optimizer, scheduler, generator = components
-        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
         checkpointing.restore_training_state(
             checkpoint, transformer=model, optimizer=optimizer, scheduler=scheduler,
             flow_generator=generator, device=self.device, **kwargs,
@@ -235,6 +234,17 @@ class CheckpointTests(unittest.TestCase):
                          sum(file.stat().st_size for file in path.rglob("*") if file.is_file()))
         self.assertGreaterEqual(metrics["checkpoint/seconds"], 0)
 
+    def test_resume_rejects_changed_nvarc_layers_even_when_context_width_matches(self):
+        components = self._components()
+        self._advance(components)
+        path, _ = self._save(components)
+        for layers in ([9, 18, 36], [18, 27, 36]):
+            recipe = self.config.recipe_dict()
+            recipe["execution"].update(nvarc_hidden_layers=layers, nvarc_early_exit_layer=36)
+            changed = parse_training_config(recipe, config_path=self.config.path)
+            with self.subTest(layers=layers), self.assertRaisesRegex(ValueError, "recipe differs"):
+                checkpointing.load_checkpoint_metadata(path, changed)
+
     def test_identity_binds_training_data_and_validation_but_allows_deployment_and_resume_changes(self):
         recipe = self.config.recipe_dict()
         recipe["deployment"]["output_directory"] = "/other-volume"
@@ -260,13 +270,13 @@ class CheckpointTests(unittest.TestCase):
         path, _ = self._save(components)
         recipe["loss"]["region_weights"]["grid"] = .7
         with self.assertRaisesRegex(ValueError, "recipe differs"):
-            checkpointing.read_checkpoint(path, continuation)
+            checkpointing.load_checkpoint_metadata(path, continuation)
 
     def test_second_epoch_roundtrip_preserves_adamw_rng_and_constant_lr_without_new_warmup(self):
         components = self._components()
         self._advance(components, 4)
         parent, _ = self._save(components)
-        checkpoint = checkpointing.read_checkpoint(parent, self.config)
+        checkpoint = checkpointing.load_checkpoint_metadata(parent, self.config)
         loaded = self._components(TinyTransformer.from_pretrained(parent / "transformer", local_files_only=True))
         self._restore(parent, loaded)
         self.assertEqual(loaded[1].param_groups[0]["lr"], .001)
@@ -277,7 +287,7 @@ class CheckpointTests(unittest.TestCase):
             progress, config=self.config, transformer=loaded[0], optimizer=loaded[1], scheduler=loaded[2],
             flow_generator=loaded[3], device=self.device, identity=self.identity, wandb_run=self.wandb_run)
         path = Path(metrics["checkpoint/path"])
-        saved = checkpointing.read_checkpoint(path, self.config)
+        saved = checkpointing.load_checkpoint_metadata(path, self.config)
         self.assertEqual(saved.metadata["progress"]["targets_seen"], 174 + 48)
         self.assertEqual(saved.metadata["progress"]["epoch"], 2)
         expected = self._advance(loaded, 3)
@@ -288,7 +298,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(resumed[2].last_epoch, 8)
         # Old checkpoints without an epoch field still load as epoch one.
         self._rewrite_metadata(parent, lambda item: item["progress"].pop("epoch"))
-        checkpointing.read_checkpoint(parent, self.config)
+        checkpointing.load_checkpoint_metadata(parent, self.config)
 
     def test_second_epoch_cursor_rejects_full_batch_arithmetic_across_partial_epoch_boundary(self):
         components = self._components()
@@ -301,24 +311,24 @@ class CheckpointTests(unittest.TestCase):
                     "optimizer_step": 1, "targets_seen": 48, "sources_seen": 16,
                     "workload_totals": {}, **update}))
                 with self.assertRaises(ValueError):
-                    checkpointing.read_checkpoint(path, self.config)
+                    checkpointing.load_checkpoint_metadata(path, self.config)
 
     def test_removing_training_state_keeps_loadable_weights_and_requires_explicit_weights_only_reads(self):
         components = self._components()
         self._advance(components)
         path, _ = self._save(components)
-        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
         before_weights = {file.name: file.read_bytes() for file in (path / "transformer").iterdir()}
         expected_bytes = (path / "training_state.pt").stat().st_size
         self.assertEqual(checkpointing.remove_training_state(checkpoint), expected_bytes)
         self.assertFalse((path / "training_state.pt").exists())
         self.assertEqual(before_weights, {file.name: file.read_bytes() for file in (path / "transformer").iterdir()})
-        retained = checkpointing.read_checkpoint(path, self.config, require_training_state=False)
+        retained = checkpointing.load_checkpoint_metadata(path, self.config, require_training_state=False)
         self.assertTrue(retained.metadata["weights_only"])
         self.assertNotIn("training_state.pt", retained.metadata["files"])
         self.assertEqual(checkpointing.remove_training_state(retained), 0)
         with self.assertRaisesRegex(ValueError, "training state was removed"):
-            checkpointing.read_checkpoint(path, self.config)
+            checkpointing.load_checkpoint_metadata(path, self.config)
         restored_model = TinyTransformer.from_pretrained(path / "transformer", local_files_only=True)
         self.assertNestedEqual(restored_model.state_dict(), components[0].state_dict())
 
@@ -326,14 +336,14 @@ class CheckpointTests(unittest.TestCase):
         components = self._components()
         self._advance(components)
         path, _ = self._save(components)
-        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
         before = {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()}
         with patch.object(Path, "replace", side_effect=OSError("publication failed")):
             with self.assertRaisesRegex(OSError, "publication failed"):
                 checkpointing.remove_training_state(checkpoint)
         self.assertEqual(before, {str(file.relative_to(path)): file.read_bytes() for file in path.rglob("*") if file.is_file()})
         self.assertEqual(list(path.parent.iterdir()), [path])
-        checkpointing.read_checkpoint(path, self.config)
+        checkpointing.load_checkpoint_metadata(path, self.config)
 
     def test_read_rejects_missing_truncated_or_unlisted_files_before_loading_tensors(self):
         components = self._components()
@@ -353,7 +363,7 @@ class CheckpointTests(unittest.TestCase):
                 else:
                     self._rewrite_metadata(path, lambda item: item.update(schema_version=100))
                 with patch.object(checkpointing.torch, "load") as load, self.assertRaises(ValueError):
-                    checkpointing.read_checkpoint(path, self.config)
+                    checkpointing.load_checkpoint_metadata(path, self.config)
                 load.assert_not_called()
 
     def test_read_rejects_non_boundary_progress_and_negative_workload(self):
@@ -369,7 +379,7 @@ class CheckpointTests(unittest.TestCase):
                 shutil.copytree(saved, path)
                 self._rewrite_metadata(path, lambda item: item["progress"].update(change))
                 with self.assertRaises(ValueError):
-                    checkpointing.read_checkpoint(path, self.config)
+                    checkpointing.load_checkpoint_metadata(path, self.config)
 
     def test_restore_rejects_optimizer_parameter_order_scheduler_or_missing_moments(self):
         components = self._components()
@@ -453,6 +463,57 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual((unfinished / "partial.bin").read_bytes(), b"unfinished")
         self.assertEqual(json.loads((foreign / "checkpoint.json").read_text())["wandb_run"]["id"], "foreign-run")
 
+    def test_optional_logging_and_scheduler_preserve_exact_next_update(self):
+        for schedule in (None, {"type": "cosine", "warmup_steps": 1, "total_steps": 4}):
+            with self.subTest(schedule=schedule):
+                payload = self.config.recipe_dict()
+                payload["scheduler"] = schedule
+                payload["logging"] = None
+                label = "constant" if schedule is None else "cosine"
+                payload["deployment"]["output_directory"] = str(self.directory / label)
+                self.config.path.write_text(json.dumps(payload))
+                self.config = load_training_config(self.config.path)
+                self.identity = checkpointing.checkpoint_identity(
+                    self.config, data_fingerprint="a" * 64, validation_manifest=None)
+                components = self._components()
+                self._advance(components, 2)
+                metrics = checkpointing.save_checkpoint(
+                    self._progress(2), config=self.config, transformer=components[0],
+                    optimizer=components[1], scheduler=components[2], flow_generator=components[3],
+                    device=self.device, identity=self.identity, wandb_run=None)
+                path = Path(metrics["checkpoint/path"])
+                self.assertEqual(path.parent.name, "local")
+                checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
+                self.assertIsNone(checkpoint.metadata["wandb_run"])
+                expected = self._advance(components)
+                restored = self._components(TinyTransformer.from_pretrained(
+                    path / "transformer", local_files_only=True))
+                self._restore(path, restored)
+                actual = self._advance(restored)
+                self.assertNestedEqual(expected, actual)
+                self.assertNestedEqual(components[1].state_dict(), restored[1].state_dict())
+
+    def test_step_limited_checkpoint_is_not_a_completed_epoch(self):
+        payload = self.config.recipe_dict()
+        payload["loop"].update(epochs=None, max_steps=2)
+        payload["scheduler"].update(warmup_steps=2, first_update_warmup_fraction=.5)
+        payload["flow"]["endpoint_targets_in_final_batch"] = payload["flow"]["endpoint_targets_per_full_batch"]
+        self.config.path.write_text(json.dumps(payload))
+        self.config = load_training_config(self.config.path)
+        self.identity = checkpointing.checkpoint_identity(
+            self.config, data_fingerprint="a" * 64, validation_manifest={})
+        components = self._components()
+        self._advance(components, 2)
+        path, _ = self._save(components)
+        checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
+        payload = self.config.recipe_dict()
+        payload["seed"] += 1
+        payload["data"]["prepared_split_directory"] = str(self.directory / "next/splits/train")
+        self.config.path.write_text(json.dumps(payload))
+        next_config = load_training_config(self.config.path)
+        with self.assertRaisesRegex(ValueError, "finish the previous epoch"):
+            checkpointing.validate_epoch_continuation(checkpoint, next_config)
+
     def test_save_requires_cleared_gradients_and_completed_scheduler(self):
         components = self._components()
         self._advance(components)
@@ -469,11 +530,11 @@ class CheckpointTests(unittest.TestCase):
 
     def _use_ddp_config(self):
         recipe = self.config.recipe_dict()
-        recipe["deployment"]["output_directory"] = self.config.recipe["deployment"]["output_directory"]
+        recipe["deployment"]["output_directory"] = str(self.config.recipe["deployment"]["output_directory"])
         recipe["deployment"]["gpu_count"] = 2
         recipe["execution"].update(distributed_strategy="ddp", flux_packing_algorithm="balanced_release_v1")
         recipe["flow"]["rng_scheme"] = "global_step_target_v1"
-        self.config = replace(self.config, recipe=recipe)
+        self.config = parse_training_config(recipe, config_path=self.config.path)
         self.identity = checkpointing.checkpoint_identity(
             self.config, data_fingerprint="a" * 64,
             validation_manifest={"validation_task_ids": ["held-out-task"]})
@@ -487,12 +548,19 @@ class CheckpointTests(unittest.TestCase):
             metadata["schema_version"] = 1
             metadata.pop("execution")
             for recipe in (metadata["recipe"], metadata["identity"]["recipe"]):
+                recipe["schema_version"] = 1
+                recipe.pop("benchmark")
+                recipe["data"].pop("source")
+                recipe["loop"].pop("epochs")
+                recipe["loop"].pop("max_steps")
+                recipe["loop"].update(max_optimizer_steps=4, expected_target_count=174,
+                                      expected_final_batch_target_count=30)
                 recipe["flow"].pop("rng_scheme", None)
                 recipe["execution"].pop("flux_packing_algorithm", None)
                 recipe["execution"].pop("flux_max_spread_tokens", None)
 
         self._rewrite_metadata(path, old_schema)
-        checkpoint = checkpointing.read_checkpoint(path, self.config)
+        checkpoint = checkpointing.load_checkpoint_metadata(path, self.config)
         self.assertTrue(checkpointing.checkpoint_identities_match(checkpoint.metadata["identity"], self.identity))
         for section, field, value in (("flow", "rng_scheme", "global_step_target_v1"),
                                       ("execution", "flux_packing_algorithm", "balanced_release_v1"),
@@ -502,7 +570,7 @@ class CheckpointTests(unittest.TestCase):
                 recipe[section][field] = value
                 changed = replace(self.config, recipe=recipe)
                 with self.assertRaisesRegex(ValueError, "recipe differs"):
-                    checkpointing.read_checkpoint(path, changed)
+                    checkpointing.load_checkpoint_metadata(path, changed)
 
     def test_ddp_roundtrip_keeps_each_rank_rng_and_existing_gradient_buffers(self):
         self._use_ddp_config()
@@ -586,7 +654,7 @@ class CheckpointTests(unittest.TestCase):
                 recipe["deployment"]["gpu_count"] = world_size
                 recipe["execution"]["distributed_strategy"] = strategy
                 with self.assertRaisesRegex(ValueError, "strategy or world size"):
-                    checkpointing.read_checkpoint(path, replace(self.config, recipe=recipe))
+                    checkpointing.load_checkpoint_metadata(path, replace(self.config, recipe=recipe))
         with self.assertRaisesRegex(ValueError, "strategy or world size"):
             self._restore(path, components)
         state_file = path / "training_state.pt"

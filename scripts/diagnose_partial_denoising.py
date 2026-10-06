@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-from dataclasses import asdict, replace
+from dataclasses import replace
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -170,7 +170,7 @@ def run(config_path: Path, workspace: Path, output: Path) -> None:
         runtime = launcher.load_runtime(config_path, config)
         runtime = replace(runtime, models=replace(runtime.models, **{
             key: Path(value) for key, value in prepared["models"].items()}))
-        report["runtime_config"] = json.loads(json.dumps(asdict(runtime), default=str))
+        report["runtime_config"] = runtime.recipe_dict()
         device = prepare_device(runtime)
         report["trajectories"] = [
             {"schedule": name, "start_t": start_t, "steps": len(times) - 1,

@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 def prepare_training_data(config: TrainingConfig, *, config_path: Path) -> dict:
     """Use all indexed tasks once, reading source_archive as a tar file or extracted tree."""
 
+    if config.recipe["data"]["source"] != "epoch_pool":
+        raise ValueError("data preparation requires data.source=epoch_pool")
     split = config.data.split_directory
     if split.parent.name != "splits":
         raise ValueError("prepared_split_directory must match <bundle>/splits/<split_name>")
@@ -67,14 +69,15 @@ def _preparation_metadata(config: TrainingConfig, config_path: Path) -> dict:
         },
         "code_sha256": {str(path.relative_to(REPOSITORY_ROOT)): sha256_file(path) for path in code_paths},
         "optimizer_batch_size": config.loop.optimizer_batch_size,
-        "optimizer_step_count": config.loop.max_optimizer_steps,
-        "final_batch_target_count": config.recipe["loop"]["expected_final_batch_target_count"],
+        "optimizer_step_count": config.epoch_optimizer_steps,
+        "final_batch_target_count": ((config.recipe["data"]["expected_task_count"] * config.targets_per_sequence - 1)
+                                     % config.loop.optimizer_batch_size + 1),
         "drop_last": False,
         "dataloader_shuffle": config.data.shuffle,
     }
 
 
-def prepare_training_view(parent_config: TrainingConfig, config: TrainingConfig) -> dict:
+def prepare_next_epoch_data(parent_config: TrainingConfig, config: TrainingConfig) -> dict:
     """Resample an already prepared full epoch from metadata, sharing its raw tasks."""
     from diffusion_arc.arc_data import (
         ARC_AUGMENTATION_GENERATOR_VERSION, ArcAugmentationSpec, ArcGeometry,
@@ -82,17 +85,19 @@ def prepare_training_view(parent_config: TrainingConfig, config: TrainingConfig)
     )
     from diffusion_arc.arc_data.splits.views import _candidate_seed
 
+    if any(item.recipe["data"]["source"] != "epoch_pool" for item in (parent_config, config)):
+        raise ValueError("epoch continuation requires data.source=epoch_pool")
     parent_split = parent_config.data.split_directory
-    parent_manifest_path = parent_split / "manifest.json"
-    manifest = json.loads(parent_manifest_path.read_text())
+    parent_training_data_manifest_path = parent_split / "manifest.json"
+    parent_training_data_manifest = json.loads(parent_training_data_manifest_path.read_text())
     split_config = load_arc_split_config(parent_split / "config.json")
     parent_view = next(view for view in split_config.views if view.name == parent_config.data.view_name)
-    records = sorted(manifest["sources"], key=lambda record: record["task_key"])
+    records = sorted(parent_training_data_manifest["sources"], key=lambda record: record["task_key"])
     count = config.recipe["data"]["expected_task_count"]
-    if (manifest["purpose"] != "training_epoch"
-            or manifest["source_count"] != count or manifest["eligible_task_count"] != count
+    if (parent_training_data_manifest["purpose"] != "training_epoch"
+            or parent_training_data_manifest["source_count"] != count or parent_training_data_manifest["eligible_task_count"] != count
             or len(records) != count or len({record["task_key"] for record in records}) != count
-            or manifest["augmentation"]["generator_version"] != ARC_AUGMENTATION_GENERATOR_VERSION
+            or parent_training_data_manifest["augmentation"]["generator_version"] != ARC_AUGMENTATION_GENERATOR_VERSION
             or split_config.max_pairs != 5 or split_config.max_cells != 9000
             or parent_view.mode is not ArcTrainingViewMode.SAMPLED
             or parent_view.augmentations_per_task != 1 or parent_view.exclude
@@ -141,22 +146,22 @@ def prepare_training_view(parent_config: TrainingConfig, config: TrainingConfig)
         _write_json(destination_split / payload["task_splits"]["validation"], [])
         _write_json(destination_split / view.output, keys)
         (bundle / "raw").symlink_to((parent_split.parent.parent / "raw").resolve(), target_is_directory=True)
-        manifest = {
-            **manifest, "seed": config.seed, "sources": records,
-            "augmentation": {**manifest["augmentation"],
+        training_data_manifest = {
+            **parent_training_data_manifest, "seed": config.seed, "sources": records,
+            "augmentation": {**parent_training_data_manifest["augmentation"],
                              "geometry": "uniform_D4" if geometry_sampling == "uniform" else "ID"},
             "keys_sha256": sha256_file(destination_split / view.output),
             "command": sys.argv, "python": sys.version,
             "preparation_script_sha256": sha256_file(Path(__file__)),
             "preparation": _preparation_metadata(config, config.path),
-            "reused_from": {"manifest": str(parent_manifest_path.resolve()),
-                            "manifest_sha256": sha256_file(parent_manifest_path)},
+            "reused_from": {"manifest": str(parent_training_data_manifest_path.resolve()),
+                            "manifest_sha256": sha256_file(parent_training_data_manifest_path)},
         }
-        _write_json(destination_split / "manifest.json", manifest)
+        _write_json(destination_split / "manifest.json", training_data_manifest)
         if output_directory.exists():
             raise FileExistsError(f"NVARC bundle appeared during preparation: {output_directory}")
         bundle.rename(output_directory)
-    return manifest
+    return training_data_manifest
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -166,9 +171,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args(argv)
     config = load_training_config(args.config, expected_type="training_run")
-    manifest = prepare_training_data(config, config_path=args.config)
-    print(f"Prepared {manifest['source_count']} sequences / {manifest['target_count']} targets")
-    print(f"Key SHA-256: {manifest['keys_sha256']}")
+    training_data_manifest = prepare_training_data(config, config_path=args.config)
+    print(f"Prepared {training_data_manifest['source_count']} sequences / {training_data_manifest['target_count']} targets")
+    print(f"Key SHA-256: {training_data_manifest['keys_sha256']}")
     print(f"Training split: {config.data.split_directory}")
 
 

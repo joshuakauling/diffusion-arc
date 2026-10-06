@@ -56,7 +56,7 @@ class NsightModalTests(unittest.TestCase):
             config = root / self.module.DEFAULT_CONFIG
             config.parent.mkdir(parents=True)
             original = json.loads((self.root / self.module.DEFAULT_CONFIG).read_text())
-            for section, key, value in (("loop", "max_optimizer_steps", 8),
+            for section, key, value in (("loop", "max_steps", 8),
                                         ("models", "nvarc_checkpoint", "/tmp/checkpoint"),
                                         ("models", "nvarc_dtype", "float32"),
                                         ("data", "num_workers", 4)):
@@ -68,7 +68,7 @@ class NsightModalTests(unittest.TestCase):
             config.write_text(json.dumps(original))
             with self.assertRaises(FileNotFoundError):
                 self.module.validate_config(root, self.module.DEFAULT_CONFIG)
-            original["nvarc_max_tokens"] = 8400
+            original["execution"]["nvarc_max_tokens"] = 8400
             config.write_text(json.dumps(original))
             with self.assertRaisesRegex(ValueError, "seven-update B3"):
                 self.module.validate_config(root, self.module.DEFAULT_CONFIG)

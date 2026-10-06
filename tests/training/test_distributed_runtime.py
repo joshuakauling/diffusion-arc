@@ -27,6 +27,7 @@ class DistributedRuntimeTests(unittest.TestCase):
 
         @dataclass
         class Config:
+            recipe: dict
             device: str = "cuda:0"
 
         self.addCleanup(torch.set_num_threads, torch.get_num_threads())
@@ -45,7 +46,7 @@ class DistributedRuntimeTests(unittest.TestCase):
                 initialize = stack.enter_context(patch("torch.distributed.init_process_group", side_effect=lambda *a, **k: events.append("init")))
                 destroy = stack.enter_context(patch("torch.distributed.destroy_process_group", side_effect=lambda: events.append("destroy")))
                 try:
-                    with distributed_runtime(Config()) as runtime:
+                    with distributed_runtime(Config(recipe={"execution": {"distributed_strategy": "ddp"}})) as runtime:
                         self.assertEqual((runtime.rank, runtime.local_rank, runtime.world_size), (rank, rank, world_size))
                         events.append("body")
                         if fail:

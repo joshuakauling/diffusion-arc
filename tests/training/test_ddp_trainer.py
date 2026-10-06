@@ -25,8 +25,8 @@ from diffusion_arc.model.contracts import NvarcBatchOutput
 from diffusion_arc.model.flux.packing import PackedFluxForward, predict_packed_flux_velocity
 from diffusion_arc.model.flux.transformer import Flux2Transformer2DModel
 from diffusion_arc.training.step.encoding import encode_training_batch
-from diffusion_arc.training.step.flow_sampling import sample_endpoint_flow_batches, select_flow_batch
-from diffusion_arc.training.step.flux_batching import FluxTargetBatch
+from diffusion_arc.training.step.flow_sampling import sample_quota_flow_batches, select_flow_batch
+from diffusion_arc.training.step.flux_batching import FluxMicrobatchPlan
 from diffusion_arc.training.step.flux_microbatch import build_flux_microbatch
 from diffusion_arc.training.step.loss import RegionLossWeights, RegionVelocityLoss, velocity_mse
 from diffusion_arc.training.step.lr_schedule import LinearWarmupConstantLR
@@ -82,7 +82,7 @@ def _objective(name):
 
 
 def _plan(prefixes, _policy=None, **_):
-    return tuple(FluxTargetBatch(tuple(range(i, min(i + 2, len(prefixes)))),
+    return tuple(FluxMicrobatchPlan(tuple(range(i, min(i + 2, len(prefixes)))),
                                 sum(n + 900 for n in prefixes[i:i + 2]))
                  for i in range(0, len(prefixes), 2))
 
@@ -117,7 +117,7 @@ def _frames():
                                    input_ids=tuple(rank * 11 + i for i in source.input_ids)))
         encoded = _encode(tuple(sources))
         clean = tuple(target.clean_latent for target in encoded.inputs)
-        flows = sample_endpoint_flow_batches(clean, endpoint_count=2, generator=generator)
+        flows = sample_quota_flow_batches(clean, endpoint_count=2, generator=generator)
         frames.append(dict(sources=tuple(sources), clean=clean, flows=flows))
     return tuple(frames)
 
@@ -218,9 +218,9 @@ def _check_updates(initial, frames, snapshots, objective, rank=None, *, bucket_v
             assert result.gradient_clipped == (expected["norm"] > 0.1)
             start = 0 if rank in (None, 0) else len(frame["sources"][0].target_grids)
             stop = start + result.target_count
-            torch.testing.assert_close(torch.tensor([t.loss for t in result.targets]),
+            torch.testing.assert_close(torch.tensor([t.loss for t in result.target_metrics]),
                                        expected["per_target"][start:stop], **LOSS_TOLERANCE)
-            assert [t.timestep for t in result.targets] == [float(f.timesteps[0]) for f in frame["flows"][start:stop]]
+            assert [t.timestep for t in result.target_metrics] == [float(f.timesteps[0]) for f in frame["flows"][start:stop]]
             torch.testing.assert_close(result.loss, float(expected["per_target"][start:stop].mean()), **LOSS_TOLERANCE)
             assert len(sync_states) == result.flux_forward_calls
             if rank is not None:
