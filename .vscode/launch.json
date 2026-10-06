@@ -1,0 +1,38 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CPU: Complete training script (tiny fixtures)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/scripts/diagnostics/debug_training_cpu.py",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src:${workspaceFolder}",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "stopOnEntry": true
+    },
+    {
+      "name": "CPU: Trainer forward/backward test",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "module": "unittest",
+      "args": [
+        "-v",
+        "test_trainer.TrainingRecipeTests.test_recipe_updates_and_each_target_measurement_match_unfragmented_reference"
+      ],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src:${workspaceFolder}/tests/training",
+        "PYTHONDONTWRITEBYTECODE": "1"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
