@@ -137,7 +137,8 @@ def run_training_loop(config, *, runtime, stack, callbacks, progress, checkpoint
         flux_model = DDP(flux_model, device_ids=[device.index] if device.type == "cuda" else None,
                       process_group=runtime.process_group, forward_sync_buffers=False, gradient_as_bucket_view=True)
     elif runtime.strategy == "fsdp2":
-        flux_model = shard_flux(flux_model, runtime=runtime)
+        flux_model = shard_flux(flux_model, runtime=runtime,
+                                reshard_after_forward=config.fsdp_reshard_after_forward)
 
     # Assemble the optimizer, scheduler, and Trainer for one complete optimizer update.
     optimizer = build_optimizer(config, flux_transformer=flux_model)

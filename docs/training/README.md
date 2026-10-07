@@ -289,12 +289,46 @@ view changes; the benchmark does not alter the training schedule. The input
 recipe's full-epoch counts remain provenance, while the benchmark config requires
 exactly 60 full batches from its selected view.
 
+For **B6**, select
+[`benchmarks/b6_fsdp2_16k.json`](../../configs/training/benchmarks/b6_fsdp2_16k.json)
+with `--config`. It uses two-GPU FSDP2 and sets
+`execution.flux_max_joint_tokens=16384`. This optional benchmark field overrides
+the recipe's pack capacity; the effective value is validated by the training
+config and recorded in the run manifest. When omitted, the recipe's limit is
+retained, including 12,288 tokens for the B5 FSDP2 baseline. The global optimizer
+batch remains 48 targets.
+
+For **B7**, use the matched 14,336-token pair:
+[`no forward resharding`](../../configs/training/benchmarks/b7_fsdp2_14k_no_forward_reshard.json)
+and its [`forward resharding control`](../../configs/training/benchmarks/b7_fsdp2_14k_forward_reshard.json).
+They differ only in `execution.fsdp_reshard_after_forward` (`false` versus `true`)
+and both use three repetitions with ten warmup and 50 measured updates.
+With `false`, FLUX blocks retain gathered parameters after forward, avoiding
+the backward all-gather. Both variants reshard after backward and synchronize
+gradients in the final scheduled microbatch; the packed root always retains parameters
+after forward. The optional boolean is accepted in training recipes and
+benchmark overrides only for `distributed_strategy=fsdp2`. Omission retains the
+recipe setting, or the original block policy (`true`) for older recipes. The
+effective override is recorded in the run recipe and used by the numerical
+diagnostic. Capacity probes select their policy separately through their CLI.
+Run `--mode smoke` for the complete pipeline before the benchmark; the synthetic
+capacity result alone does not establish its memory limit.
+
+FSDP2 always accumulates full local gradients until the final scheduled microbatch
+of each optimizer update, including a padded dummy call, then reduces before
+clipping and AdamW. Training, benchmarks, numerical diagnostics and the capacity
+probe share this policy without a configuration or CLI switch. Parameter
+all-gathers follow the resharding policy above. Retaining full gradients can raise
+peak memory; earlier capacity measurements with reduction after every microbatch
+do not establish the current limit.
+
 `--mode smoke` runs the first three updates. `--mode benchmark` runs ten training
 updates excluded from statistics, followed by 50 measured updates. Both modes
 start fresh from the base checkpoint and share their initial data/noise sequence.
-Each command is one run; repetitions are not launched automatically. Start with
-the two smoke runs, inspect their counts and finite global losses, then run the
-benchmarks. One GPU uses the same DDP path with `world_size=1`.
+The Modal launcher executes the configured repetitions automatically in benchmark
+mode (three for the checked-in DDP/FSDP2 configs), each in fresh worker processes.
+Smoke mode runs once. Inspect smoke counts and finite global losses before the
+benchmark. One GPU uses the same DDP path with `world_size=1`.
 
 ```bash
 python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
@@ -317,10 +351,12 @@ image and mounts `diffusion-arc-models` for cached checkpoints and results. It
 requests H200 GPUs with eight CPU cores and 64 GiB host RAM per GPU, sets
 `OMP_NUM_THREADS=8` and `MKL_NUM_THREADS=8`, and starts `torchrun` inside one remote
 function. Each training process explicitly sets eight PyTorch CPU threads. Function
-timeouts are ten minutes for smoke and thirty for benchmark, with no retries.
+timeouts are ten minutes for smoke and thirty per benchmark repetition, with no
+retries (90 minutes for three benchmark repetitions).
 DataLoader workers remain per rank: two on one GPU, four in total on two GPUs.
 Each run creates `results/ddp/<run-id>-<mode>-<gpus>gpu/` on the volume, containing
-`launch.json` and a `training/` directory. Data and model downloads and profiling
+`launch.json` and a `training/` directory for smoke/profile or `repetition-N/`
+directories and a combined `summary.json` for benchmarks. Data and model downloads and profiling
 remain separate. Rank zero writes `manifest.json`, flushed `steps.jsonl` and `summary.json` on
 success. Python failures retain completed rows and write `failure.json`; abrupt
 process termination may leave only the partial files. No summary means the run
@@ -359,6 +395,25 @@ unchanged frozen modules. `training/{reference,ddp}/` retains manifests and step
 records; `training/summary.json` reports `passed` or `failed`, including per-block
 gradient diagnostics. A completed job can fail its numerical criteria. This
 instrumented run is not a throughput benchmark or a long-run convergence test.
+
+Selecting the FSDP2 configuration adds three fresh FSDP2 updates after the
+single-GPU and DDP phases. All three paths use `legacy_bfd_v1` packing and the
+same criteria. The summary checks each pair's losses over three updates and full
+gradients before clipping in step one. FSDP gradients are reconstructed one
+parameter at a time; parameter fingerprints describe local shards and are not
+required to match across FSDP ranks. Parameter updates and AdamW moments are not
+directly compared between strategies.
+
+```bash
+.venv/bin/modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
+  --config configs/training/benchmarks/fsdp2_training.json \
+  --gpus 2 --mode numerics
+```
+
+This uses the same two-H200, 30-minute allocation with no retries and cached
+models only. Results persist under `results/fsdp2/<run-id>-numerics-2gpu/` in the
+`diffusion-arc-models` volume, with `training/{reference,ddp,fsdp2}/` phase records
+and `training/summary.json` containing the three pairwise results.
 
 ## Further reading
 

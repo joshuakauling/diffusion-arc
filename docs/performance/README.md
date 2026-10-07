@@ -12,10 +12,19 @@ The B3 investigations are summarized separately for [NVARC](b3-nvarc.md) and
 
 The [two-GPU DDP report](ddp.md) covers the current Trainer-based benchmark,
 its separate Torch Profiler capture, and the OOM comparison with expandable
-segments. The shared setup and B0–B3 table below describe the historical
-single-GPU series.
+segments. The [FSDP2 report](fsdp2.md) records the two-H200 baseline B5,
+the larger-pack variant B6, their memory/throughput trade-offs against DDP,
+and the logged loss comparisons.
+The shared setup below describes the historical single-GPU series B0–B3.
+The results table also includes DDP and FSDP2; their reports document the
+distributed setup and differences from that series.
 
-## Shared benchmark setup
+Benchmark variants use consecutive **B** identifiers: **B4** is the two-GPU
+DDP result, **B5** is the first FSDP2 result with 12,288-token packs, and **B6**
+is FSDP2 with 16,384-token packs. These identify experiment configurations;
+the variants share the training runner.
+
+## Shared single-GPU benchmark setup
 
 ### Dataset
 
@@ -99,12 +108,30 @@ The current runtime uses B3.
 
 ## Results
 
-All rows combine 150 measured steps on the same workload. Throughput gains
-are relative to B0 and include all changes in each variant.
+All rows combine 150 measured steps (three repetitions of 50 steps after
+10 warm-up steps), with 48 global targets per optimizer update. Targets/s is
+total throughput across GPUs; memory is the maximum on any one GPU.
 
-| Variant | Median step | p95 step | Targets/s | Throughput vs B0 | Peak allocated | Peak reserved |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| [B0 — individual calls](b0.md) | 15.45 s | 17.59 s | 3.094 | — | 113.91 GiB | 138.12 GiB |
-| [B1 — fixed buckets](b1.md) | 13.91 s | 15.77 s | 3.461 | +11.9% | 113.90 GiB | 118.84 GiB |
-| [B2 — scheduled batches and prefetch](b2.md) | 11.32 s | 13.47 s | 4.201 | +35.8% | 126.48 GiB | 133.06 GiB |
-| [**B3 — FA3 packing**](b3.md) | **9.06 s** | **10.63 s** | **5.250** | **+69.7%** | **131.59 GiB** | **137.44 GiB** |
+| Variant | H200 GPUs | Median step | p95 step | Targets/s | Throughput vs B0 | Peak allocated / GPU | Peak reserved / GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| [B0 — individual calls](b0.md) | 1 | 15.45 s | 17.59 s | 3.094 | — | 113.91 GiB | 138.12 GiB |
+| [B1 — fixed buckets](b1.md) | 1 | 13.91 s | 15.77 s | 3.461 | +11.9% | 113.90 GiB | 118.84 GiB |
+| [B2 — scheduled batches and prefetch](b2.md) | 1 | 11.32 s | 13.47 s | 4.201 | +35.8% | 126.48 GiB | 133.06 GiB |
+| [**B3 — FA3 packing**](b3.md) | **1** | **9.06 s** | **10.63 s** | **5.250** | **+69.7%** | **131.59 GiB** | **137.44 GiB** |
+| [B4 — DDP](ddp.md) | 2 | 5.07 s | 5.89 s | 9.566 | +209.2% | 131.13 GiB | 133.23 GiB |
+| [B5 — FSDP2, 12k packs](fsdp2.md) | 2 | 5.54 s | 6.44 s | 8.710 | +181.5% | 103.90 GiB | 109.66 GiB |
+| [B6 — FSDP2, 16k packs](fsdp2.md#b6-larger-packs) | 2 | 5.30 s | 6.22 s | 9.015 | +191.4% | 123.46 GiB | 128.79 GiB |
+
+B6 completed all three repetitions with 16,384-token packs, compared with
+12,288 for B5. Throughput increased **3.5%**, while peak allocated memory rose
+**19.56 GiB per GPU**. FLUX calls fell **23.5%**, including dummy calls; this is
+a call-count reduction, not a measured communication-time reduction. B6 remains
+**5.8% below DDP throughput**, with **7.67 GiB less peak allocated memory per GPU**.
+
+Throughput gains relative to B0 include all changes in each variant, including
+the additional GPU for DDP/FSDP2. The distributed runs also use a later training
+recipe with different loss weighting and scheduler settings; DDP and FSDP2 differ
+in source version and packing. These historical results do not isolate GPU
+scaling efficiency or sharding overhead. See the variant reports for comparisons
+and numerical checks. The available B4/B5 profiler captures use a separate
+schedule: 10 warm-up updates followed by one recorded update (step 11).

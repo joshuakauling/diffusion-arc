@@ -7,7 +7,7 @@
     "view_name": "train",
     "expected_source_count": 960
   },
-  "repetitions": 1,
+  "repetitions": 3,
   "smoke_steps": 3,
   "warmup_steps": 10,
   "measured_steps": 50,

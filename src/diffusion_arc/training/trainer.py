@@ -264,8 +264,9 @@ class Trainer:
         optionally clip them, update parameters once and advance the supplied
         scheduler once.
 
-        DDP synchronizes during the last local backward. FSDP2 synchronizes every
-        backward, padding shorter rank schedules with zero-weight model calls.
+        DDP synchronizes during the last local backward. FSDP2 synchronizes only
+        during the final scheduled backward of each optimizer batch,
+        padding shorter rank schedules with zero-weight model calls.
         Both reduce target counts before encoding and loss-finiteness afterward.
         Non-finite losses/gradients abort every rank before the update. Other
         failures require the caller's process supervision; this is not a
@@ -309,7 +310,7 @@ class Trainer:
 
         # Run FLUX microbatches and accumulate gradients for one optimizer update.
         for index, microbatch_plan in enumerate(microbatch_schedule):
-            # DDP syncs gradients only on the last microbatch; FSDP syncs on every microbatch.
+            # The strategy selects synchronization, including the final FSDP dummy call.
             with self.distribution_strategy.microbatch_context(is_last=index == len(microbatch_schedule) - 1):
                 if microbatch_plan is None:
                     backward_loss = compute_fsdp_dummy_loss(self.flux_model, device=self.device)

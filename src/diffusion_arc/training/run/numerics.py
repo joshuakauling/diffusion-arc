@@ -1,6 +1,7 @@
 """Bounded CPU comparisons of full gradients and exact model-state fingerprints."""
 
 from dataclasses import dataclass
+from contextlib import ExitStack
 import hashlib
 import json
 import math
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch.distributed.tensor import DTensor
 
 
 @dataclass(frozen=True)
@@ -62,10 +64,12 @@ def _header(name, tensor):
 
 
 def state_fingerprint(module, chunk_elements):
-    """Hash all parameters and buffers, checking every value for finiteness."""
+    """Hash parameters and buffers, or this rank's FSDP shards, checking finiteness."""
     digest, count = hashlib.sha256(), 0
     for name, value in module.state_dict().items():
         digest.update(_header(name, value))
+        if isinstance(value, DTensor):
+            value = value.to_local()
         for chunk in cpu_chunks(value, chunk_elements):
             if not bool(torch.isfinite(chunk).all()):
                 raise FloatingPointError(f"non-finite state: {name}")
@@ -121,14 +125,12 @@ class VectorDifference:
                     if ref and actual else None, max_absolute=self.max_absolute, elements=self.elements)
 
 
-def inspect_gradients(module, chunk_elements, *, save_to=None, compare_to=None):
-    """Fingerprint every gradient; optionally save or compare the FP32 reference.
+def inspect_gradients(module, chunk_elements, *, save_to=None, compare_to=None, compare_to_ddp=None):
+    """Capture complete gradients, gathering FSDP one parameter at a time.
 
-    The binary reference is temporary job-local scratch. Only rank zero needs to
-    read it; both DDP ranks independently fingerprint their actual gradients.
+    Every FSDP rank must participate in the gathers. Only rank zero reads the
+    temporary CPU references; captures never enter the mounted results volume.
     """
-    if save_to is not None and compare_to is not None:
-        raise ValueError("save and compare are mutually exclusive")
     layout = []
     for name, parameter in module.named_parameters():
         if not parameter.requires_grad:
@@ -138,88 +140,100 @@ def inspect_gradients(module, chunk_elements, *, save_to=None, compare_to=None):
         layout.append(dict(name=name, shape=list(parameter.shape), elements=parameter.numel()))
     if not layout:
         raise ValueError("no trainable parameters")
-    reference = None
-    if save_to is not None:
-        Path(save_to).mkdir(parents=True, exist_ok=False)
-        stream = (Path(save_to) / "gradients.bin").open("xb")
-    elif compare_to is not None:
-        reference = json.loads((Path(compare_to) / "gradients.json").read_text())
-        path = Path(compare_to) / "gradients.bin"
-        if reference["layout"] != layout or path.stat().st_size != 4 * sum(x["elements"] for x in layout):
-            raise ValueError("reference gradient layout or file size differs")
-        stream = path.open("rb")
-    else:
-        stream = None
-    digest, reference_digest = hashlib.sha256(), hashlib.sha256()
-    total, blocks, squared_norm = VectorDifference(), {}, 0.0
-    try:
+    digest, squared_norm = hashlib.sha256(), 0.0
+    references = {}
+    with ExitStack() as stack:
+        capture = None
+        if save_to is not None:
+            Path(save_to).mkdir(parents=True, exist_ok=False)
+            capture = stack.enter_context((Path(save_to) / "gradients.bin").open("xb"))
+        for label, directory in (("reference", compare_to), ("ddp", compare_to_ddp)):
+            if directory is None:
+                continue
+            reference = json.loads((Path(directory) / "gradients.json").read_text())
+            path = Path(directory) / "gradients.bin"
+            if reference["layout"] != layout or path.stat().st_size != 4 * sum(x["elements"] for x in layout):
+                raise ValueError("reference gradient layout or file size differs")
+            references[label] = dict(metadata=reference, stream=stack.enter_context(path.open("rb")),
+                                     digest=hashlib.sha256(), total=VectorDifference(), blocks={})
         for name, parameter in module.named_parameters():
             if not parameter.requires_grad:
                 continue
             value = parameter.grad
+            # Bound extra GPU storage to one parameter, never a full-model gather.
+            if isinstance(value, DTensor):
+                value = value.full_tensor()
             digest.update(_header(name, value))
-            reference_digest.update(_header(name, value))
+            for reference in references.values():
+                reference["digest"].update(_header(name, value))
             for chunk in cpu_chunks(value, chunk_elements):
                 if not bool(torch.isfinite(chunk).all()):
                     raise FloatingPointError(f"non-finite gradient: {name}")
                 raw = chunk.numpy().tobytes()
                 digest.update(raw)
                 squared_norm += float(chunk.double().square().sum())
-                if save_to is not None:
-                    stream.write(raw)
-                elif compare_to is not None:
-                    raw_reference = stream.read(len(raw))
-                    reference_digest.update(raw_reference)
+                if capture is not None:
+                    capture.write(raw)
+                for reference in references.values():
+                    raw_reference = reference["stream"].read(len(raw))
+                    reference["digest"].update(raw_reference)
                     ref = torch.from_numpy(np.frombuffer(raw_reference, dtype=np.float32).copy())
-                    total.add(ref, chunk)
-                    blocks.setdefault(_block(name), VectorDifference()).add(ref, chunk)
-    finally:
-        if stream is not None:
-            stream.close()
+                    reference["total"].add(ref, chunk)
+                    reference["blocks"].setdefault(_block(name), VectorDifference()).add(ref, chunk)
+            del value
     result = dict(sha256=digest.hexdigest(), norm=math.sqrt(squared_norm),
                   elements=sum(x["elements"] for x in layout))
     if save_to is not None:
         write_json(Path(save_to) / "gradients.json", dict(layout=layout, **result))
-    if compare_to is not None:
-        if reference_digest.hexdigest() != reference["sha256"]:
+    for label, reference in references.items():
+        if reference["digest"].hexdigest() != reference["metadata"]["sha256"]:
             raise ValueError("reference gradient checksum mismatch")
-        result.update(comparison=total.result(), blocks={k: v.result() for k, v in blocks.items()})
+        prefix = "" if label == "reference" else "ddp_"
+        result[prefix + "comparison"] = reference["total"].result()
+        result[prefix + "blocks"] = {k: v.result() for k, v in reference["blocks"].items()}
     return result
 
 
-def compare_records(reference, distributed, criteria):
+def compare_records(reference, distributed, criteria, *, strategy="ddp", reference_strategy="single_process"):
     """Apply preregistered criteria; ingestion or identity failures cannot pass."""
     if len(reference) != criteria.steps or len(distributed) != criteria.steps:
         raise ValueError("both phases must complete exactly the configured steps")
+    if strategy not in ("ddp", "fsdp2") or reference_strategy not in ("single_process", "ddp"):
+        raise ValueError("unsupported numerical comparison strategies")
     rows, failures = [], []
     for index, (plain, ddp) in enumerate(zip(reference, distributed, strict=True), 1):
         if plain["step"] != index or ddp["step"] != index:
             raise ValueError("missing or reordered optimizer steps")
         peers = ddp["ranks"]
-        if len(plain["ranks"]) != 1 or [r["rank"] for r in peers] != [0, 1]:
-            raise ValueError("expected one plain process and two DDP ranks")
+        reference_ranks = [0] if reference_strategy == "single_process" else [0, 1]
+        if [r["rank"] for r in plain["ranks"]] != reference_ranks or [r["rank"] for r in peers] != [0, 1]:
+            raise ValueError("unexpected reference or distributed ranks")
         expected, actual = plain["loss"], ddp["loss"]
         if not math.isfinite(expected) or not math.isfinite(actual):
             raise ValueError("non-finite reported loss")
         delta = abs(actual - expected)
         relative = delta / abs(expected) if expected else (0.0 if delta == 0 else None)
         checks = dict(loss=relative is not None and relative <= criteria.loss_rtol,
-                      rank_parameters=peers[0]["parameters"] == peers[1]["parameters"],
                       frozen=all(r["frozen_unchanged"] and r["frozen_no_grad"] for r in plain["ranks"] + peers),
                       learning_rate=all(r["learning_rates"] == plain["ranks"][0]["learning_rates"] for r in peers))
+        if strategy == "ddp":
+            checks["rank_parameters"] = peers[0]["parameters"] == peers[1]["parameters"]
         for key in ("inputs", "draws"):
             checks[key] = ([v for r in plain["ranks"] for v in r[key]]
                            == [v for r in peers for v in r[key]])
         gradient = None
         if index == 1:
-            checks["rank_gradients"] = peers[0]["gradients"]["sha256"] == peers[1]["gradients"]["sha256"]
-            gradient = peers[0]["gradients"]["comparison"]
+            if strategy == "ddp":
+                checks["rank_gradients"] = peers[0]["gradients"]["sha256"] == peers[1]["gradients"]["sha256"]
+            key = "ddp_comparison" if reference_strategy == "ddp" else "comparison"
+            gradient = peers[0]["gradients"][key]
             checks["gradient_l2"] = (gradient["relative_l2"] is not None
                                      and gradient["relative_l2"] <= criteria.gradient_relative_l2_max)
         failures.extend(f"step_{index}/{key}" for key, passed in checks.items() if not passed)
-        rows.append(dict(step=index, reference_loss=expected, ddp_loss=actual,
+        rows.append(dict(step=index, reference_loss=expected, **{f"{strategy}_loss": actual},
                          absolute_loss_difference=delta, relative_loss_difference=relative,
                          checks=checks, gradient=gradient))
     return dict(event="complete", status="failed" if failures else "passed", optimizer_steps=criteria.steps,
                 failures=failures, steps=rows,
-                gradient_blocks=distributed[0]["ranks"][0]["gradients"]["blocks"])
+                gradient_blocks=distributed[0]["ranks"][0]["gradients"][
+                    "ddp_blocks" if reference_strategy == "ddp" else "blocks"])

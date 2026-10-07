@@ -74,6 +74,76 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(config.training.recipe["data"]["prepared_split_directory"],
                          original.data.split_directory)
 
+    def test_b6_changes_only_pack_capacity_from_the_fsdp_baseline(self):
+        directory = BENCHMARK.parent
+        baseline = load_training_benchmark_config(directory / "fsdp2_training.json")
+        candidate = load_training_benchmark_config(directory / "b6_fsdp2_16k.json")
+        self.assertEqual(baseline.training.flux_packing.max_tokens, 12288)
+        self.assertEqual(candidate.training.flux_packing.max_tokens, 16384)
+        expected = baseline.training.recipe_dict()
+        expected["execution"]["flux_max_joint_tokens"] = 16384
+        self.assertEqual(candidate.training.recipe_dict(), expected)
+        self.assertEqual(candidate.training.data, baseline.training.data)
+        self.assertEqual((candidate.repetitions, candidate.warmup_steps, candidate.measured_steps), (3, 10, 50))
+        self.assertEqual(candidate.training.loop.optimizer_batch_size, 48)
+        self.assertEqual(load_training_config(RECIPE).flux_packing.max_tokens, 12288)
+
+    def test_b7_pair_is_matched_except_forward_resharding(self):
+        baseline = load_training_benchmark_config(BENCHMARK.parent / "fsdp2_training.json")
+        expected = baseline.training.recipe_dict()
+        expected["execution"]["flux_max_joint_tokens"] = 14336
+        for filename, reshard in (("b7_fsdp2_14k_forward_reshard.json", True),
+                                 ("b7_fsdp2_14k_no_forward_reshard.json", False)):
+            with self.subTest(filename=filename):
+                candidate = load_training_benchmark_config(BENCHMARK.parent / filename)
+                expected["execution"]["fsdp_reshard_after_forward"] = reshard
+                self.assertEqual(candidate.training.recipe_dict(), expected)
+                self.assertIs(candidate.training.fsdp_reshard_after_forward, reshard)
+                self.assertEqual(candidate.training.flux_packing.max_tokens, 14336)
+                self.assertEqual(candidate.training.data, baseline.training.data)
+                self.assertEqual((candidate.repetitions, candidate.smoke_steps, candidate.warmup_steps,
+                                  candidate.measured_steps), (3, 3, 10, 50))
+        self.assertTrue(baseline.training.fsdp_reshard_after_forward)
+        self.assertTrue(load_training_benchmark_config(BENCHMARK.parent / "b6_fsdp2_16k.json")
+                        .training.fsdp_reshard_after_forward)
+
+    def test_fsdp_resharding_can_inherit_or_override_the_recipe(self):
+        recipe = load_training_config(RECIPE).recipe_dict()
+        recipe["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        recipe["flow"]["rng_scheme"] = "global_step_target_v1"
+        recipe_path = self.path.parent / "recipe.json"
+        self.payload["training_recipe"] = str(recipe_path)
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        for value in (False, True):
+            with self.subTest(value=value):
+                recipe["execution"]["fsdp_reshard_after_forward"] = value
+                recipe_path.write_text(json.dumps(recipe))
+                self.payload["execution"].pop("fsdp_reshard_after_forward", None)
+                self.assertIs(self.load().training.fsdp_reshard_after_forward, value)
+                self.payload["execution"]["fsdp_reshard_after_forward"] = not value
+                self.assertIs(self.load().training.fsdp_reshard_after_forward, not value)
+        for value in (None, 0, 1, "false"):
+            self.payload["execution"]["fsdp_reshard_after_forward"] = value
+            with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_reshard_after_forward"):
+                self.load()
+        self.payload["execution"].update(distributed_strategy="ddp", fsdp_reshard_after_forward=False)
+        with self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):
+            self.load()
+
+    def test_removed_gradient_sync_override_is_rejected(self):
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        for value in (False, True):
+            with self.subTest(value=value):
+                self.payload["execution"]["fsdp_sync_gradients_at_batch_end"] = value
+                with self.assertRaisesRegex(ValueError, "fsdp_sync_gradients_at_batch_end"):
+                    self.load()
+
+    def test_pack_capacity_override_rejects_invalid_types_and_out_of_range_limits(self):
+        for value in (None, True, 16384.0, "16384", 0, 9299, 1 << 31):
+            with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
+                self.payload["execution"]["flux_max_joint_tokens"] = value
+                self.load()
+
     def test_rejects_wrong_config_types_unknown_missing_and_duplicate_fields(self):
         for change in (
             lambda p: p.update(config_type="training_run"),

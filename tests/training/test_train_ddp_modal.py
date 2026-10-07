@@ -18,6 +18,7 @@ from tests.training.test_training_modal import _App, RecordingImage
 
 
 ROOT = Path(__file__).resolve().parents[2]
+FSDP_CONFIG = "configs/training/benchmarks/fsdp2_training.json"
 
 
 class TrainDdpModalTests(unittest.TestCase):
@@ -37,15 +38,16 @@ class TrainDdpModalTests(unittest.TestCase):
             spec.loader.exec_module(self.launcher)
         volume_factory.assert_called_once_with("diffusion-arc-models", create_if_missing=False)
 
-    def make_repository(self, directory, *, warmup_steps=0, measured_steps=1):
+    def make_repository(self, directory, *, warmup_steps=0, measured_steps=1, config=None):
         repository = Path(directory).resolve()
-        config = repository / self.launcher.CONFIG
-        config.parent.mkdir(parents=True)
-        shutil.copyfile(ROOT / "configs/training/arc_agi_1_epoch.json", config.parent.parent / "arc_agi_1_epoch.json")
-        benchmark = json.loads((ROOT / self.launcher.CONFIG).read_text())
+        config_name = config or self.launcher.CONFIG
+        config_path = repository / config_name
+        config_path.parent.mkdir(parents=True)
+        shutil.copyfile(ROOT / "configs/training/arc_agi_1_epoch.json", config_path.parent.parent / "arc_agi_1_epoch.json")
+        benchmark = json.loads((ROOT / config_name).read_text())
         benchmark.update(smoke_steps=1, warmup_steps=warmup_steps, measured_steps=measured_steps)
         benchmark["data"]["expected_source_count"] = 16 * (warmup_steps + measured_steps)
-        write_json(config, benchmark)
+        write_json(config_path, benchmark)
         write_json(repository / self.launcher.NUMERICS_CRITERIA, dict(
             schema_version=1, steps=3, loss_rtol=0.001,
             gradient_relative_l2_max=0.05, chunk_elements=1048576,
@@ -118,12 +120,39 @@ class TrainDdpModalTests(unittest.TestCase):
                 remote.with_options.assert_not_called()
         self.assertEqual(self.launcher.resources(2, "numerics", repetitions=7)["timeout"], 1800)
 
-    def test_numerics_runs_plain_then_ddp_with_one_budget_and_removes_tensor_scratch(self):
-        for result_status in ("passed", "failed"):
-            with self.subTest(result_status=result_status), tempfile.TemporaryDirectory() as directory:
-                repository = self.make_repository(Path(directory) / "repository", measured_steps=3)
+    def test_fsdp_numerics_selects_config_and_rejects_incompatible_execution_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory, measured_steps=3, config=FSDP_CONFIG)
+            config_path = repository / FSDP_CONFIG
+            payload = json.loads(config_path.read_text())
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                self.launcher.main(gpus=2, mode="numerics", config=FSDP_CONFIG)
+                remote.with_options.assert_called_once_with(
+                    gpu="H200:2", cpu=(16.0, 16.0), memory=(131072, 131072), timeout=1800,
+                )
+                self.assertEqual(remote.with_options.return_value.remote.call_args.args[:3],
+                                 (FSDP_CONFIG, 2, "numerics"))
+                remote.reset_mock()
+                for strategy, gpu_count, error in (
+                    ("fsdp2", 1, "configured gpu_count=2"),
+                    ("fsdp2", 4, "configured gpu_count=2"),
+                    ("single_process", 1, "ddp or fsdp2"),
+                ):
+                    payload["execution"].update(distributed_strategy=strategy, gpu_count=gpu_count)
+                    write_json(config_path, payload)
+                    with self.subTest(strategy=strategy, gpu_count=gpu_count), \
+                            self.assertRaisesRegex(ValueError, error):
+                        self.launcher.main(gpus=2, mode="numerics", config=FSDP_CONFIG)
+                remote.with_options.assert_not_called()
+
+    def test_numerics_runs_selected_phases_with_one_budget_and_removes_tensor_scratch(self):
+        for config, result_status in ((config, status) for config in (self.launcher.CONFIG, FSDP_CONFIG)
+                                     for status in ("passed", "failed")):
+            with self.subTest(config=config, result_status=result_status), tempfile.TemporaryDirectory() as directory:
+                repository = self.make_repository(Path(directory) / "repository", measured_steps=3, config=config)
                 volume = Path(directory).resolve() / "volume"
-                experiment = self.launcher.check_inputs(repository, self.launcher.CONFIG)
+                experiment = self.launcher.check_inputs(repository, config)
                 for checkpoint in (experiment.training.models.nvarc_checkpoint,
                                    experiment.training.models.flux_checkpoint):
                     (volume / checkpoint.name).mkdir(parents=True)
@@ -138,6 +167,7 @@ class TrainDdpModalTests(unittest.TestCase):
                     self.assertFalse(scratch.is_relative_to(volume))
                     self.assertEqual(command[command.index("--criteria") + 1],
                                      str(repository / self.launcher.NUMERICS_CRITERIA))
+                    self.assertEqual(command[command.index("--config") + 1], str(repository / config))
                     if phase == "reference":
                         (scratch / "gradients.bin").write_bytes(b"test tensor")
                     else:
@@ -148,35 +178,47 @@ class TrainDdpModalTests(unittest.TestCase):
                             event="complete", status=result_status, optimizer_steps=3,
                         ))
 
+                include_fsdp2 = config == FSDP_CONFIG
+                times = [0, 10, 120, 400, 900] if include_fsdp2 else [0, 10, 120, 900]
+                phases = ["reference", "ddp", "fsdp2", "compare"] if include_fsdp2 else ["reference", "ddp", "compare"]
                 with patch.object(self.launcher, "REMOTE_ROOT", repository), \
                         patch.object(self.launcher, "VOLUME_ROOT", volume), \
-                        patch.object(self.launcher.time, "monotonic", side_effect=[0, 10, 120, 900]), \
+                        patch.object(self.launcher.time, "monotonic", side_effect=times), \
                         patch.object(self.launcher, "run_worker", side_effect=worker):
-                    self.launcher.train_ddp(self.launcher.CONFIG, 2, "numerics", {})
-                self.assertEqual(timeouts, [1700, 1590, 810])
+                    self.launcher.train_ddp(config, 2, "numerics", {})
+                self.assertEqual(timeouts, [1700, 1590, 1310, 810] if include_fsdp2 else [1700, 1590, 810])
                 self.assertEqual([command[command.index("--phase") + 1] for command in commands],
-                                 ["reference", "ddp", "compare"])
+                                 phases)
                 self.assertNotIn("torch.distributed.run", commands[0])
-                self.assertNotIn("torch.distributed.run", commands[2])
-                self.assertIn("--nproc-per-node=2", commands[1])
-                self.assertIn("--max-restarts=0", commands[1])
+                self.assertNotIn("torch.distributed.run", commands[-1])
+                for command in commands[1:-1]:
+                    self.assertIn("torch.distributed.run", command)
+                    self.assertIn("--nproc-per-node=2", command)
+                    self.assertIn("--max-restarts=0", command)
+                for command in commands[:-1]:
+                    self.assertNotIn("--include-fsdp2", command)
+                self.assertEqual("--include-fsdp2" in commands[-1], include_fsdp2)
                 scratch_paths = {command[command.index("--scratch-dir") + 1] for command in commands}
                 self.assertEqual(len(scratch_paths), 1)
                 self.assertFalse(Path(scratch_paths.pop()).exists())
                 self.assertFalse(list(volume.rglob("*.bin")))
                 self.volume.commit.assert_called_once_with()
                 self.volume.reset_mock()
-                launch = json.loads(next((volume / "results/ddp").glob("*/launch.json")).read_text())
+                result_strategy = "fsdp2" if include_fsdp2 else "ddp"
+                launch_path = next((volume / "results" / result_strategy).glob("*/launch.json"))
+                self.assertTrue(launch_path.parent.name.endswith("-numerics-2gpu"))
+                launch = json.loads(launch_path.read_text())
                 self.assertEqual(launch["status"], "complete")
                 self.assertEqual(launch["validation_status"], result_status)
-                self.assertEqual([phase["status"] for phase in launch["phases"]], ["complete"] * 3)
+                self.assertEqual([phase["status"] for phase in launch["phases"]], ["complete"] * len(phases))
 
     def test_numerics_stops_on_failure_or_shared_deadline_and_commits_partial_artifacts(self):
-        for outcome in ("failure", "deadline"):
-            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
-                repository = self.make_repository(Path(directory) / "repository", measured_steps=3)
+        for config, outcome in ((config, outcome) for config in (self.launcher.CONFIG, FSDP_CONFIG)
+                                for outcome in ("failure", "deadline")):
+            with self.subTest(config=config, outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                repository = self.make_repository(Path(directory) / "repository", measured_steps=3, config=config)
                 volume = Path(directory).resolve() / "volume"
-                experiment = self.launcher.check_inputs(repository, self.launcher.CONFIG)
+                experiment = self.launcher.check_inputs(repository, config)
                 for checkpoint in (experiment.training.models.nvarc_checkpoint,
                                    experiment.training.models.flux_checkpoint):
                     (volume / checkpoint.name).mkdir(parents=True)
@@ -188,24 +230,31 @@ class TrainDdpModalTests(unittest.TestCase):
                     (scratch / "gradient.bin").write_bytes(b"partial capture")
                     output = Path(command[command.index("--output-dir") + 1])
                     write_json(output / "partial.json", {"event": "started"})
-                    if outcome == "failure":
+                    if outcome == "failure" and len(scratch_paths) == (3 if config == FSDP_CONFIG else 1):
                         raise subprocess.CalledProcessError(1, command)
 
                 expected_error = subprocess.CalledProcessError if outcome == "failure" else TimeoutError
+                include_fsdp2 = config == FSDP_CONFIG
+                times = ([0, 10, 120, 900 if outcome == "failure" else 1711] if include_fsdp2
+                         else [0, 10, 1711])
+                expected_calls = (3 if outcome == "failure" else 2) if include_fsdp2 else 1
                 with patch.object(self.launcher, "REMOTE_ROOT", repository), \
                         patch.object(self.launcher, "VOLUME_ROOT", volume), \
-                        patch.object(self.launcher.time, "monotonic", side_effect=[0, 10, 1711]), \
+                        patch.object(self.launcher.time, "monotonic", side_effect=times), \
                         patch.object(self.launcher, "run_worker", side_effect=worker) as run:
                     with self.assertRaises(expected_error):
-                        self.launcher.train_ddp(self.launcher.CONFIG, 2, "numerics", {})
-                    run.assert_called_once()
+                        self.launcher.train_ddp(config, 2, "numerics", {})
+                    self.assertEqual(run.call_count, expected_calls)
                 self.assertFalse(scratch_paths[0].exists())
                 self.volume.commit.assert_called_once_with()
                 self.volume.reset_mock()
-                launch_path = next((volume / "results/ddp").glob("*/launch.json"))
+                result_strategy = "fsdp2" if include_fsdp2 else "ddp"
+                launch_path = next((volume / "results" / result_strategy).glob("*/launch.json"))
                 launch = json.loads(launch_path.read_text())
                 self.assertEqual(launch["status"], "failed")
                 self.assertEqual(launch["phases"][-1]["status"], "failed")
+                self.assertEqual(launch["phases"][-1]["phase"], "fsdp2" if include_fsdp2 else
+                                 "reference" if outcome == "failure" else "ddp")
                 self.assertTrue((launch_path.parent / "training/partial.json").is_file())
 
     def test_diagnostic_dispatch_and_batch_bounds_are_checked_before_gpu_allocation(self):

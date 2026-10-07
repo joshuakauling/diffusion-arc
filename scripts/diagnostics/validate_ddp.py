@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Three actual training updates: plain reference, two DDP ranks, then CPU comparison."""
+"""Three actual updates per strategy: single-GPU, DDP, optional FSDP2, then comparison."""
 
 import argparse
 import hashlib
@@ -18,7 +18,8 @@ from diffusion_arc.training.run.numerics import NumericalCriteria, write_json
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", required=True, choices=("reference", "ddp", "compare"))
+    parser.add_argument("--phase", required=True, choices=("reference", "ddp", "fsdp2", "compare"))
+    parser.add_argument("--include-fsdp2", action="store_true", help="Compare all three strategies after FSDP2 completes.")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--criteria", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -28,6 +29,8 @@ def main(argv=None):
     experiment = load_training_benchmark_config(args.config)
     if args.phase == "reference" and any(key in os.environ for key in ("RANK", "WORLD_SIZE")):
         parser.error("reference must run without torchrun")
+    if args.include_fsdp2 and args.phase != "compare":
+        parser.error("--include-fsdp2 requires --phase compare")
     digest = hashlib.sha256()
     for directory in (ROOT / "src", ROOT / "scripts", ROOT / "configs/training"):
         for path in sorted(directory.rglob("*")):
@@ -38,9 +41,11 @@ def main(argv=None):
                     benchmark_config_sha256=hashlib.sha256(args.config.read_bytes()).hexdigest())
     try:
         if args.phase == "compare":
-            result = compare_numerical_phases(args.output_dir, criteria)
+            result = compare_numerical_phases(args.output_dir, criteria, include_fsdp2=args.include_fsdp2)
             print(json.dumps(dict(event=result["event"], status=result["status"],
-                                  failures=result["failures"], steps=result["steps"]), allow_nan=False), flush=True)
+                                  failures=result["failures"],
+                                  **({"comparisons": result["comparisons"]} if args.include_fsdp2 else
+                                     {"steps": result["steps"]})), allow_nan=False), flush=True)
         else:
             run_numerical_phase(experiment, criteria, phase=args.phase,
                                 output_directory=args.output_dir, scratch_directory=args.scratch_dir,

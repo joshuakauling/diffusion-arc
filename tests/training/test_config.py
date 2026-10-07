@@ -209,6 +209,43 @@ class TrainingConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fsdp2 execution requires execution.flux_packing_algorithm"):
             self.load()
 
+    def test_fsdp_resharding_round_trips_and_preserves_legacy_default(self):
+        self.payload["deployment"]["gpu_count"] = 2
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        self.assertTrue(self.load().fsdp_reshard_after_forward)
+        for value in (False, True):
+            with self.subTest(value=value):
+                self.payload["execution"]["fsdp_reshard_after_forward"] = value
+                config = self.load()
+                self.assertIs(config.fsdp_reshard_after_forward, value)
+                serialized = config.recipe_dict()
+                self.assertIs(serialized["execution"]["fsdp_reshard_after_forward"], value)
+                self.assertEqual(parse_training_config(serialized, config_path=self.path), config)
+
+    def test_fsdp_resharding_rejects_non_booleans_and_other_strategies(self):
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        for value in (None, 0, 1, "false", [], {}):
+            self.payload["execution"]["fsdp_reshard_after_forward"] = value
+            with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_reshard_after_forward"):
+                self.load()
+        self.payload["execution"]["fsdp_reshard_after_forward"] = False
+        for strategy in ("single_process", "ddp"):
+            self.payload["execution"]["distributed_strategy"] = strategy
+            with self.subTest(strategy=strategy), self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):
+                self.load()
+
+    def test_removed_gradient_sync_option_is_rejected(self):
+        self.payload["deployment"]["gpu_count"] = 2
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        for value in (False, True):
+            with self.subTest(value=value):
+                self.payload["execution"]["fsdp_sync_gradients_at_batch_end"] = value
+                with self.assertRaisesRegex(ValueError, "fsdp_sync_gradients_at_batch_end"):
+                    self.load()
+
     def test_models_and_paths_resolve_without_requiring_files(self):
         config = self.load()
         self.assertEqual(config.models.flux_parameter_dtype, "float32")

@@ -1,4 +1,4 @@
-"""Compare the actual packed training pipeline with plain and two-rank execution."""
+"""Compare three packed training updates with single-device, DDP and FSDP2 execution."""
 
 from contextlib import nullcontext
 from dataclasses import asdict, replace
@@ -18,6 +18,7 @@ from .run.experiment import training_settings as _training_settings
 from .config import parse_training_config
 from .distributed import TrainingRuntime, distributed_runtime
 from .distributed_data import build_distributed_dataloader
+from .distribution_strategy.fsdp import shard_flux
 from .run.numerics import (NumericalCriteria, compare_records, inspect_gradients, json_digest,
                            state_fingerprint, tensor_fingerprint, write_json)
 from .setup import build_optimizer, load_models, prepare_device, seed_process
@@ -48,8 +49,8 @@ def _read_steps(directory):
 def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                         output_directory: Path, scratch_directory: Path, source_identity: dict):
     """Run exactly three actual updates; expensive capture stays in this diagnostic."""
-    if phase not in ("reference", "ddp"):
-        raise ValueError("training phase must be reference or ddp")
+    if phase not in ("reference", "ddp", "fsdp2"):
+        raise ValueError("training phase must be reference, ddp or fsdp2")
     if dist.is_initialized():
         raise RuntimeError("numerical runner must own its distributed lifecycle")
     config = experiment.training
@@ -64,23 +65,29 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
     directory = output_directory / phase
     reference_directory = output_directory / "reference"
     gradient_directory = Path(scratch_directory) / "reference-gradients"
-    reference_steps = _read_steps(reference_directory) if phase == "ddp" else None
+    ddp_gradient_directory = Path(scratch_directory) / "ddp-gradients"
+    reference_steps = _read_steps(reference_directory) if phase != "reference" else None
     reference_manifest = (json.loads((reference_directory / "manifest.json").read_text())
-                          if phase == "ddp" else None)
-    if phase == "ddp" and len(reference_steps) != criteria.steps:
+                          if phase != "reference" else None)
+    if reference_steps is not None and len(reference_steps) != criteria.steps:
         raise ValueError("reference phase must finish before distributed execution")
+    # Keep the benchmark data override while selecting the real loading/placement path.
+    phase_recipe = config.recipe_dict()
+    phase_recipe["execution"]["distributed_strategy"] = "single_process" if phase == "reference" else phase
+    if phase != "fsdp2":
+        phase_recipe["execution"].pop("fsdp_reshard_after_forward", None)
+    phase_recipe["deployment"]["gpu_count"] = 1 if phase == "reference" else 2
+    config = replace(parse_training_config(phase_recipe, config_path=config.path), data=config.data)
     if phase == "reference":
         torch.set_num_threads(8)
         context = nullcontext(TrainingRuntime(0, 0, 1, prepare_device(config), None))
     else:
         # Rank zero also reads the full CPU gradient reference. Keep this
         # diagnostic's collective timeout separate from normal training.
-        runtime_recipe = config.recipe_dict()
-        runtime_recipe["execution"]["distributed_strategy"] = "ddp"
-        context = distributed_runtime(parse_training_config(runtime_recipe, config_path=config.path), timeout_seconds=600)
+        context = distributed_runtime(config, timeout_seconds=600)
     with context as runtime:
-        if phase == "ddp" and runtime.world_size != 2:
-            raise ValueError("numerical comparison requires exactly two DDP ranks")
+        if phase != "reference" and runtime.world_size != 2:
+            raise ValueError("numerical comparison requires exactly two distributed ranks")
         if runtime.rank == 0:
             directory.mkdir(parents=True, exist_ok=False)
         print(json.dumps(dict(phase=phase, rank=runtime.rank, stage="load_models")), flush=True)
@@ -98,7 +105,7 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
         initial = dict(flux=state_fingerprint(models.flux_transformer, criteria.chunk_elements),
                        frozen=frozen_initial)
         contract = dict(criteria=asdict(criteria), training=_training_settings(config),
-                        recipe=config.recipe_dict(), input_recipe=input_recipe,
+                        recipe=input_recipe, input_recipe=input_recipe,
                         data_fingerprint=loader.dataset.fingerprint,
                         flow_seed_scheme=FLOW_SEED_SCHEME, initial=initial,
                         source_sha256=source_identity["source_sha256"],
@@ -109,7 +116,7 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
         if any(value != contract for value in identities):
             raise ValueError("rank inputs, initial state or software differ")
         if reference_manifest is not None and reference_manifest["contract"] != contract:
-            raise ValueError("reference and DDP initial state, recipe, criteria, data or software differ")
+            raise ValueError("reference and distributed initial state, recipe, criteria, data or software differ")
         hardware = dict(rank=runtime.rank, device=str(runtime.device), threads=torch.get_num_threads(),
                         gpu=torch.cuda.get_device_name(runtime.device) if runtime.device.type == "cuda" else "cpu",
                         allocator=os.environ.get("PYTORCH_ALLOC_CONF"),
@@ -117,7 +124,8 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
         devices = _gather(hardware, runtime)
         if runtime.rank == 0:
             write_json(directory / "manifest.json", dict(phase=phase, world_size=runtime.world_size,
-                       ddp=phase == "ddp", contract=contract, devices=devices, source_identity=source_identity,
+                       ddp=phase == "ddp", strategy=config.recipe["execution"]["distributed_strategy"],
+                       effective_recipe=config.recipe_dict(), contract=contract, devices=devices, source_identity=source_identity,
                        note="Instrumented numerical diagnostic; timings are not benchmark measurements."))
 
         flux_model = PackedFluxForward(models.flux_transformer, compute_dtype=models.flux_compute_dtype,
@@ -126,7 +134,10 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
             flux_model = DDP(flux_model, device_ids=[runtime.device.index] if runtime.device.type == "cuda" else None,
                           process_group=runtime.process_group, forward_sync_buffers=False,
                           gradient_as_bucket_view=True)
-        optimizer = build_optimizer(config, flux_transformer=models.flux_transformer)
+        elif phase == "fsdp2":
+            flux_model = shard_flux(flux_model, runtime=runtime,
+                                    reshard_after_forward=config.fsdp_reshard_after_forward)
+        optimizer = build_optimizer(config, flux_transformer=flux_model)
         step, gradients = 0, None
 
         trainer = Trainer(
@@ -151,8 +162,11 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                 print(json.dumps(dict(phase=phase, rank=runtime.rank, stage="capture_gradients")), flush=True)
                 gradients = inspect_gradients(
                     models.flux_transformer, criteria.chunk_elements,
-                    save_to=gradient_directory if phase == "reference" else None,
-                    compare_to=gradient_directory if phase == "ddp" and runtime.rank == 0 else None,
+                    save_to=(gradient_directory if phase == "reference" else
+                             ddp_gradient_directory if phase == "ddp" and runtime.rank == 0
+                             and input_recipe["execution"]["distributed_strategy"] == "fsdp2" else None),
+                    compare_to=gradient_directory if phase != "reference" and runtime.rank == 0 else None,
+                    compare_to_ddp=ddp_gradient_directory if phase == "fsdp2" and runtime.rank == 0 else None,
                 )
             return clip_gradients()
 
@@ -192,6 +206,7 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                          gradient_clipped=result.gradient_clipped,
                          parameters=state_fingerprint(models.flux_transformer, criteria.chunk_elements),
                          gradients=gradients if step == 1 else None,
+                         padding_forward_calls=result.padding_forward_calls,
                          frozen_unchanged=frozen == frozen_initial, frozen_no_grad=frozen_ok,
                          # Keep the persisted diagnostics schema independent of Python field names.
                          packs=dict(preparation=asdict(result.diagnostics.preparation),
@@ -215,22 +230,35 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
             write_json(directory / "summary.json", dict(event="complete", optimizer_steps=len(rows), phase=phase))
 
 
-def compare_numerical_phases(output_directory: Path, criteria: NumericalCriteria):
+def compare_numerical_phases(output_directory: Path, criteria: NumericalCriteria, *, include_fsdp2=False):
     output_directory = Path(output_directory)
-    manifests = [json.loads((output_directory / phase / "manifest.json").read_text())
-                 for phase in ("reference", "ddp")]
-    if manifests[0]["contract"] != manifests[1]["contract"]:
+    phases = ("reference", "ddp", "fsdp2") if include_fsdp2 else ("reference", "ddp")
+    manifests = [json.loads((output_directory / phase / "manifest.json").read_text()) for phase in phases]
+    if any(manifest["contract"] != manifests[0]["contract"] for manifest in manifests[1:]):
         raise ValueError("numerical comparison contracts differ")
     if manifests[0]["contract"]["criteria"] != asdict(criteria):
         raise ValueError("criteria changed after execution")
     if manifests[0]["ddp"] or manifests[0]["world_size"] != 1 or manifests[1]["world_size"] != 2:
         raise ValueError("expected a plain reference and two DDP ranks")
-    summary = compare_records(_read_steps(output_directory / "reference"),
-                              _read_steps(output_directory / "ddp"), criteria)
+    if include_fsdp2 and (manifests[1]["strategy"] != "ddp" or manifests[2]["strategy"] != "fsdp2"
+                         or manifests[2]["world_size"] != 2):
+        raise ValueError("expected two FSDP2 ranks after the DDP reference")
+    records = {phase: _read_steps(output_directory / phase) for phase in phases}
+    summary = compare_records(records["reference"], records["ddp"], criteria)
+    if include_fsdp2:
+        comparisons = dict(single_gpu_vs_ddp=summary,
+                           single_gpu_vs_fsdp2=compare_records(records["reference"], records["fsdp2"],
+                                                              criteria, strategy="fsdp2"),
+                           ddp_vs_fsdp2=compare_records(records["ddp"], records["fsdp2"], criteria,
+                                                       strategy="fsdp2", reference_strategy="ddp"))
+        failures = [f"{name}/{failure}" for name, result in comparisons.items() for failure in result["failures"]]
+        summary = dict(event="complete", status="failed" if failures else "passed",
+                       optimizer_steps=criteria.steps, failures=failures, comparisons=comparisons)
     summary["criteria"] = asdict(criteria)
     summary["limitations"] = ["Three initial updates only; no long-run convergence claim.",
-                              "Full reference-vs-DDP gradients compared only at step one, before clipping.",
+                              "Full gradients compared only at step one, before clipping.",
                               "Subsequent loss comparisons include accumulated model-state differences.",
-                              "Per-block metrics are diagnostic; the preregistered gradient gate is global L2."]
+                              "Per-block metrics are diagnostic; the preregistered gradient gate is global L2.",
+                              "Parameter updates and AdamW moments are not directly compared between strategies."]
     write_json(output_directory / "summary.json", summary)
     return summary

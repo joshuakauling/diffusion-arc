@@ -136,6 +136,11 @@ class TrainingConfig:
         return self._require_recipe()["data"]["pairs_per_sequence"] - self.loop.min_context_pairs_before_target
 
     @property
+    def fsdp_reshard_after_forward(self) -> bool:
+        """Block resharding policy; older recipes retain their original behavior."""
+        return self._require_recipe()["execution"].get("fsdp_reshard_after_forward", True)
+
+    @property
     def final_batch_target_count(self) -> int:
         """Target count of the prepared epoch tail, independent of a step prefix."""
         recipe = self._require_recipe()
@@ -199,6 +204,9 @@ def parse_training_config(payload: Mapping[str, Any], *, config_path: str | Path
     config_path = Path(config_path).resolve()
     # Adapt the validation schema to the explicitly selected configuration variants.
     schema = deepcopy(_RECIPE_SCHEMA)
+    if isinstance(payload.get("execution"), Mapping):
+        if "fsdp_reshard_after_forward" in payload["execution"]:
+            schema["execution"]["fsdp_reshard_after_forward"] = bool
     for section in ("validation", "logging", "checkpointing", "scheduler"):
         if section in payload and payload[section] is None:
             schema[section] = None
@@ -779,6 +787,8 @@ def _validate_config_relationships(recipe: dict[str, Any]) -> None:
 
     # Match the execution strategy to the GPU count, random sampling, and packing policy.
     strategy = recipe["execution"]["distributed_strategy"]
+    if "fsdp_reshard_after_forward" in execution and strategy != "fsdp2":
+        raise ValueError("execution.fsdp_reshard_after_forward requires distributed_strategy=fsdp2")
     if strategy == "single_process" and recipe["deployment"]["gpu_count"] != 1:
         raise ValueError("single_process execution requires deployment.gpu_count=1")
     if strategy in ("ddp", "fsdp2") and flow["rng_scheme"] != "global_step_target_v1":

@@ -1,7 +1,8 @@
-"""Select a fixed benchmark view and timing window for an unchanged training recipe."""
+"""Select a benchmark view, timing window and execution settings for a training recipe."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from .config import (
     TrainingConfig, load_training_config, parse_training_config,
     _choice_validator, _reject_duplicate_json_fields,
     _resolve_config_path, _validate_against_schema, _validate_nonempty_string,
-    _validate_nonnegative_integer, _validate_positive_integer,
+    _validate_json_object, _validate_nonnegative_integer, _validate_positive_integer,
 )
 
 
@@ -63,14 +64,24 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
 
     All paths are relative to the file that declares them. The referenced
     training_run is loaded normally, then explicit execution choices are validated
-    and the data view is selected. Timing warmup never changes the LR schedule.
+    and the data view is selected. Optional pack-capacity and FSDP resharding
+    overrides retain the recipe's settings when omitted. Timing warmup never
+    changes the LR schedule.
     """
 
     config_path = Path(path).resolve()
     with config_path.open(encoding="utf-8") as handle:
-        payload = _validate_against_schema(
-            json.load(handle, object_pairs_hook=_reject_duplicate_json_fields), _SCHEMA, name="config",
+        payload = _validate_json_object(
+            json.load(handle, object_pairs_hook=_reject_duplicate_json_fields), name="config",
         )
+    schema = deepcopy(_SCHEMA)
+    optional_execution = {"flux_max_joint_tokens": _validate_positive_integer,
+                          "fsdp_reshard_after_forward": bool}
+    if isinstance(payload.get("execution"), dict):
+        for name, validator in optional_execution.items():
+            if name in payload["execution"]:
+                schema["execution"][name] = validator
+    payload = _validate_against_schema(payload, schema, name="config")
     recipe_path = _resolve_config_path(
         payload["training_recipe"], base_directory=config_path.parent, name="training_recipe",
     )
@@ -83,6 +94,9 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
         distributed_strategy=execution["distributed_strategy"],
         flux_packing_algorithm=execution["flux_packing_algorithm"],
     )
+    for name in optional_execution:
+        if name in execution:
+            recipe["execution"][name] = execution[name]
     recipe["deployment"]["gpu_count"] = execution["gpu_count"]
     recipe["flow"]["rng_scheme"] = execution["rng_scheme"]
     training = parse_training_config(recipe, config_path=recipe_path)

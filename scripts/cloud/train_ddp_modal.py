@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch detached DDP diagnostics or fresh benchmark repetitions on Modal H200s."""
+"""Launch detached distributed diagnostics or benchmark repetitions on Modal H200s."""
 
 from datetime import datetime, timezone
 import json
@@ -112,6 +112,11 @@ def check_numerics_inputs(repository: Path, experiment):
     """Validate the fixed numerical comparison before allocating or loading GPUs."""
     from diffusion_arc.training.run.numerics import NumericalCriteria
 
+    strategy = experiment.training.recipe["execution"]["distributed_strategy"]
+    if strategy not in ("ddp", "fsdp2"):
+        raise ValueError("numerics requires a ddp or fsdp2 benchmark configuration")
+    if experiment.training.recipe["deployment"]["gpu_count"] != 2:
+        raise ValueError("numerics requires configured gpu_count=2")
     criteria = NumericalCriteria.load(repository / NUMERICS_CRITERIA)
     if criteria.steps > experiment.benchmark_steps:
         raise ValueError("numerics requires enough configured batches for every comparison step")
@@ -119,27 +124,31 @@ def check_numerics_inputs(repository: Path, experiment):
 
 
 def run_numerics(experiment, destination: Path, launch: dict, *, deadline: float) -> None:
-    """Run fresh plain/DDP processes, retaining large tensor captures only locally."""
+    """Run fresh comparison processes, retaining large tensor captures only locally."""
     criteria = check_numerics_inputs(REMOTE_ROOT, experiment)
     criteria_path = REMOTE_ROOT / NUMERICS_CRITERIA
     launch["numerical_criteria"] = json.loads(criteria_path.read_text())
     launch["phases"] = []
     output = destination / "training"
+    include_fsdp2 = experiment.training.recipe["execution"]["distributed_strategy"] == "fsdp2"
+    phases = ("reference", "ddp", "fsdp2", "compare") if include_fsdp2 else ("reference", "ddp", "compare")
     # Scratch files never enter the mounted volume and are removed after any failure.
     with tempfile.TemporaryDirectory(prefix="diffusion-arc-numerics-") as scratch:
-        for phase in ("reference", "ddp", "compare"):
+        for phase in phases:
             command = [sys.executable, "-B", "-u"]
-            if phase == "ddp":
+            if phase in ("ddp", "fsdp2"):
                 command.extend(["-m", "torch.distributed.run", "--standalone",
                                 "--nproc-per-node=2", "--max-restarts=0"])
             command.extend([str(REMOTE_ROOT / "scripts/diagnostics/validate_ddp.py"),
                             "--phase", phase, "--config", str(experiment.path),
                             "--criteria", str(criteria_path), "--output-dir", str(output),
                             "--scratch-dir", scratch])
+            if phase == "compare" and include_fsdp2:
+                command.append("--include-fsdp2")
             entry = dict(phase=phase, status="running", command=command)
             launch["phases"].append(entry)
             (destination / "launch.json").write_text(json.dumps(launch, indent=2) + "\n")
-            print(f"Starting DDP numerical comparison phase {phase}: {output}", flush=True)
+            print(f"Starting numerical comparison phase {phase}: {output}", flush=True)
             try:
                 remaining = int(deadline - time.monotonic())
                 if remaining <= 0:
@@ -166,8 +175,15 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
     diagnostic_batch_number = diagnostic_batch
     started = time.monotonic()
     allocation = resources(gpus, mode)
+    result_strategy = "ddp"
+    if mode == "numerics":
+        from diffusion_arc.training.benchmark_config import load_training_benchmark_config
+
+        selected = load_training_benchmark_config(REMOTE_ROOT / config)
+        check_numerics_inputs(REMOTE_ROOT, selected)
+        result_strategy = selected.training.recipe["execution"]["distributed_strategy"]
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    destination = VOLUME_ROOT / "results/ddp" / f"{run_id}-{mode}-{gpus}gpu"
+    destination = VOLUME_ROOT / "results" / result_strategy / f"{run_id}-{mode}-{gpus}gpu"
     destination.mkdir(parents=True, exist_ok=False)
     launch = dict(status="running", metadata=metadata, resources=allocation,
                   fa3_revision=FA3_REVISION, mode=mode, gpus=gpus,
@@ -245,7 +261,7 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
             (destination / "launch.json").write_text(json.dumps(launch, indent=2) + "\n")
         finally:
             model_volume.commit()
-        print(f"Persistent DDP results: {destination}", flush=True)
+        print(f"Persistent {result_strategy.upper()} results: {destination}", flush=True)
     return str(destination)
 
 
@@ -282,4 +298,5 @@ def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_ba
     result = train_ddp.with_options(**allocation).remote(
         str(experiment.path.relative_to(LOCAL_ROOT.resolve())), gpus, mode, metadata, diagnostic_batch_number,
     )
-    print(f"Modal DDP run complete: {result}")
+    result_strategy = experiment.training.recipe["execution"]["distributed_strategy"] if mode == "numerics" else "ddp"
+    print(f"Modal {result_strategy.upper()} run complete: {result}")

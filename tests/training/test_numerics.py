@@ -75,6 +75,31 @@ class NumericsTests(unittest.TestCase):
         with self.assertRaises(FloatingPointError):
             state_fingerprint(model, 2)
 
+    def test_capture_can_compare_single_gpu_and_ddp_references_in_one_pass(self):
+        model = nn.Linear(3, 2)
+        model.weight.grad = torch.arange(6, dtype=torch.float32).view(2, 3)
+        model.bias.grad = torch.tensor([1.0, -2.0])
+        reference = torch.cat([p.grad.flatten() for p in model.parameters()]).double()
+        with tempfile.TemporaryDirectory() as temporary:
+            single, ddp = Path(temporary) / "single", Path(temporary) / "ddp"
+            inspect_gradients(model, 2, save_to=single)
+            for parameter in model.parameters():
+                parameter.grad.mul_(1.01)
+            captured = inspect_gradients(model, 3, save_to=ddp, compare_to=single)
+            self.assertAlmostEqual(captured["comparison"]["relative_l2"], 0.01, places=6)
+            ddp_vector = torch.cat([p.grad.flatten() for p in model.parameters()]).double()
+            model.weight.grad[0, 1].mul_(-1)
+            actual = torch.cat([p.grad.flatten() for p in model.parameters()]).double()
+            compared = inspect_gradients(model, 2, compare_to=single, compare_to_ddp=ddp)
+            for key, expected in (("comparison", reference), ("ddp_comparison", ddp_vector)):
+                self.assertAlmostEqual(compared[key]["relative_l2"],
+                                       float(torch.linalg.vector_norm(actual - expected)
+                                             / torch.linalg.vector_norm(expected)))
+            with (ddp / "gradients.bin").open("r+b") as stream:
+                stream.write(torch.tensor([100.0]).numpy().tobytes())
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                inspect_gradients(model, 2, compare_to=single, compare_to_ddp=ddp)
+
     def test_criteria_are_explicit_finite_and_bounded(self):
         for changes in (dict(loss_rtol=float("nan")), dict(steps=0), dict(steps=True),
                         dict(gradient_relative_l2_max=0), dict(chunk_elements=2**30)):
@@ -109,6 +134,15 @@ class NumericsTests(unittest.TestCase):
                          "step_2/rank_parameters", "step_2/frozen", "step_2/draws", "step_3/loss"})
         with self.assertRaises(ValueError):
             compare_records(reference[:2], distributed, NumericalCriteria())
+
+        sharded = deepcopy(distributed)
+        for row in sharded:
+            row["ranks"][1]["parameters"] = "a different shard"
+        sharded[0]["ranks"][0]["gradients"].update(ddp_comparison=dict(relative_l2=0.2), ddp_blocks={})
+        self.assertEqual(compare_records(reference, sharded, NumericalCriteria(), strategy="fsdp2")["status"], "passed")
+        direct = compare_records(distributed, sharded, NumericalCriteria(),
+                                 strategy="fsdp2", reference_strategy="ddp")
+        self.assertEqual(direct["failures"], ["step_1/gradient_l2"])
 
 
 if __name__ == "__main__":
