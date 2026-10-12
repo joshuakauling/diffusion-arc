@@ -45,7 +45,7 @@ def _uneven_packs(prefixes, *_args, **_kwargs):
                  for start in range(0, len(prefixes), width))
 
 
-def _execute(phase, directory, initial, rank=0, *, changed_initial=False, include_fsdp2=False):
+def _execute(phase, directory, initial, rank=0, *, changed_initial=False, include_fsdp2=False, token_balanced=False):
     torch.set_num_threads(1)
     backend, model = SegmentedReference(), _model(initial)
     if changed_initial:
@@ -58,7 +58,11 @@ def _execute(phase, directory, initial, rank=0, *, changed_initial=False, includ
     if include_fsdp2:
         recipe = config.recipe_dict()
         recipe["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1",
-                                   fsdp_reshard_after_forward=False)
+                                   fsdp_reshard_after_forward=False, fsdp_blocks_per_group=5)
+        config = parse_training_config(recipe, config_path=config.path)
+    if token_balanced:
+        recipe = config.recipe_dict()
+        recipe["execution"]["rank_batch_assignment"] = "token_balanced_v1"
         config = parse_training_config(recipe, config_path=config.path)
 
     @contextmanager
@@ -80,6 +84,11 @@ def _execute(phase, directory, initial, rank=0, *, changed_initial=False, includ
                return_value=(UnevenSources if include_fsdp2 else Sources)(source_count=12)), \
          (patch("diffusion_arc.training.trainer.plan_flux_batches", side_effect=_uneven_packs)
           if include_fsdp2 else nullcontext()), \
+         (patch("diffusion_arc.training.distributed_data.load_source_token_lengths",
+                return_value=tuple((200, 300, 400) if index % 4 >= 2 else (20, 30, 40) for index in range(12)))
+          if token_balanced else nullcontext()), \
+         (patch("diffusion_arc.training.distributed_data.source_lengths_path",
+                return_value=Path(directory) / "token-lengths.json") if token_balanced else nullcontext()), \
          patch("diffusion_arc.training.step.encoding._render_valid_grid_canvas", _render):
         run_numerical_phase(SimpleNamespace(training=config, expected_source_count=12), NumericalCriteria(),
                             phase=phase, output_directory=Path(directory) / "output",
@@ -87,12 +96,12 @@ def _execute(phase, directory, initial, rank=0, *, changed_initial=False, includ
                             source_identity=dict(source_sha256="test-source"))
 
 
-def _worker(rank, directory, initial, phase="ddp", include_fsdp2=False):
-    _execute(phase, directory, initial, rank, include_fsdp2=include_fsdp2)
+def _worker(rank, directory, initial, phase="ddp", include_fsdp2=False, token_balanced=False):
+    _execute(phase, directory, initial, rank, include_fsdp2=include_fsdp2, token_balanced=token_balanced)
 
 
-def _run_distributed(directory, initial, *, phase="ddp", include_fsdp2=False):
-    processes = mp.spawn(_worker, args=(directory, initial, phase, include_fsdp2), nprocs=2, join=False)
+def _run_distributed(directory, initial, *, phase="ddp", include_fsdp2=False, token_balanced=False):
+    processes = mp.spawn(_worker, args=(directory, initial, phase, include_fsdp2, token_balanced), nprocs=2, join=False)
     try:
         deadline = time.monotonic() + 120
         while not processes.join(timeout=1):
@@ -106,6 +115,42 @@ def _run_distributed(directory, initial, *, phase="ddp", include_fsdp2=False):
 
 
 class NumericalRunnerTests(unittest.TestCase):
+    def test_background_packing_is_rejected_before_loading_models_or_data(self):
+        base = _config(source_count=12, world_size=2)
+        recipe = base.recipe_dict()
+        recipe["execution"].update(rank_batch_assignment="joint_packing_v1",
+                                    flux_packing_algorithm="legacy_bfd_v1")
+        config = parse_training_config(recipe, config_path=base.path)
+        with patch("diffusion_arc.training.numerical_runner.load_models",
+                   side_effect=AssertionError("models loaded")), \
+                self.assertRaisesRegex(ValueError, "does not support background joint packing"):
+            run_numerical_phase(SimpleNamespace(training=config), NumericalCriteria(), phase="reference",
+                output_directory=Path("unused"), scratch_directory=Path("unused"), source_identity={})
+
+    def test_token_balanced_noncontiguous_ownership_preserves_inputs_draws_and_full_gradients(self):
+        previous = torch.get_num_threads()
+        self.addCleanup(torch.set_num_threads, previous)
+        torch.set_num_threads(1)
+        torch.manual_seed(167)
+        initial = deepcopy(_model().state_dict())
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "token-lengths.json").write_text('test scheduling metadata')
+            _execute("reference", directory, initial, include_fsdp2=True, token_balanced=True)
+            for phase in ("ddp", "fsdp2"):
+                _run_distributed(directory, initial, phase=phase, include_fsdp2=True, token_balanced=True)
+            root = Path(directory) / "output"
+            comparison = compare_numerical_phases(root, NumericalCriteria(), include_fsdp2=True)
+            self.assertEqual(comparison["status"], "passed", comparison["failures"])
+            for result in comparison["comparisons"].values():
+                self.assertLess(result["steps"][0]["gradient"]["relative_l2"], 1e-4)
+            rows = [json.loads(line) for line in (root / "fsdp2/steps.jsonl").read_text().splitlines()]
+            for row in rows:
+                first, second = row["ranks"]
+                self.assertEqual([source["index"] for source in first["inputs"]],
+                                 [(row["step"] - 1) * 4, (row["step"] - 1) * 4 + 2])
+                self.assertEqual([draw["target"] for draw in first["draws"]], [0, 1, 2, 6, 7, 8])
+                self.assertEqual([draw["target"] for draw in second["draws"]], [3, 4, 5, 9, 10, 11])
+
     def test_plain_reference_then_two_ranks_and_actual_artifact_comparison(self):
         previous = torch.get_num_threads()
         self.addCleanup(torch.set_num_threads, previous)
@@ -168,10 +213,13 @@ class NumericalRunnerTests(unittest.TestCase):
             self.assertEqual(manifest["effective_recipe"]["execution"]["distributed_strategy"], "single_process")
             self.assertEqual(manifest["effective_recipe"]["deployment"]["gpu_count"], 1)
             self.assertNotIn("fsdp_reshard_after_forward", manifest["effective_recipe"]["execution"])
+            self.assertNotIn("fsdp_blocks_per_group", manifest["effective_recipe"]["execution"])
             self.assertFalse(manifest["contract"]["input_recipe"]["execution"]["fsdp_reshard_after_forward"])
+            self.assertEqual(manifest["contract"]["input_recipe"]["execution"]["fsdp_blocks_per_group"], 5)
             fsdp_manifest = root / "fsdp2/manifest.json"
             manifest = json.loads(fsdp_manifest.read_text())
             self.assertFalse(manifest["effective_recipe"]["execution"]["fsdp_reshard_after_forward"])
+            self.assertEqual(manifest["effective_recipe"]["execution"]["fsdp_blocks_per_group"], 5)
             manifest["contract"]["initial"]["flux"]["sha256"] = "different"
             fsdp_manifest.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "contracts differ"):

@@ -56,6 +56,8 @@ and are not bundled into the website.
 - [B3: sequence packing with FlashAttention-3](performance/b3.md)
 - [B3 NVARC analysis](performance/b3-nvarc.md)
 - [B3 FLUX analysis](performance/b3-flux.md)
+- [Two-GPU DDP implementation and benchmark](performance/ddp.md)
+- [FSDP2 communication, packing, and memory experiments](performance/fsdp2.md)
 
 ## Experiments
 

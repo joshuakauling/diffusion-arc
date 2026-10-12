@@ -218,9 +218,19 @@ def compare_records(reference, distributed, criteria, *, strategy="ddp", referen
                       learning_rate=all(r["learning_rates"] == plain["ranks"][0]["learning_rates"] for r in peers))
         if strategy == "ddp":
             checks["rank_parameters"] = peers[0]["parameters"] == peers[1]["parameters"]
-        for key in ("inputs", "draws"):
-            checks[key] = ([v for r in plain["ranks"] for v in r[key]]
-                           == [v for r in peers for v in r[key]])
+        for key, identity_key in (("inputs", "index"), ("draws", "target")):
+            expected_records = [v for r in plain["ranks"] for v in r[key]]
+            actual_records = [v for r in peers for v in r[key]]
+            expected_ids = [v[identity_key] for v in expected_records]
+            actual_ids = [v[identity_key] for v in actual_records]
+            # Rank ownership may change; source/target identity and multiplicity may not.
+            checks[key] = (len(set(expected_ids)) == len(expected_ids)
+                           and len(set(actual_ids)) == len(actual_ids)
+                           and sorted(expected_records, key=lambda v: v[identity_key])
+                           == sorted(actual_records, key=lambda v: v[identity_key]))
+            if key == "draws":
+                checks[key] = (checks[key] and plain["targets"] == ddp["targets"]
+                               and set(actual_ids) == set(range(plain["targets"])))
         gradient = None
         if index == 1:
             if strategy == "ddp":

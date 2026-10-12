@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from diffusion_arc.training.benchmark_config import load_training_benchmark_config
 from diffusion_arc.training.config import load_training_config
@@ -30,6 +32,39 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
     def load(self, payload=None):
         self.path.write_text(json.dumps(self.payload if payload is None else payload))
         return load_training_benchmark_config(self.path)
+
+    def test_token_balancing_variant_changes_only_source_assignment_from_b9(self):
+        baseline = load_training_benchmark_config(BENCHMARK.parent / "b9_fsdp2_12k_no_forward_reshard.json")
+        candidate = load_training_benchmark_config(BENCHMARK.parent / "b10_fsdp2_12k_token_balanced.json")
+        expected = baseline.training.recipe_dict()
+        expected["execution"]["rank_batch_assignment"] = "token_balanced_v1"
+        self.assertEqual(candidate.training.recipe_dict(), expected)
+        self.assertEqual(candidate.training.data, baseline.training.data)
+        self.assertEqual((candidate.repetitions, candidate.warmup_steps, candidate.measured_steps), (1, 10, 50))
+        self.payload["execution"]["rank_batch_assignment"] = "token_balanced_v1"
+        self.assertEqual(self.load().training.rank_batch_assignment, "token_balanced_v1")
+
+    def test_joint_packing_assignment_can_override_benchmark_execution(self):
+        self.payload["execution"].update(rank_batch_assignment="joint_packing_v1",
+                                           flux_packing_algorithm="legacy_bfd_v1")
+        for strategy, gpu_counts in (("single_process", (1,)), ("ddp", (1, 2, 4, 8)),
+                                     ("fsdp2", (1, 2, 4, 8))):
+            for gpu_count in gpu_counts:
+                with self.subTest(strategy=strategy, gpu_count=gpu_count):
+                    self.payload["execution"].update(distributed_strategy=strategy, gpu_count=gpu_count)
+                    config = self.load()
+                    self.assertEqual(config.training.rank_batch_assignment, "joint_packing_v1")
+                    self.assertFalse(config.precompute_packing)
+                    self.assertFalse(config.training.data.shuffle)
+        for field, value, error in (
+            ("rng_scheme", "legacy_stream_v1", "joint_packing_v1 assignment requires flow.rng_scheme"),
+            ("flux_packing_algorithm", "balanced_release_v1",
+             "joint_packing_v1 assignment requires execution.flux_packing_algorithm"),
+        ):
+            payload = copy.deepcopy(self.payload)
+            payload["execution"][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, error):
+                self.load(payload)
 
     def test_repository_config_uses_b3_data_with_the_unchanged_training_recipe(self):
         config = load_training_benchmark_config(BENCHMARK)
@@ -127,6 +162,131 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_reshard_after_forward"):
                 self.load()
         self.payload["execution"].update(distributed_strategy="ddp", fsdp_reshard_after_forward=False)
+        with self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):
+            self.load()
+
+    def test_b14_changes_only_fsdp_grouping_from_b13(self):
+        baseline = load_training_benchmark_config(BENCHMARK.parent / "b13_fsdp2_14k_token_balanced.json")
+        candidate = load_training_benchmark_config(BENCHMARK.parent / "b14_fsdp2_14k_grouped_blocks.json")
+        expected = baseline.training.recipe_dict()
+        expected["execution"]["fsdp_blocks_per_group"] = 5
+        self.assertEqual(candidate.training.recipe_dict(), expected)
+        self.assertEqual(candidate.training.data, baseline.training.data)
+        self.assertEqual(candidate.training.fsdp_blocks_per_group, 5)
+        self.assertEqual(baseline.training.fsdp_blocks_per_group, 1)
+        self.assertEqual((candidate.repetitions, candidate.smoke_steps, candidate.warmup_steps,
+                          candidate.measured_steps), (1, 3, 10, 50))
+
+    def test_b15_precomputes_packing_without_changing_the_b13_training_recipe(self):
+        baseline = load_training_benchmark_config(BENCHMARK.parent / "b13_fsdp2_14k_token_balanced.json")
+        candidate = load_training_benchmark_config(BENCHMARK.parent / "b15_fsdp2_14k_precomputed_packing.json")
+        self.assertFalse(baseline.precompute_packing)
+        self.assertTrue(candidate.precompute_packing)
+        self.assertEqual(candidate.training.recipe_dict(), baseline.training.recipe_dict())
+        self.assertEqual(candidate.training.data, baseline.training.data)
+        self.assertEqual((candidate.repetitions, candidate.smoke_steps, candidate.warmup_steps,
+                          candidate.measured_steps), (1, 3, 10, 50))
+
+    def test_precomputed_packing_validates_its_execution_contract(self):
+        self.payload["precompute_packing"] = True
+        self.payload["execution"].update(flux_packing_algorithm="legacy_bfd_v1",
+                                           rank_batch_assignment="token_balanced_v1")
+        self.assertTrue(self.load().precompute_packing)
+        for strategy in ("ddp", "fsdp2"):
+            self.payload["execution"]["distributed_strategy"] = strategy
+            self.assertTrue(self.load().precompute_packing)
+        for value in (None, 0, 1, "true"):
+            payload = copy.deepcopy(self.payload)
+            payload["precompute_packing"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(TypeError, "precompute_packing"):
+                self.load(payload)
+        for updates, error in (
+            (dict(distributed_strategy="single_process", gpu_count=1), "ddp or fsdp2"),
+            (dict(rng_scheme="legacy_stream_v1"), "global_step_target_v1"),
+            (dict(rank_batch_assignment="contiguous_v1"), "token_balanced_v1"),
+            (dict(rank_batch_assignment="joint_packing_v1"),
+             "precompute_packing requires rank_batch_assignment=token_balanced_v1"),
+            (dict(flux_packing_algorithm="balanced_release_v1"), "legacy_bfd_v1"),
+        ):
+            payload = copy.deepcopy(self.payload)
+            payload["execution"].update(updates)
+            with self.subTest(updates=updates), self.assertRaisesRegex(ValueError, error):
+                self.load(payload)
+        self.payload["precompute_packing"] = False
+        self.payload["execution"].update(distributed_strategy="ddp", rank_batch_assignment="contiguous_v1",
+                                           flux_packing_algorithm="balanced_release_v1")
+        self.assertFalse(self.load().precompute_packing)
+
+    def test_benchmark_cli_passes_precomputed_packing_and_records_the_flag(self):
+        from scripts.benchmark_training import main
+
+        run = Mock()
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
+            output = Path(directory) / "benchmark"
+            self.assertEqual(main([
+                "--config", str(BENCHMARK.parent / "b15_fsdp2_14k_precomputed_packing.json"),
+                "--mode", "benchmark", "--output-dir", str(output),
+            ]), 0)
+        options = run.call_args.kwargs
+        self.assertTrue(options["precompute_packing"])
+        self.assertTrue(options["source_identity"]["benchmark_config"]["precompute_packing"])
+        self.assertEqual(options["max_steps"], 60)
+        self.assertEqual(options["measurement"].measured_steps, 50)
+
+    def test_per_microbatch_experiment_is_benchmark_only_and_reaches_cli(self):
+        from scripts.benchmark_training import main
+
+        path = BENCHMARK.parent / "fsdp2_16k_per_microbatch_sync_precomputed_packing.json"
+        candidate = load_training_benchmark_config(path)
+        self.assertEqual(candidate.fsdp_gradient_sync, "per_microbatch")
+        self.assertTrue(candidate.precompute_packing)
+        self.assertTrue(candidate.training.fsdp_reshard_after_forward)
+        self.assertEqual(candidate.training.fsdp_blocks_per_group, 1)
+        self.assertEqual(candidate.training.flux_packing.max_tokens, 16384)
+        self.assertEqual(candidate.training.loop.optimizer_batch_size, 48)
+        self.assertEqual((candidate.repetitions, candidate.warmup_steps, candidate.measured_steps), (1, 10, 50))
+        self.assertNotIn("fsdp_gradient_sync", candidate.training.recipe_dict()["execution"])
+        self.assertEqual(load_training_benchmark_config(BENCHMARK.parent / "b6_fsdp2_16k.json").fsdp_gradient_sync,
+                         "last_microbatch")
+        run = Mock()
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"RANK": "0"}), \
+                patch.dict(sys.modules, {"diffusion_arc.training.benchmark_runner": SimpleNamespace(run_training_benchmark=run)}):
+            self.assertEqual(main(["--config", str(path), "--mode", "benchmark",
+                                   "--output-dir", str(Path(directory) / "run")]), 0)
+        self.assertEqual(run.call_args.kwargs["fsdp_gradient_sync"], "per_microbatch")
+        self.assertEqual(run.call_args.kwargs["source_identity"]["benchmark_config"]["fsdp_gradient_sync"],
+                         "per_microbatch")
+
+    def test_gradient_sync_control_rejects_invalid_values_and_non_fsdp(self):
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        for value in (None, True, 0, "off", "per_batch"):
+            self.payload["fsdp_gradient_sync"] = value
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                self.load()
+        self.payload["fsdp_gradient_sync"] = "per_microbatch"
+        self.assertEqual(self.load().fsdp_gradient_sync, "per_microbatch")
+        self.payload["execution"]["distributed_strategy"] = "ddp"
+        with self.assertRaisesRegex(ValueError, "fsdp_gradient_sync requires"):
+            self.load()
+
+    def test_fsdp_grouping_can_inherit_or_override_the_recipe(self):
+        recipe = load_training_config(RECIPE).recipe_dict()
+        recipe["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1",
+                                   fsdp_blocks_per_group=5)
+        recipe["flow"]["rng_scheme"] = "global_step_target_v1"
+        recipe_path = self.path.parent / "recipe.json"
+        recipe_path.write_text(json.dumps(recipe))
+        self.payload["training_recipe"] = str(recipe_path)
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        self.assertEqual(self.load().training.fsdp_blocks_per_group, 5)
+        self.payload["execution"]["fsdp_blocks_per_group"] = 1
+        self.assertEqual(self.load().training.fsdp_blocks_per_group, 1)
+        for value in (None, True, 0, -1, 5.0, "5"):
+            self.payload["execution"]["fsdp_blocks_per_group"] = value
+            with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_blocks_per_group"):
+                self.load()
+        self.payload["execution"].update(distributed_strategy="ddp", fsdp_blocks_per_group=5)
         with self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):
             self.load()
 

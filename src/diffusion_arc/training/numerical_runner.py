@@ -54,6 +54,8 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
     if dist.is_initialized():
         raise RuntimeError("numerical runner must own its distributed lifecycle")
     config = experiment.training
+    if config.rank_batch_assignment == "joint_packing_v1":
+        raise ValueError("numerical comparison does not support background joint packing")
     if (config.recipe["models"]["resume_from"] is not None
             or config.recipe["models"]["initialization"] != "base_checkpoint"
             or criteria.steps > config.loop.max_optimizer_steps):
@@ -76,6 +78,7 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
     phase_recipe["execution"]["distributed_strategy"] = "single_process" if phase == "reference" else phase
     if phase != "fsdp2":
         phase_recipe["execution"].pop("fsdp_reshard_after_forward", None)
+        phase_recipe["execution"].pop("fsdp_blocks_per_group", None)
     phase_recipe["deployment"]["gpu_count"] = 1 if phase == "reference" else 2
     config = replace(parse_training_config(phase_recipe, config_path=config.path), data=config.data)
     if phase == "reference":
@@ -107,6 +110,7 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
         contract = dict(criteria=asdict(criteria), training=_training_settings(config),
                         recipe=input_recipe, input_recipe=input_recipe,
                         data_fingerprint=loader.dataset.fingerprint,
+                        rank_batch_assignment=getattr(loader.dataset, "rank_assignment_metadata", None),
                         flow_seed_scheme=FLOW_SEED_SCHEME, initial=initial,
                         source_sha256=source_identity["source_sha256"],
                         packages={name: version(name) for name in
@@ -136,7 +140,8 @@ def run_numerical_phase(experiment, criteria: NumericalCriteria, *, phase: str,
                           gradient_as_bucket_view=True)
         elif phase == "fsdp2":
             flux_model = shard_flux(flux_model, runtime=runtime,
-                                    reshard_after_forward=config.fsdp_reshard_after_forward)
+                                    reshard_after_forward=config.fsdp_reshard_after_forward,
+                                    blocks_per_group=config.fsdp_blocks_per_group)
         optimizer = build_optimizer(config, flux_transformer=flux_model)
         step, gradients = 0, None
 

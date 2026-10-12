@@ -116,10 +116,15 @@ class DdpBenchmarkingTests(unittest.TestCase):
             root = Path(directory)
             with RunArtifacts(root / "success") as emit:
                 emit(dict(event="start", seed=167))
+                emit(dict(event="packing_plan", metadata=dict(plan_sha256="prepared-plan"),
+                          planning_seconds=0.5, ranks=[[dict(epoch_batch_index=0)]]))
                 emit(_row("measure", 2, 5))
                 emit(dict(event="complete", benchmark=dict(measured_steps=1)))
             self.assertEqual(json.loads((root / "success/manifest.json").read_text())["seed"], 167)
             self.assertEqual(len((root / "success/steps.jsonl").read_text().splitlines()), 1)
+            packing = json.loads((root / "success/packing_plans.json").read_text())
+            self.assertEqual(packing["metadata"]["plan_sha256"], "prepared-plan")
+            self.assertEqual(packing["planning_seconds"], 0.5)
             self.assertEqual(json.loads((root / "success/summary.json").read_text())["benchmark"]["measured_steps"], 1)
             with self.assertRaises(FileExistsError):
                 with RunArtifacts(root / "success"):
@@ -132,6 +137,27 @@ class DdpBenchmarkingTests(unittest.TestCase):
             self.assertTrue((root / "failed/steps.jsonl").read_text())
             self.assertFalse((root / "failed/summary.json").exists())
             self.assertEqual(json.loads((root / "failed/failure.json").read_text())["type"], "RuntimeError")
+
+    def test_repetitions_reject_changed_pack_membership_with_equal_call_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runs = [Path(directory) / str(index) for index in range(2)]
+            for run in runs:
+                write_repetition(run, [100, 2])
+                path = run / "steps.jsonl"
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                for row in rows:
+                    for rank in row["ranks"]:
+                        rank["flux_plan"] = dict(microbatch_plans=[dict(target_indices=[0], joint_tokens=1000)],
+                            target_prefix_tokens=[100], collective_call_count=3)
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            options = dict(window=BenchmarkWindow(1, 1), expected_repetitions=2)
+            self.assertEqual(summarize_repetitions(runs, **options)["status"], "complete")
+            path = runs[1] / "steps.jsonl"
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            rows[1]["ranks"][0]["flux_plan"]["microbatch_plans"][0]["target_indices"] = [1]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with self.assertRaisesRegex(ValueError, "workload"):
+                summarize_repetitions(runs, **options)
 
 
 if __name__ == "__main__":

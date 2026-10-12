@@ -48,6 +48,8 @@ nav:
       - B3 — FA3 packing: performance/b3.md
       - B3 NVARC analysis: performance/b3-nvarc.md
       - B3 FLUX analysis: performance/b3-flux.md
+      - Two-GPU DDP: performance/ddp.md
+      - FSDP2 optimization experiments: performance/fsdp2.md
   - Experiments: experiments/README.md
   - Research ideas: research-ideas.md
   - Code reference: _api.md

@@ -97,6 +97,10 @@ class FluxCapacityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fresh two-GPU FSDP2"):
             probe.load_probe_config(probe.REPOSITORY_ROOT / "configs/training/benchmarks/ddp_training.json",
                                     require_checkpoints=False)
+        with self.assertRaisesRegex(ValueError, "capacity probe does not support benchmark fsdp_gradient_sync"):
+            probe.load_probe_config(probe.REPOSITORY_ROOT /
+                "configs/training/benchmarks/fsdp2_16k_per_microbatch_sync_precomputed_packing.json",
+                require_checkpoints=False)
         for options in ((12288, 0, 49152, 2), (9000, 1024, 49152, 2),
                         (12288, 1024, 10000, 2), (12288, 1024, 49152, 1),
                         (True, 1024, 49152, 2), (12288, 1024, 223201, 2)):
@@ -108,13 +112,17 @@ class FluxCapacityTests(unittest.TestCase):
         self.assertFalse(probe.build_parser().parse_args(["--no-reshard-after-forward"]).reshard_after_forward)
 
     def test_gradient_sync_is_restored_after_a_failed_microbatch(self):
-        model = Mock()
-        strategy = object.__new__(FsdpStrategy)
-        strategy.flux_model = model
-        with self.assertRaisesRegex(RuntimeError, "backward failed"):
-            with strategy.microbatch_context(is_last=False):
-                raise RuntimeError("backward failed")
-        self.assertEqual(model.set_requires_gradient_sync.call_args_list, [call(False), call(True)])
+        for synchronize_each_microbatch in (False, True):
+            with self.subTest(synchronize_each_microbatch=synchronize_each_microbatch):
+                model = Mock()
+                strategy = object.__new__(FsdpStrategy)
+                strategy.flux_model = model
+                strategy.synchronize_each_microbatch = synchronize_each_microbatch
+                with self.assertRaisesRegex(RuntimeError, "backward failed"):
+                    with strategy.microbatch_context(is_last=False):
+                        raise RuntimeError("backward failed")
+                self.assertEqual(model.set_requires_gradient_sync.call_args_list,
+                                 [call(synchronize_each_microbatch), call(True)])
 
     def test_search_stops_on_first_oom_and_preserves_tested_bracket(self):
         seen = []

@@ -141,6 +141,16 @@ class TrainingConfig:
         return self._require_recipe()["execution"].get("fsdp_reshard_after_forward", True)
 
     @property
+    def fsdp_blocks_per_group(self) -> int:
+        """Consecutive FLUX blocks per collective; omission keeps blockwise sharding."""
+        return self._require_recipe()["execution"].get("fsdp_blocks_per_group", 1)
+
+    @property
+    def rank_batch_assignment(self) -> str:
+        """Source assignment and optional joint packing within each global optimizer batch."""
+        return self._require_recipe()["execution"].get("rank_batch_assignment", "contiguous_v1")
+
+    @property
     def final_batch_target_count(self) -> int:
         """Target count of the prepared epoch tail, independent of a step prefix."""
         recipe = self._require_recipe()
@@ -207,6 +217,12 @@ def parse_training_config(payload: Mapping[str, Any], *, config_path: str | Path
     if isinstance(payload.get("execution"), Mapping):
         if "fsdp_reshard_after_forward" in payload["execution"]:
             schema["execution"]["fsdp_reshard_after_forward"] = bool
+        if "fsdp_blocks_per_group" in payload["execution"]:
+            schema["execution"]["fsdp_blocks_per_group"] = _validate_positive_integer
+        if "rank_batch_assignment" in payload["execution"]:
+            schema["execution"]["rank_batch_assignment"] = _choice_validator(
+                "contiguous_v1", "token_balanced_v1", "joint_packing_v1",
+            )
     for section in ("validation", "logging", "checkpointing", "scheduler"):
         if section in payload and payload[section] is None:
             schema[section] = None
@@ -787,8 +803,19 @@ def _validate_config_relationships(recipe: dict[str, Any]) -> None:
 
     # Match the execution strategy to the GPU count, random sampling, and packing policy.
     strategy = recipe["execution"]["distributed_strategy"]
+    rank_assignment = execution.get("rank_batch_assignment", "contiguous_v1")
+    if (rank_assignment in ("token_balanced_v1", "joint_packing_v1")
+            and flow["rng_scheme"] != "global_step_target_v1"):
+        raise ValueError(f"{rank_assignment} assignment requires flow.rng_scheme=global_step_target_v1")
+    if rank_assignment == "joint_packing_v1":
+        if execution["flux_packing_algorithm"] != "legacy_bfd_v1":
+            raise ValueError("joint_packing_v1 assignment requires execution.flux_packing_algorithm=legacy_bfd_v1")
+        if data.get("shuffle", False):
+            raise ValueError("joint_packing_v1 assignment requires data.shuffle=false")
     if "fsdp_reshard_after_forward" in execution and strategy != "fsdp2":
         raise ValueError("execution.fsdp_reshard_after_forward requires distributed_strategy=fsdp2")
+    if "fsdp_blocks_per_group" in execution and strategy != "fsdp2":
+        raise ValueError("execution.fsdp_blocks_per_group requires distributed_strategy=fsdp2")
     if strategy == "single_process" and recipe["deployment"]["gpu_count"] != 1:
         raise ValueError("single_process execution requires deployment.gpu_count=1")
     if strategy in ("ddp", "fsdp2") and flow["rng_scheme"] != "global_step_target_v1":

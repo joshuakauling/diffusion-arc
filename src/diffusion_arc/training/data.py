@@ -189,11 +189,16 @@ class ArcTrainingDataset(Dataset[ArcTokenizedTrainingSample]):
         task = load_training_task(self.source_directory / f"{key.task_id}.json")
         augmented = apply_training_augmentation(task, key.augmentation)
         rendered = render_training_prompt(augmented)
-        return tokenize_nvarc_training_sample(
+        sample = tokenize_nvarc_training_sample(
             rendered,
             self._tokenizer,
             max_tokens=self.max_tokens,
         )
+        # Validate prepared scheduling metadata as each external sample is consumed.
+        lengths = getattr(self, "eligible_prefix_token_lengths", None)
+        if lengths is not None and sample.prefix_token_ends[self.lengths_min_context_pairs - 1:] != lengths[index]:
+            raise ValueError(f"prepared token lengths differ from source {key!s}; prepare them again")
+        return sample
 
 
 def _select_view(config: ArcSplitConfig, view_name: str) -> ArcTrainingViewConfig:

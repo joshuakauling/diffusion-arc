@@ -43,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
                      3 if args.mode == "diagnostic" else
                      experiment.smoke_steps if args.mode == "smoke" else experiment.benchmark_steps)
         options["expected_source_count"] = experiment.expected_source_count
+        options["precompute_packing"] = experiment.precompute_packing
+        options["fsdp_gradient_sync"] = experiment.fsdp_gradient_sync
         if args.mode == "benchmark":
             options["measurement"] = BenchmarkWindow(experiment.warmup_steps, experiment.measured_steps)
         elif args.mode == "diagnostic":
@@ -81,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                                              expected_source_count=experiment.expected_source_count,
                                              smoke_steps=experiment.smoke_steps,
                                              warmup_steps=experiment.warmup_steps,
-                                             measured_steps=experiment.measured_steps)
+                                             measured_steps=experiment.measured_steps,
+                                             precompute_packing=experiment.precompute_packing,
+                                             fsdp_gradient_sync=experiment.fsdp_gradient_sync)
     from diffusion_arc.training.run.benchmarking import RunArtifacts
     output = (RunArtifacts(args.output_dir) if args.output_dir is not None and os.environ.get("RANK", "0") == "0"
               else nullcontext(None))

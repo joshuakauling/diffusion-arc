@@ -32,6 +32,61 @@ class TrainingConfigTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.payload if payload is None else payload))
         return load_training_config(self.path)
 
+    def test_token_assignment_round_trips_and_requires_indexed_rng(self):
+        self.assertEqual(self.load().rank_batch_assignment, "contiguous_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        for algorithm in ("contiguous_v1", "token_balanced_v1"):
+            self.payload["execution"]["rank_batch_assignment"] = algorithm
+            config = self.load()
+            self.assertEqual(config.rank_batch_assignment, algorithm)
+            self.assertEqual(parse_training_config(config.recipe_dict(), config_path=self.path), config)
+        self.payload["flow"]["rng_scheme"] = "legacy_stream_v1"
+        with self.assertRaisesRegex(ValueError, "assignment requires flow.rng_scheme"):
+            self.load()
+        for value in (None, True, 1, "unknown"):
+            self.payload["execution"]["rank_batch_assignment"] = value
+            with self.subTest(value=value), self.assertRaisesRegex((ValueError, TypeError), "rank_batch_assignment"):
+                self.load()
+
+    def test_joint_packing_assignment_round_trips_for_single_and_distributed_execution(self):
+        self.payload["execution"].update(rank_batch_assignment="joint_packing_v1",
+                                         flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        for strategy, gpu_counts in (("single_process", (1,)), ("ddp", (1, 2, 4, 8)),
+                                     ("fsdp2", (1, 2, 4, 8))):
+            for gpu_count in gpu_counts:
+                with self.subTest(strategy=strategy, gpu_count=gpu_count):
+                    self.payload["execution"]["distributed_strategy"] = strategy
+                    self.payload["deployment"]["gpu_count"] = gpu_count
+                    config = self.load()
+                    self.assertEqual(config.rank_batch_assignment, "joint_packing_v1")
+                    self.assertFalse(config.data.shuffle)
+                    self.assertEqual(parse_training_config(config.recipe_dict(), config_path=self.path), config)
+
+    def test_joint_packing_assignment_rejects_incompatible_rng_packing_and_shuffle(self):
+        self.payload["execution"].update(rank_batch_assignment="joint_packing_v1",
+                                         flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        for section, field, value, error in (
+            ("flow", "rng_scheme", "legacy_stream_v1", "joint_packing_v1 assignment requires flow.rng_scheme"),
+            ("execution", "flux_packing_algorithm", "balanced_release_v1",
+             "joint_packing_v1 assignment requires execution.flux_packing_algorithm"),
+        ):
+            payload = copy.deepcopy(self.payload)
+            payload[section][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, error):
+                self.load(payload)
+        data = self.payload["data"]
+        self.payload["data"] = {name: data[name] for name in (
+            "prepared_split_directory", "view_name", "expected_task_count", "pairs_per_sequence",
+            "num_workers", "prefetch_factor",
+        )}
+        self.payload["data"].update(source="prepared_split", shuffle=False)
+        self.assertFalse(self.load().data.shuffle)
+        self.payload["data"]["shuffle"] = True
+        with self.assertRaisesRegex(ValueError, "joint_packing_v1 assignment requires data.shuffle=false"):
+            self.load()
+
     def test_all_checked_in_workloads_resolve_to_explicit_training_schema(self):
         for path in (ROOT / "configs/training").rglob("*.json"):
             if path.name == "ddp_numerics.json":
@@ -231,6 +286,27 @@ class TrainingConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_reshard_after_forward"):
                 self.load()
         self.payload["execution"]["fsdp_reshard_after_forward"] = False
+        for strategy in ("single_process", "ddp"):
+            self.payload["execution"]["distributed_strategy"] = strategy
+            with self.subTest(strategy=strategy), self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):
+                self.load()
+
+    def test_fsdp_block_grouping_round_trips_and_rejects_invalid_settings(self):
+        self.payload["deployment"]["gpu_count"] = 2
+        self.payload["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+        self.payload["flow"]["rng_scheme"] = "global_step_target_v1"
+        self.assertEqual(self.load().fsdp_blocks_per_group, 1)
+        for value in (1, 5):
+            with self.subTest(value=value):
+                self.payload["execution"]["fsdp_blocks_per_group"] = value
+                config = self.load()
+                self.assertEqual(config.fsdp_blocks_per_group, value)
+                self.assertEqual(parse_training_config(config.recipe_dict(), config_path=self.path), config)
+        for value in (None, True, False, 0, -1, 5.0, "5", [], {}):
+            self.payload["execution"]["fsdp_blocks_per_group"] = value
+            with self.subTest(value=value), self.assertRaisesRegex((TypeError, ValueError), "fsdp_blocks_per_group"):
+                self.load()
+        self.payload["execution"]["fsdp_blocks_per_group"] = 5
         for strategy in ("single_process", "ddp"):
             self.payload["execution"]["distributed_strategy"] = strategy
             with self.subTest(strategy=strategy), self.assertRaisesRegex(ValueError, "requires distributed_strategy=fsdp2"):

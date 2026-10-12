@@ -45,6 +45,19 @@ class FluxMicrobatchPlan:
     joint_tokens: int
 
 
+@dataclass(frozen=True)
+class PrecomputedFluxPlan:
+    """Validated local packs and metadata from one shared global CPU plan.
+
+    Target indices address the rank's original input order. Prefix lengths are
+    checked against encoded inputs; FSDP pads to the shared collective call count.
+    """
+
+    microbatch_plans: tuple[FluxMicrobatchPlan, ...]
+    target_prefix_tokens: tuple[int, ...]
+    collective_call_count: int
+
+
 def plan_flux_batches(
     prefix_lengths: tuple[int, ...],
     policy: FluxPackingPolicy,
@@ -232,5 +245,5 @@ def _improve(packs, costs, policy, score, *, release=False):
 
 
 __all__ = [
-    "FluxPackingPolicy", "FluxMicrobatchPlan", "plan_flux_batches",
+    "FluxPackingPolicy", "FluxMicrobatchPlan", "PrecomputedFluxPlan", "plan_flux_batches",
 ]

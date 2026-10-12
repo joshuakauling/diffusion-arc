@@ -40,8 +40,8 @@ for directory in ("src", "scripts", "configs", BUNDLE):
 
 def resources(gpus: int, mode: str, repetitions: int = 1) -> dict:
     """Keep CPU and host-memory budgets fixed per GPU across comparisons."""
-    if type(gpus) is not int or gpus not in (1, 2):
-        raise ValueError("--gpus must be 1 or 2")
+    if type(gpus) is not int or gpus not in (1, 2, 4, 8):
+        raise ValueError("--gpus must be 1, 2, 4 or 8")
     if mode not in TIMEOUTS:
         raise ValueError("--mode must be smoke, benchmark, diagnostic, memory, profile or numerics")
     if mode == "numerics" and gpus != 2:
@@ -57,6 +57,7 @@ def check_inputs(repository: Path, config: str, *, remote: bool = False):
     """Validate the uploaded recipe and data without loading model weights."""
     from diffusion_arc.training.benchmark_config import load_training_benchmark_config
     from diffusion_arc.training.data import ArcTrainingDataset
+    from diffusion_arc.training.source_lengths import load_source_token_lengths
 
     repository = repository.resolve()
     config_path = (repository / config).resolve()
@@ -78,6 +79,9 @@ def check_inputs(repository: Path, config: str, *, remote: bool = False):
     if any(len(key.augmentation.pair_indices) != training.recipe["data"]["pairs_per_sequence"]
            for key in dataset.keys):
         raise ValueError("benchmark pair counts do not match the training recipe")
+    if training.rank_batch_assignment in ("token_balanced_v1", "joint_packing_v1"):
+        load_source_token_lengths(dataset,
+            min_context_pairs_before_target=training.loop.min_context_pairs_before_target)
     for checkpoint in (training.models.nvarc_checkpoint, training.models.flux_checkpoint):
         checkpoint.relative_to((repository / "checkpoints").resolve())
         if remote and not checkpoint.is_dir():
@@ -112,6 +116,12 @@ def check_numerics_inputs(repository: Path, experiment):
     """Validate the fixed numerical comparison before allocating or loading GPUs."""
     from diffusion_arc.training.run.numerics import NumericalCriteria
 
+    if experiment.precompute_packing:
+        raise ValueError("numerics does not support precompute_packing; use a benchmark or smoke run")
+    if experiment.training.rank_batch_assignment == "joint_packing_v1":
+        raise ValueError("numerics does not support background joint packing; use a benchmark or smoke run")
+    if experiment.fsdp_gradient_sync != "last_microbatch":
+        raise ValueError("numerics does not support fsdp_gradient_sync=per_microbatch; use a benchmark or smoke run")
     strategy = experiment.training.recipe["execution"]["distributed_strategy"]
     if strategy not in ("ddp", "fsdp2"):
         raise ValueError("numerics requires a ddp or fsdp2 benchmark configuration")
@@ -272,6 +282,8 @@ def main(gpus: int = 1, mode: str = "smoke", config: str = CONFIG, diagnostic_ba
     diagnostic_batch_number = diagnostic_batch
     allocation = resources(gpus, mode)
     experiment = check_inputs(LOCAL_ROOT, config)
+    if mode != "numerics" and gpus != experiment.training.recipe["deployment"]["gpu_count"]:
+        raise ValueError("--gpus must match the configuration's execution.gpu_count")
     allocation = resources(gpus, mode, experiment.repetitions)
     if mode == "profile" and experiment.warmup_steps < 1:
         raise ValueError("profile requires at least one configured warmup step")

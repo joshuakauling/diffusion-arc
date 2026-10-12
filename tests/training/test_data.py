@@ -141,6 +141,17 @@ def write_prepared_manifest(split_root: Path, data_root: Path) -> None:
 
 
 class PreparedArcTrainingDatasetTest(unittest.TestCase):
+    def test_scheduling_lengths_are_checked_against_consumed_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            split_root, _ = build_layout(Path(directory))
+            dataset = ArcTrainingDataset(split_root, "train", make_nvarc_tokenizer())
+            samples = tuple(dataset)
+            dataset.lengths_min_context_pairs = 2
+            dataset.eligible_prefix_token_lengths = tuple(sample.prefix_token_ends[1:] for sample in samples)
+            self.assertEqual(dataset[0], samples[0])
+            dataset.eligible_prefix_token_lengths = ((1,),) * len(dataset.keys)
+            with self.assertRaisesRegex(ValueError, "prepared token lengths differ"):
+                dataset[0]
     def test_startup_and_current_resume_do_not_read_source_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             split_root, data_root = build_layout(Path(directory))

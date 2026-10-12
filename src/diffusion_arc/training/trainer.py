@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import math
 import time
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
@@ -27,6 +28,9 @@ from .step.flux_microbatch import compute_flux_microbatch_loss, compute_fsdp_dum
 from .step.flux_batching import FluxPackingPolicy, FluxMicrobatchPlan, plan_flux_batches
 from .step.loss import LossResult, VelocityLoss
 from .profiling import training_range
+
+if TYPE_CHECKING:
+    from .distributed_data import RankBatchPlan
 
 
 @dataclass(frozen=True)
@@ -255,7 +259,8 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=self.distribution_strategy.set_grad_to_none)
         self.completed_update = True
 
-    def step(self, sequences: Sequence[ArcTokenizedTrainingSample]) -> TrainStepResult:
+    def step(self, sequences: Sequence[ArcTokenizedTrainingSample], *,
+             batch_plan: RankBatchPlan | None = None) -> TrainStepResult:
         """Train on the supplied sequences with one optimizer update.
 
         Encode sequences with frozen NVARC and target images with frozen VAE.
@@ -267,7 +272,9 @@ class Trainer:
         DDP synchronizes during the last local backward. FSDP2 synchronizes only
         during the final scheduled backward of each optimizer batch,
         padding shorter rank schedules with zero-weight model calls.
-        Both reduce target counts before encoding and loss-finiteness afterward.
+        A precomputed global batch plan supplies target counts and packed calls;
+        otherwise counts are reduced before encoding. Loss-finiteness is checked
+        collectively afterward in either path.
         Non-finite losses/gradients abort every rank before the update. Other
         failures require the caller's process supervision; this is not a
         distributed recovery loop.
@@ -285,7 +292,14 @@ class Trainer:
             for sequence in sequences
         )
         with training_range("train/target_count"):
-            global_target_count = self.distribution_strategy.all_reduce_target_count(local_target_count)
+            if batch_plan is None:
+                global_target_count = self.distribution_strategy.all_reduce_target_count(local_target_count)
+            else:
+                if batch_plan.flux_plan is None:
+                    raise ValueError("batch_plan requires a precomputed FLUX plan")
+                if local_target_count != len(batch_plan.target_indices) or local_target_count == 0:
+                    raise ValueError("local target count differs from the precomputed batch plan")
+                global_target_count = batch_plan.global_target_count
         # Frozen preparation includes token-bounded NVARC and image-bounded VAE calls.
         with training_range("prepare/sources"):
             encoded = encode_training_batch(
@@ -295,18 +309,25 @@ class Trainer:
             )
         flux_inputs = encoded.inputs
         prefixes = tuple(flux_input.prefix_end for flux_input in flux_inputs)
-        # Assign time and noise to each target before grouping targets into microbatches.
-        flows = self.flow_sampler(tuple(flux_input.clean_latent for flux_input in flux_inputs))
-        nvarc_sequence_states = dict.fromkeys(flux_input.nvarc_sequence_state for flux_input in flux_inputs)
-        nvarc_sequence_state_ids = {state: index for index, state in enumerate(nvarc_sequence_states)}
-        microbatch_plans = plan_flux_batches(
-            prefixes, self.packing,
-            source_ids=tuple(nvarc_sequence_state_ids[flux_input.nvarc_sequence_state] for flux_input in flux_inputs),
-            source_bytes=tuple(state.allocated_bytes for state in nvarc_sequence_states),
-        )
+        # Flow draws retain original target order regardless of the packed call order.
+        if batch_plan is None:
+            flows = self.flow_sampler(tuple(flux_input.clean_latent for flux_input in flux_inputs))
+            nvarc_sequence_states = dict.fromkeys(flux_input.nvarc_sequence_state for flux_input in flux_inputs)
+            nvarc_sequence_state_ids = {state: index for index, state in enumerate(nvarc_sequence_states)}
+            microbatch_plans = plan_flux_batches(
+                prefixes, self.packing,
+                source_ids=tuple(nvarc_sequence_state_ids[flux_input.nvarc_sequence_state] for flux_input in flux_inputs),
+                source_bytes=tuple(state.allocated_bytes for state in nvarc_sequence_states),
+            )
+        else:
+            if prefixes != batch_plan.flux_plan.target_prefix_tokens:
+                raise ValueError("encoded prefix lengths differ from the precomputed batch plan")
+            microbatch_plans = batch_plan.flux_plan.microbatch_plans
+            flows = self.flow_sampler(tuple(flux_input.clean_latent for flux_input in flux_inputs))
         step_loss_metrics = _StepLossMetrics(len(flux_inputs), self.device)
         # FSDP sorts packs and adds dummy calls; single-device and DDP keep the plans unchanged.
-        microbatch_schedule = self.distribution_strategy.plan_microbatch_calls(microbatch_plans)
+        microbatch_schedule = self.distribution_strategy.plan_microbatch_calls(microbatch_plans,
+            **({"collective_call_count": batch_plan.flux_plan.collective_call_count} if batch_plan else {}))
 
         # Run FLUX microbatches and accumulate gradients for one optimizer update.
         for index, microbatch_plan in enumerate(microbatch_schedule):

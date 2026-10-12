@@ -12,17 +12,21 @@ The B3 investigations are summarized separately for [NVARC](b3-nvarc.md) and
 
 The [two-GPU DDP report](ddp.md) covers the current Trainer-based benchmark,
 its separate Torch Profiler capture, and the OOM comparison with expandable
-segments. The [FSDP2 report](fsdp2.md) records the two-H200 baseline B5,
-the larger-pack variant B6, their memory/throughput trade-offs against DDP,
-and the logged loss comparisons.
+segments. The [FSDP2 report](fsdp2.md) follows the experiments from initial
+memory savings through larger packs, reduced communication, and balanced GPU
+work. Compact tables show the initial trade-off and the current FSDP2/DDP
+references. It also identifies missing policy comparisons under joint CPU
+planning; capacity failures and numerical/profiler evidence are separate.
 The shared setup below describes the historical single-GPU series B0–B3.
 The results table also includes DDP and FSDP2; their reports document the
 distributed setup and differences from that series.
 
-Benchmark variants use consecutive **B** identifiers: **B4** is the two-GPU
-DDP result, **B5** is the first FSDP2 result with 12,288-token packs, and **B6**
-is FSDP2 with 16,384-token packs. These identify experiment configurations;
-the variants share the training runner.
+The **B** identifiers below describe the historical baseline series: **B4** is
+the initial two-GPU DDP result, **B5** the initial FSDP2 result with 12,288-token
+packs, and **B6** the initial FSDP2 result with 16,384-token packs. Later FSDP2
+experiments are named by their settings in the dedicated report rather than
+adding internal tuning runs to this table. Existing configuration filenames
+remain available for reproducibility.
 
 ## Shared single-GPU benchmark setup
 

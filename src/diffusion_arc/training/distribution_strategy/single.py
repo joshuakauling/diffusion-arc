@@ -31,7 +31,7 @@ class SingleDeviceStrategy:
         """Enclose the forward and backward for one accumulation microbatch."""
         return nullcontext()
 
-    def plan_microbatch_calls(self, microbatch_plans):
+    def plan_microbatch_calls(self, microbatch_plans, *, collective_call_count=None):
         """Return the local call order; distributed sharding may add padding."""
         return microbatch_plans
 

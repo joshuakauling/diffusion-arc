@@ -49,11 +49,13 @@ def run_benchmark(config, *, experiment: BenchmarkInstrumentation, runtime=None)
 def run_training_benchmark(config: TrainingConfig, *, max_steps=3, emit=print_record,
                      source_identity=None, expected_source_count=None, measurement=None,
                      diagnostic_batch_number=None, trace_directory=None, memory_history=False,
-                     profile_warmup_steps=None):
+                     profile_warmup_steps=None, precompute_packing=False,
+                     fsdp_gradient_sync="last_microbatch"):
     """Run the configured strategy without implicit recipe or precision overrides."""
     experiment = BenchmarkInstrumentation(max_steps, emit, source_identity, expected_source_count,
         measurement, diagnostic_batch_number, trace_directory, memory_history,
-        profile_warmup_steps)
+        profile_warmup_steps, precompute_packing=precompute_packing,
+        fsdp_gradient_sync=fsdp_gradient_sync)
     return run_benchmark(config, experiment=experiment)
 
 

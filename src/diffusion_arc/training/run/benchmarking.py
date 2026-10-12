@@ -74,7 +74,9 @@ def summarize_repetitions(directories: list[Path], *, window: BenchmarkWindow,
             raise ValueError(f"benchmark summary disagrees with step records: {directory.name}")
         # Output paths differ; code, recipe, dataset and runtime must be identical.
         manifest["source_identity"].pop("command", None)
-        workload = [[{key: rank[key] for key in workload_fields} for rank in row["ranks"]]
+        workload = [[dict({key: rank[key] for key in workload_fields},
+                         **({"flux_plan": rank["flux_plan"]} if "flux_plan" in rank else {}))
+                     for rank in row["ranks"]]
                     for row in rows]
         if reference_manifest is None:
             reference_manifest, reference_workload = manifest, workload
@@ -114,6 +116,8 @@ class RunArtifacts:
     def __call__(self, record: dict):
         if record["event"] == "start":
             self._write_json("manifest.json", record)
+        elif record["event"] == "packing_plan":
+            self._write_json("packing_plans.json", record)
         elif record["event"] == "step":
             self.stream.write(json.dumps(record, allow_nan=False) + "\n")
             self.stream.flush()

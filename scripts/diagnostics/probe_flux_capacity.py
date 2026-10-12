@@ -68,9 +68,13 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
     """Read the existing FSDP recipe without constructing a dataset or tokenizer."""
     path = Path(path).resolve()
     payload = json.loads(path.read_text())
-    config = (load_training_benchmark_config(path).training
-              if payload.get("config_type") == "ddp_benchmark"
-              else load_training_config(path, expected_type="training_run"))
+    if payload.get("config_type") == "ddp_benchmark":
+        benchmark = load_training_benchmark_config(path)
+        if benchmark.fsdp_gradient_sync != "last_microbatch":
+            raise ValueError("capacity probe does not support benchmark fsdp_gradient_sync=per_microbatch")
+        config = benchmark.training
+    else:
+        config = load_training_config(path, expected_type="training_run")
     recipe = config.recipe_dict()
     if (recipe["execution"]["distributed_strategy"] != "fsdp2"
             or recipe["deployment"]["gpu_count"] != 2

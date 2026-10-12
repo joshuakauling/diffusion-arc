@@ -44,6 +44,7 @@ class TrainingBenchmarkConfig:
     The wrapper explicitly selects its execution strategy and benchmark view.
     The recipe retains the original training schedule and objective; its epoch
     counts and validation/checkpoint cadences are not benchmark instructions.
+    Optional precomputed packing changes only this bounded benchmark's batch plans.
     """
 
     training: TrainingConfig
@@ -53,6 +54,8 @@ class TrainingBenchmarkConfig:
     warmup_steps: int
     measured_steps: int
     path: Path
+    precompute_packing: bool = False
+    fsdp_gradient_sync: str = "last_microbatch"
 
     @property
     def benchmark_steps(self) -> int:
@@ -64,8 +67,9 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
 
     All paths are relative to the file that declares them. The referenced
     training_run is loaded normally, then explicit execution choices are validated
-    and the data view is selected. Optional pack-capacity and FSDP resharding
-    overrides retain the recipe's settings when omitted. Timing warmup never
+    and the data view is selected. Optional pack-capacity and FSDP grouping/resharding
+    overrides retain the recipe's settings when omitted. Precomputed packing
+    requires prepared token metadata and indexed flow RNG. Timing warmup never
     changes the LR schedule.
     """
 
@@ -75,8 +79,16 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
             json.load(handle, object_pairs_hook=_reject_duplicate_json_fields), name="config",
         )
     schema = deepcopy(_SCHEMA)
+    if "precompute_packing" in payload:
+        schema["precompute_packing"] = bool
+    if "fsdp_gradient_sync" in payload:
+        schema["fsdp_gradient_sync"] = _choice_validator("last_microbatch", "per_microbatch")
     optional_execution = {"flux_max_joint_tokens": _validate_positive_integer,
-                          "fsdp_reshard_after_forward": bool}
+                          "fsdp_reshard_after_forward": bool,
+                          "fsdp_blocks_per_group": _validate_positive_integer,
+                          "rank_batch_assignment": _choice_validator(
+                              "contiguous_v1", "token_balanced_v1", "joint_packing_v1",
+                          )}
     if isinstance(payload.get("execution"), dict):
         for name, validator in optional_execution.items():
             if name in payload["execution"]:
@@ -89,6 +101,8 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
     if training.recipe["models"]["resume_from"] is not None:
         raise ValueError("DDP benchmarks require base checkpoints; resume_from must be null")
     execution = payload["execution"]
+    if "fsdp_gradient_sync" in payload and execution["distributed_strategy"] != "fsdp2":
+        raise ValueError("fsdp_gradient_sync requires distributed_strategy=fsdp2")
     recipe = training.recipe_dict()
     recipe["execution"].update(
         distributed_strategy=execution["distributed_strategy"],
@@ -113,7 +127,18 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
         repetitions=payload["repetitions"],
         smoke_steps=payload["smoke_steps"], warmup_steps=payload["warmup_steps"],
         measured_steps=payload["measured_steps"], path=config_path,
+        precompute_packing=payload.get("precompute_packing", False),
+        fsdp_gradient_sync=payload.get("fsdp_gradient_sync", "last_microbatch"),
     )
+    if config.precompute_packing:
+        if training.recipe["execution"]["distributed_strategy"] not in ("ddp", "fsdp2"):
+            raise ValueError("precompute_packing requires distributed_strategy=ddp or fsdp2")
+        if training.recipe["flow"]["rng_scheme"] != "global_step_target_v1":
+            raise ValueError("precompute_packing requires global_step_target_v1 flow RNG")
+        if training.rank_batch_assignment != "token_balanced_v1":
+            raise ValueError("precompute_packing requires rank_batch_assignment=token_balanced_v1")
+        if training.flux_packing.algorithm != "legacy_bfd_v1":
+            raise ValueError("precompute_packing requires flux_packing_algorithm=legacy_bfd_v1")
     if config.smoke_steps > config.benchmark_steps:
         raise ValueError("smoke_steps must not exceed warmup_steps + measured_steps")
     if config.benchmark_steps > training.loop.max_optimizer_steps:

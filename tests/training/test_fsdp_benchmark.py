@@ -34,12 +34,14 @@ def _full_tensor(value):
     return (value.full_tensor() if hasattr(value, "full_tensor") else value).detach().clone()
 
 
-def _benchmark_updates(rank, initial, *, synchronize_each_microbatch):
+def _benchmark_updates(rank, initial, *, synchronize_each_microbatch, blocks_per_group=1,
+                       fsdp_gradient_sync="last_microbatch"):
     model, backend = _model(initial), SegmentedReference()
     dataset = UnevenSources(source_count=12)
     base = _config(source_count=12, world_size=2)
     recipe = base.recipe_dict()
     recipe["execution"].update(distributed_strategy="fsdp2", flux_packing_algorithm="legacy_bfd_v1")
+    recipe["execution"]["fsdp_blocks_per_group"] = blocks_per_group
     config = parse_training_config(recipe, config_path=base.path)
     assert config.fsdp_reshard_after_forward is True
     models = TrainingModels(tokenizer=object(), flux_transformer=model, nvarc_encoder=FrozenText(),
@@ -107,8 +109,10 @@ def _benchmark_updates(rank, initial, *, synchronize_each_microbatch):
             patch("diffusion_arc.training.trainer.plan_flux_batches", side_effect=_uneven_packs), \
             patch("diffusion_arc.training.step.encoding._render_valid_grid_canvas", _render):
         progress = run_training_benchmark(config, max_steps=3, expected_source_count=12,
-                                         measurement=BenchmarkWindow(1, 2), emit=records.append)
+                                         measurement=BenchmarkWindow(1, 2), emit=records.append,
+                                         fsdp_gradient_sync=fsdp_gradient_sync)
     assert shard.call_count == 1 and shard.call_args.kwargs["reshard_after_forward"] is True
+    assert shard.call_args.kwargs["blocks_per_group"] == blocks_per_group
     assert (progress.optimizer_step, progress.sources_seen, progress.targets_seen) == (3, 12, 36)
     assert len(snapshots) == 3
     assert all(not parameter.requires_grad and parameter.grad is None
@@ -116,6 +120,7 @@ def _benchmark_updates(rank, initial, *, synchronize_each_microbatch):
     if rank == 0:
         assert [row["event"] for row in records] == ["start", "step", "step", "step", "complete"]
         assert records[0]["mode"] == "fsdp2_benchmark"
+        assert records[0]["fsdp_gradient_sync"] == fsdp_gradient_sync
         assert [row["phase"] for row in records[1:-1]] == ["warmup", "measure", "measure"]
         assert records[-1]["benchmark"]["measured_steps"] == 2
     else:
@@ -128,8 +133,10 @@ def _worker(rank, directory, initial):
     dist.init_process_group("gloo", init_method=(Path(directory) / "gloo-store").as_uri(),
                             rank=rank, world_size=2, timeout=timedelta(seconds=60))
     try:
-        for mode in ("reference", "default"):
-            snapshots = _benchmark_updates(rank, initial, synchronize_each_microbatch=mode == "reference")
+        for mode in ("reference", "default", "grouped", "per_microbatch"):
+            snapshots = _benchmark_updates(rank, initial, synchronize_each_microbatch=mode == "reference",
+                                           blocks_per_group=5 if mode == "grouped" else 1,
+                                           fsdp_gradient_sync="per_microbatch" if mode == "per_microbatch" else "last_microbatch")
             torch.save(snapshots, Path(directory) / f"rank-{rank}-{mode}.pt")
     finally:
         dist.destroy_process_group()
@@ -155,23 +162,40 @@ class FsdpBenchmarkTests(unittest.TestCase):
                         process.terminate()
                     process.join(timeout=5)
             results = {(rank, mode): torch.load(Path(directory) / f"rank-{rank}-{mode}.pt", weights_only=True)
-                       for rank in range(2) for mode in ("reference", "default")}
+                       for rank in range(2) for mode in ("reference", "default", "grouped", "per_microbatch")}
         # One double block, one single block, and the packed root each reduce once.
         reduction_groups = 3
         for rank in range(2):
             for update in range(3):
                 baseline, delayed = (results[(rank, mode)][update] for mode in ("reference", "default"))
+                grouped = results[(rank, "grouped")][update]
+                per_microbatch = results[(rank, "per_microbatch")][update]
+                for field, tolerance in (("gradients", GRAD_TOLERANCE), ("parameters", PARAM_TOLERANCE),
+                                         ("optimizer", GRAD_TOLERANCE), ("loss", GRAD_TOLERANCE),
+                                         ("gradient_norm", GRAD_TOLERANCE)):
+                    torch.testing.assert_close(per_microbatch[field], baseline[field], **tolerance)
+                torch.testing.assert_close(per_microbatch["scheduler"], baseline["scheduler"], atol=0, rtol=0)
+                self.assertEqual(per_microbatch["reduce_scatter_calls"], 6 * reduction_groups)
+                self.assertEqual(per_microbatch["sync_calls"], [True, True] * 6)
+                self.assertEqual(per_microbatch["contexts"], baseline["contexts"])
                 torch.testing.assert_close(delayed["gradients"], baseline["gradients"], **GRAD_TOLERANCE)
                 torch.testing.assert_close(delayed["parameters"], baseline["parameters"], **PARAM_TOLERANCE)
                 torch.testing.assert_close(delayed["optimizer"], baseline["optimizer"], **GRAD_TOLERANCE)
                 torch.testing.assert_close(delayed["scheduler"], baseline["scheduler"], atol=0, rtol=0)
                 torch.testing.assert_close(delayed["loss"], baseline["loss"], **GRAD_TOLERANCE)
+                for field, tolerance in (("gradients", GRAD_TOLERANCE), ("parameters", PARAM_TOLERANCE),
+                                         ("optimizer", GRAD_TOLERANCE), ("loss", GRAD_TOLERANCE),
+                                         ("gradient_norm", GRAD_TOLERANCE)):
+                    torch.testing.assert_close(grouped[field], delayed[field], **tolerance)
+                self.assertEqual(grouped["contexts"], delayed["contexts"])
+                self.assertEqual(grouped["sync_calls"], delayed["sync_calls"])
+                self.assertEqual(grouped["reduce_scatter_calls"], 2)  # Both blocks share a group plus root.
                 self.assertEqual(baseline["reduce_scatter_calls"], 6 * reduction_groups)
                 self.assertEqual(delayed["reduce_scatter_calls"], reduction_groups)
                 self.assertEqual(baseline["sync_calls"], [])
                 self.assertEqual(delayed["sync_calls"], [False, True] * 5 + [True, True])
                 self.assertEqual(delayed["contexts"], baseline["contexts"])
-                for snapshot in (baseline, delayed):
+                for snapshot in (baseline, delayed, grouped, per_microbatch):
                     self.assertEqual(snapshot["flux_forward_calls"], 6)
                     self.assertEqual(snapshot["real_packs"], 3 if rank == 0 else 6)
                     self.assertEqual(snapshot["padding_forward_calls"], 3 if rank == 0 else 0)
@@ -182,7 +206,7 @@ class FsdpBenchmarkTests(unittest.TestCase):
                     self.assertEqual(snapshot["gradients"].keys(), initial.keys())
                     self.assertTrue(all(set(state) == {"step", "exp_avg", "exp_avg_sq"}
                                         for state in snapshot["optimizer"].values()))
-            for mode in ("reference", "default"):
+            for mode in ("reference", "default", "grouped", "per_microbatch"):
                 for update in range(3):
                     for field in ("gradients", "parameters", "optimizer"):
                         torch.testing.assert_close(results[(rank, mode)][update][field],

@@ -118,16 +118,17 @@ class NumericsTests(unittest.TestCase):
         for step in range(1, 4):
             common = dict(parameters="same", frozen_unchanged=True, frozen_no_grad=True,
                           learning_rates=[step * 1e-7])
-            reference.append(dict(step=step, loss=1.0, ranks=[dict(rank=0, inputs=[0, 1],
-                                  draws=[0, 1], **common)]))
+            reference.append(dict(step=step, loss=1.0, targets=2, ranks=[dict(rank=0, inputs=[dict(index=0), dict(index=1)],
+                                  draws=[dict(target=0), dict(target=1)], **common)]))
             gradient = dict(sha256="same", comparison=dict(relative_l2=0.01), blocks={})
-            distributed.append(dict(step=step, loss=1.0001, ranks=[
-                dict(rank=i, inputs=[i], draws=[i], gradients=deepcopy(gradient), **common) for i in range(2)]))
+            distributed.append(dict(step=step, loss=1.0001, targets=2, ranks=[
+                dict(rank=i, inputs=[dict(index=i)], draws=[dict(target=i)],
+                     gradients=deepcopy(gradient), **common) for i in range(2)]))
         self.assertEqual(compare_records(reference, distributed, NumericalCriteria())["status"], "passed")
         changed = deepcopy(distributed)
         changed[0]["ranks"][0]["gradients"]["comparison"]["relative_l2"] = 0.1
         changed[0]["ranks"][1]["gradients"]["sha256"] = "different"
-        changed[1]["ranks"][1].update(parameters="different", frozen_no_grad=False, draws=[0])
+        changed[1]["ranks"][1].update(parameters="different", frozen_no_grad=False, draws=[dict(target=0)])
         changed[2]["loss"] = 1.1
         result = compare_records(reference, changed, NumericalCriteria())
         self.assertEqual(set(result["failures"]), {"step_1/gradient_l2", "step_1/rank_gradients",
@@ -143,6 +144,14 @@ class NumericsTests(unittest.TestCase):
         direct = compare_records(distributed, sharded, NumericalCriteria(),
                                  strategy="fsdp2", reference_strategy="ddp")
         self.assertEqual(direct["failures"], ["step_1/gradient_l2"])
+
+        permuted = deepcopy(distributed)
+        for row in permuted:
+            row["ranks"][0]["inputs"], row["ranks"][1]["inputs"] = row["ranks"][1]["inputs"], row["ranks"][0]["inputs"]
+            row["ranks"][0]["draws"], row["ranks"][1]["draws"] = row["ranks"][1]["draws"], row["ranks"][0]["draws"]
+        self.assertEqual(compare_records(reference, permuted, NumericalCriteria())["status"], "passed")
+        permuted[0]["ranks"][0]["inputs"] = [dict(index=0)]
+        self.assertEqual(compare_records(reference, permuted, NumericalCriteria())["failures"], ["step_1/inputs"])
 
 
 if __name__ == "__main__":

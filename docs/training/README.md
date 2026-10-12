@@ -314,13 +314,78 @@ diagnostic. Capacity probes select their policy separately through their CLI.
 Run `--mode smoke` for the complete pipeline before the benchmark; the synthetic
 capacity result alone does not establish its memory limit.
 
-FSDP2 always accumulates full local gradients until the final scheduled microbatch
+FSDP2 normally accumulates full local gradients until the final scheduled microbatch
 of each optimizer update, including a padded dummy call, then reduces before
 clipping and AdamW. Training, benchmarks, numerical diagnostics and the capacity
-probe share this policy without a configuration or CLI switch. Parameter
+probe default to this policy. A bounded benchmark can instead set the top-level
+`fsdp_gradient_sync="per_microbatch"` to reduce after every scheduled call and
+accumulate gradient shards. This is not a training-recipe option. The benchmark
+manifest records the policy; numerical and capacity diagnostics reject this
+override rather than silently ignoring it. Parameter
 all-gathers follow the resharding policy above. Retaining full gradients can raise
 peak memory; earlier capacity measurements with reduction after every microbatch
 do not establish the current limit.
+
+The optional `execution.fsdp_blocks_per_group` groups consecutive FLUX blocks
+into one FSDP collective group in their existing forward order. It is a positive
+integer accepted only with `fsdp2`; omission keeps one block per group. A final
+partial group is retained, and the packed root remains separate. B14 uses
+[`five-block groups`](../../configs/training/benchmarks/b14_fsdp2_14k_grouped_blocks.json)
+with B13's 14,336-token budget and token-balanced assignment. Grouping changes
+communication granularity without changing parameter names or block execution;
+larger gathered buffers can increase peak memory. The effective grouping is
+recorded in the recipe for benchmarks, profiling and numerical diagnostics.
+
+The optional `execution.rank_batch_assignment=token_balanced_v1` applies to both
+DDP and FSDP2. It retains the ordered global optimizer batches and assigns whole
+sources within each batch by descending `sum(eligible_prefix_tokens + 900)` to
+the rank with the least assigned load. Local source order and original global
+target IDs are retained, so indexed noise and timesteps follow the same targets.
+It permits unequal source counts per rank. Omission retains `contiguous_v1`.
+
+This mode requires explicitly prepared `<view_name>.token_lengths.json` in the
+selected split directory. Run `scripts/data/prepare_training_token_lengths.py
+--config <config>` with the cached NVARC tokenizer, or add `--steps-jsonl <path>`
+to reuse a complete matching benchmark. GPU startup only reads this small
+metadata file; consumed samples check their actual prefixes against it.
+New epoch keys require new metadata. The metadata hash is recorded in benchmark,
+numerical and checkpoint identities. B10's
+[`token-balanced configuration`](../../configs/training/benchmarks/b10_fsdp2_12k_token_balanced.json)
+matches B9's 12,288-token, no-forward-resharding settings with one repetition;
+only source assignment changes. CPU planning estimates do not establish GPU throughput.
+
+Set `execution.rank_batch_assignment=joint_packing_v1` to plan source ownership
+and aligned FLUX microbatches during regular training or a benchmark. It uses
+the same bounded joint planner as the precomputed experiments. Each training
+rank owns one spawned CPU worker, with at most four queued searches ahead of
+the next requested batch. All ranks deterministically derive the same global
+plan from prepared lengths and the runtime world size; sources remain whole,
+and global batches, target IDs, noise and timestep identities are preserved.
+
+The DataLoader requests planned source indices before loading their samples.
+Its source prefetch and the training loop share cached plans; completed plans
+are released after training consumes them. Resume starts at the original next
+batch ID and regenerates its plans without loading completed sources. Worker
+failures propagate, and workers close on normal completion or error. The mode
+requires indexed flow RNG, `legacy_bfd_v1`, `shuffle=false`, and the same prepared
+token metadata as token balancing. Do not combine it with `precompute_packing`.
+
+The background planner supports the actual configured world size, provided each
+optimizer batch, including the epoch tail, has at least one source per rank.
+The Modal benchmark launcher accepts 1, 2, 4 or 8 GPUs, matching
+`execution.gpu_count` in the benchmark config; numerical diagnostics still use
+exactly two GPUs and reject background packing. Modal supports up to eight
+H200s in one container ([GPU documentation](https://modal.com/docs/guide/gpu)).
+Larger optimizer batches must be selected explicitly in the training recipe.
+
+The [12k background-packing benchmark](../../configs/training/benchmarks/fsdp2_12k_background_packing.json)
+retains the measured FSDP reference's sharding and optimizer policies, with one
+repetition. Its manifest records the planner contract and implementation hash;
+step records retain the executed packs. Waiting for a future plan during timed
+data retrieval is included in throughput. The first plan and initial DataLoader
+prefetch occur before the timed loop and are excluded. CPU tests cover 1/2/4/8
+rank plans, worker prefetch, resume, errors and real optimizer updates; GPU
+throughput with overlapping planning remains unmeasured.
 
 `--mode smoke` runs the first three updates. `--mode benchmark` runs ten training
 updates excluded from statistics, followed by 50 measured updates. Both modes
@@ -328,11 +393,11 @@ start fresh from the base checkpoint and share their initial data/noise sequence
 The Modal launcher executes the configured repetitions automatically in benchmark
 mode (three for the checked-in DDP/FSDP2 configs), each in fresh worker processes.
 Smoke mode runs once. Inspect smoke counts and finite global losses before the
-benchmark. One GPU uses the same DDP path with `world_size=1`.
+benchmark. One GPU uses the same DDP path with `world_size=1`; select a benchmark
+config with `execution.gpu_count=1` for that run. The checked-in reference below
+uses two GPUs.
 
 ```bash
-python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
-  --gpus 1 --mode smoke
 python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
   --gpus 2 --mode smoke
 ```
@@ -340,8 +405,6 @@ python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.p
 After successful smoke runs, on the same GPU type and software environment:
 
 ```bash
-python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
-  --gpus 1 --mode benchmark
 python -m modal run --detach --env diffusion-arc scripts/cloud/train_ddp_modal.py \
   --gpus 2 --mode benchmark
 ```

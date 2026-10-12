@@ -19,6 +19,7 @@ from tests.training.test_training_modal import _App, RecordingImage
 
 ROOT = Path(__file__).resolve().parents[2]
 FSDP_CONFIG = "configs/training/benchmarks/fsdp2_training.json"
+PRECOMPUTED_CONFIG = "configs/training/benchmarks/b15_fsdp2_14k_precomputed_packing.json"
 
 
 class TrainDdpModalTests(unittest.TestCase):
@@ -76,7 +77,12 @@ class TrainDdpModalTests(unittest.TestCase):
         self.assertEqual(mounts, ["src", "scripts", "configs", self.launcher.BUNDLE])
         with tempfile.TemporaryDirectory() as directory:
             repository = self.make_repository(directory)
-            for gpus, mode, timeout in ((1, "smoke", 600), (2, "benchmark", 5400), (2, "memory", 1800)):
+            for gpus, mode, timeout in ((1, "smoke", 600), (2, "benchmark", 5400), (2, "memory", 1800),
+                                        (4, "smoke", 600), (8, "smoke", 600)):
+                config_path = repository / self.launcher.CONFIG
+                payload = json.loads(config_path.read_text())
+                payload["execution"]["gpu_count"] = gpus
+                write_json(config_path, payload)
                 remote = Mock()
                 with self.subTest(gpus=gpus, mode=mode), \
                         patch.object(self.launcher, "LOCAL_ROOT", repository), \
@@ -97,10 +103,107 @@ class TrainDdpModalTests(unittest.TestCase):
             with patch.object(self.launcher, "LOCAL_ROOT", repository):
                 with self.assertRaisesRegex(FileNotFoundError, "raw/arc-agi-2/training/task-0.json"):
                     self.launcher.main()
-                for options in (dict(gpus=4), dict(gpus=True), dict(mode="nsys")):
+                for options in (dict(gpus=3), dict(gpus=True), dict(mode="nsys")):
                     with self.subTest(options=options), self.assertRaises(ValueError):
                         self.launcher.main(**options)
             remote.with_options.assert_not_called()
+
+    def test_gpu_count_mismatch_never_dispatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory)
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                with self.assertRaisesRegex(ValueError, "must match"):
+                    self.launcher.main(gpus=4, mode="smoke")
+                remote.with_options.assert_not_called()
+
+    def test_background_packing_requires_metadata_and_rejects_numerics_before_dispatch(self):
+        from diffusion_arc.training.data import ArcTrainingDataset
+        from diffusion_arc.training.source_lengths import write_source_token_lengths
+
+        config_name = "configs/training/benchmarks/fsdp2_12k_background_packing.json"
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory, config=config_name)
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                with self.assertRaisesRegex(FileNotFoundError, "Missing source token lengths"):
+                    self.launcher.main(gpus=2, mode="smoke", config=config_name)
+                remote.with_options.assert_not_called()
+                dataset = ArcTrainingDataset(repository / self.launcher.BUNDLE / "splits/train", "train", tokenizer=None)
+                write_source_token_lengths(dataset, ((10, 20, 30),) * len(dataset.keys),
+                    min_context_pairs_before_target=2, provenance={})
+                self.launcher.main(gpus=2, mode="smoke", config=config_name)
+                remote.with_options.assert_called_once()
+                remote.reset_mock()
+                with self.assertRaisesRegex(ValueError, "numerics does not support background joint packing"):
+                    self.launcher.main(gpus=2, mode="numerics", config=config_name)
+                remote.with_options.assert_not_called()
+
+    def test_token_balancing_requires_matching_prepared_lengths_before_dispatch(self):
+        from diffusion_arc.training.data import ArcTrainingDataset
+        from diffusion_arc.training.source_lengths import write_source_token_lengths
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory)
+            path = repository / self.launcher.CONFIG
+            payload = json.loads(path.read_text())
+            payload["execution"]["rank_batch_assignment"] = "token_balanced_v1"
+            write_json(path, payload)
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                with self.assertRaisesRegex(FileNotFoundError, "Missing source token lengths"):
+                    self.launcher.main(gpus=2, mode="benchmark")
+                remote.with_options.assert_not_called()
+                dataset = ArcTrainingDataset(repository / self.launcher.BUNDLE / "splits/train", "train", tokenizer=None)
+                lengths = write_source_token_lengths(dataset, ((10, 20, 30),) * len(dataset.keys),
+                    min_context_pairs_before_target=2, provenance={})
+                self.launcher.main(gpus=2, mode="benchmark")
+                remote.with_options.assert_called_once()
+                remote.reset_mock()
+                metadata = json.loads(lengths.read_text())
+                metadata["data_fingerprint"] = "other epoch"
+                write_json(lengths, metadata)
+                with self.assertRaisesRegex(ValueError, "Stale or mismatched"):
+                    self.launcher.main(gpus=2, mode="benchmark")
+                remote.with_options.assert_not_called()
+
+    def test_precomputed_packing_preflight_and_dispatch_require_prepared_metadata(self):
+        from diffusion_arc.training.data import ArcTrainingDataset
+        from diffusion_arc.training.source_lengths import write_source_token_lengths
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory, config=PRECOMPUTED_CONFIG)
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                with self.assertRaisesRegex(FileNotFoundError, "Missing source token lengths"):
+                    self.launcher.main(gpus=2, mode="benchmark", config=PRECOMPUTED_CONFIG)
+                remote.with_options.assert_not_called()
+                dataset = ArcTrainingDataset(repository / self.launcher.BUNDLE / "splits/train", "train", tokenizer=None)
+                write_source_token_lengths(dataset, ((10, 20, 30),) * len(dataset.keys),
+                    min_context_pairs_before_target=2, provenance={})
+                self.launcher.main(gpus=2, mode="benchmark", config=PRECOMPUTED_CONFIG)
+                remote.with_options.assert_called_once_with(
+                    gpu="H200:2", cpu=(16.0, 16.0), memory=(131072, 131072), timeout=1800,
+                )
+                self.assertEqual(remote.with_options.return_value.remote.call_args.args[:3],
+                                 (PRECOMPUTED_CONFIG, 2, "benchmark"))
+                remote.reset_mock()
+                with self.assertRaisesRegex(ValueError, "numerics does not support precompute_packing"):
+                    self.launcher.main(gpus=2, mode="numerics", config=PRECOMPUTED_CONFIG)
+                remote.with_options.assert_not_called()
+
+    def test_per_microbatch_policy_is_rejected_by_numerics_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory, config=FSDP_CONFIG)
+            path = repository / FSDP_CONFIG
+            payload = json.loads(path.read_text())
+            payload["fsdp_gradient_sync"] = "per_microbatch"
+            write_json(path, payload)
+            with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                    patch.object(self.launcher, "train_ddp") as remote:
+                with self.assertRaisesRegex(ValueError, "numerics does not support fsdp_gradient_sync"):
+                    self.launcher.main(gpus=2, mode="numerics", config=FSDP_CONFIG)
+                remote.with_options.assert_not_called()
 
     def test_numerics_requires_two_gpus_and_valid_criteria_before_dispatch(self):
         with tempfile.TemporaryDirectory() as directory:
