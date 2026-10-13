@@ -7,6 +7,10 @@ snapshots live under [`experiments/results/`](../../experiments/results/).
 
 ## Main findings
 
+- [Broader ARC-AGI-1 checkpoint comparison](../training/arc-agi-1-recipe.md#checkpoint-comparison-4530-and-4830-2026-09-22):
+  checkpoint 4830 reached 8/100 pass@1 and 9/100 pass@2 with four Euler steps
+  on the validation set. Final testing remains separate, and NVARC's prior
+  benchmark exposure limits generalization claims.
 - [Overfitting investigation](overfitting/README.md): the path from the first
   eight-task pilots to successful same-task augmentation generalization.
 - [VAE palette and round-trip analysis](vae/palette-and-roundtrip.md): the

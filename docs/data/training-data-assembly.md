@@ -5,7 +5,7 @@
 This document describes the implemented dataset contract and the auxiliary
 CPU-side packed-collation path. The packed path is useful for diagnostics,
 tests, and alternate source batching, but it is not the input path used by the
-current `scripts/train_single_gpu.py` entrypoint.
+current `scripts/train.py` entrypoint.
 
 The current trainer instead configures `DataLoader(batch_size=None)` and groups
 consecutive `ArcTokenizedTrainingSample` items inside the training loop. It
@@ -107,12 +107,21 @@ During construction, the dataset:
 2. selects the named view;
 3. loads the task-level train and validation lists and rejects overlap;
 4. loads the selected view's augmentation keys in stored order;
-5. rejects malformed keys, duplicates, and task IDs outside the configured
-   task split;
-6. derives the raw source directory and verifies every referenced task file;
-7. loads every referenced task for validation;
-8. validates every key against its task and requires at least two selected
-   pairs.
+5. rejects malformed or duplicate keys and task IDs outside the configured
+   task split, and requires at least two selected pairs per key;
+6. derives the raw source directory;
+7. for a prepared bundle, checks the manifest schema, dataset, source coverage,
+   unique source records, and augmentation-key file hash;
+8. builds the dataset fingerprint from the view metadata, ordered keys, and
+   source hashes already recorded in the preparation manifest.
+
+Prepared bundles do not reread or rehash source tasks at construction. Full
+source validation belongs to CPU preparation; individual tasks are read when
+consumed. The legacy layout without a manifest still reads and validates all
+referenced tasks to compute its original semantic fingerprint. Compatibility
+with an older checkpoint fingerprint can also require that legacy read; normal
+manifest-based resumes reuse the prepared identity. Source files and preparation
+metadata must remain unchanged during a run.
 
 The dataset retains the parsed keys and source location, but it does not cache
 parsed ARC tasks. Item materialization reloads the task referenced by the

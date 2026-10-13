@@ -15,7 +15,7 @@ its separate Torch Profiler capture, and the OOM comparison with expandable
 segments. The [FSDP2 report](fsdp2.md) follows the experiments from initial
 memory savings through larger packs, reduced communication, and balanced GPU
 work. Compact tables show the initial trade-off and the strongest two-GPU
-FSDP2 reference. The [four/eight-GPU comparison](fsdp2.md#four--and-eight-gpu-complete-pipeline-results)
+FSDP2 reference. The [four/eight-GPU comparison](fsdp2.md#four-eight-gpu-results)
 uses dynamic joint CPU packing and larger FSDP packs: FSDP's median steps remain
 1.8% and 3.1% slower respectively. **DDP with background joint packing is the
 preferred strategy for this H200 workload**; FSDP remains a capacity option.

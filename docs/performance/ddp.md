@@ -37,7 +37,7 @@ references were discarded between updates. The next `no_sync()` backward could
 then allocate separate gradients while DDP retained its buckets. We changed the
 DDP path to `zero_grad(set_to_none=False)`, which zeros gradients in place and
 preserves established bucket views. Both the one- and two-GPU smoke tests then
-completed three updates. The [accumulation probe](../../artifacts/ddp/bucket-view-accumulation.json)
+completed three updates. The [accumulation probe](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/bucket-view-accumulation.json)
 records the difference; sharing becomes established during synchronized backward,
 so initialization still has a different memory pattern.
 
@@ -218,38 +218,41 @@ relative L2 difference was **0.4113%**, with cosine similarity **0.9999916**.
 The largest reported block/group difference was 0.7676%. DDP gradient
 fingerprints matched exactly in step one, parameter fingerprints matched after
 every update, and frozen models remained unchanged with no gradients.
-The [result and criteria](../../artifacts/ddp/20260921T210502329322Z-numerics-2gpu/training/summary.json)
-and [execution manifest](../../artifacts/ddp/20260921T210502329322Z-numerics-2gpu/training/ddp/manifest.json)
+The [result and criteria](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260921T210502329322Z-numerics-2gpu/training/summary.json)
+and [execution manifest](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260921T210502329322Z-numerics-2gpu/training/ddp/manifest.json)
 retain the evidence. This checks three initial updates; it does not establish
 long-run equivalence or explain the earlier step-42 divergence.
 
-The next stage is FSDP2, using these two-GPU DDP results as the reference.
-No additional DDP Nsight Systems capture is planned; this report contains no
-four-GPU measurements.
+These two-GPU results provided the reference for subsequent
+[FSDP2 experiments](fsdp2.md). The
+[four/eight-GPU comparison](fsdp2.md#four-eight-gpu-results)
+uses background joint packing and favors DDP for this H200 workload. This page
+preserves the original two-GPU benchmark and numerical diagnostic.
 
 ## Evidence
 
-Large artifacts remain local under `artifacts/ddp/` and in the Modal volume
+Historical artifacts are archived locally under
+`artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/` and remain in the Modal volume
 `diffusion-arc-models`, environment `diffusion-arc`, under `results/ddp/<run-id>/`.
 Manifests and launch records preserve configuration, package versions, commands,
 source hashes and the uncommitted source state.
 
-- Early smoke tests: [bucket views alone](../../artifacts/ddp/smoke-1gpu-bucket-view.log),
-  then in-place zeroing on [one GPU](../../artifacts/ddp/smoke-1gpu-bucket-view-zero.log)
-  and [two GPUs](../../artifacts/ddp/smoke-2gpu-bucket-view-zero.log).
-  Benchmark failures: [step 29](../../artifacts/ddp/benchmark-2gpu-20260915T153801.log)
-  and [step 54 after repacking](../../artifacts/ddp/benchmark-2gpu-balanced-20260916T105827Z.log).
+- Early smoke tests: [bucket views alone](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/smoke-1gpu-bucket-view.log),
+  then in-place zeroing on [one GPU](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/smoke-1gpu-bucket-view-zero.log)
+  and [two GPUs](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/smoke-2gpu-bucket-view-zero.log).
+  Benchmark failures: [step 29](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/benchmark-2gpu-20260915T153801.log)
+  and [step 54 after repacking](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/benchmark-2gpu-balanced-20260916T105827Z.log).
 - Benchmark `20260917T085250710411Z-benchmark-2gpu`:
-  [combined summary](../../artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/summary.json),
-  [manifest](../../artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/repetition-1/manifest.json),
-  [launch record](../../artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/launch.json).
+  [combined summary](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/summary.json),
+  [manifest](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/repetition-1/manifest.json),
+  [launch record](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/launch.json).
 - Memory runs `20260916T143445586047Z-memory-2gpu` and
   `20260917T112642809601Z-memory-2gpu`:
-  [comparison](../../artifacts/ddp/20260917T112642809601Z-memory-2gpu/memory-comparison.json),
-  [old OOM snapshot](../../artifacts/ddp/memory-2gpu-20260916-rank-0-oom.pickle),
-  [new rank-0 snapshot](../../artifacts/ddp/20260917T112642809601Z-memory-2gpu/training/rank-0-step-54-pack-1-backward.pickle).
+  [comparison](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T112642809601Z-memory-2gpu/memory-comparison.json),
+  [old OOM snapshot](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/memory-2gpu-20260916-rank-0-oom.pickle),
+  [new rank-0 snapshot](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T112642809601Z-memory-2gpu/training/rank-0-step-54-pack-1-backward.pickle).
   Open snapshots in the [PyTorch Memory Visualizer](https://docs.pytorch.org/memory_viz).
 - Torch Profiler `20260917T093703228054Z-profile-2gpu`:
-  [rank 0](../../artifacts/ddp/20260917T093703228054Z-profile-2gpu/training/rank-0.trace.json.gz),
-  [rank 1](../../artifacts/ddp/20260917T093703228054Z-profile-2gpu/training/rank-1.trace.json.gz),
-  [trace validation](../../artifacts/ddp/20260917T093703228054Z-profile-2gpu/trace-validation.json).
+  [rank 0](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T093703228054Z-profile-2gpu/training/rank-0.trace.json.gz),
+  [rank 1](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T093703228054Z-profile-2gpu/training/rank-1.trace.json.gz),
+  [trace validation](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T093703228054Z-profile-2gpu/trace-validation.json).

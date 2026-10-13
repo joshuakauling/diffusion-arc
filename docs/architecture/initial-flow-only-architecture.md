@@ -2,9 +2,9 @@
 
 ## Status
 
-This document specifies the flow-only architecture used by the nine core
-project milestones. The project scope and milestone order are defined in the
-root [`README.md`](../../README.md).
+This document specifies the project's flow-only architecture. The project
+scope, current status, and evaluation rules are defined in the root
+[`README.md`](../../README.md).
 
 The [B3 report](../performance/b3.md) describes the implemented single-GPU
 execution with FA3 packing and NVARC early exit. The shapes below describe

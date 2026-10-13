@@ -1,21 +1,24 @@
 # First ARC-AGI-1 training run
 
-This is the agreed recipe for the first full epoch of single-GPU training.
-It tests whether the lessons from [overfitting](../experiments/overfitting/README.md)
-transfer to a broader task distribution. The runner executes the training epoch
-with loss validation, fixed-seed sampling, W&B logging and full-state checkpoints.
-RunPod Community Cloud is the target platform. Local upload and Pod startup are
-implemented; deployment verification and final-test checkpoint selection remain open.
+This document records the agreed first-epoch recipe and subsequent single-GPU
+ARC-AGI-1 training. It tests whether the lessons from
+[overfitting](../experiments/overfitting/README.md) transfer to a broader task
+distribution, with loss validation, fixed-seed sampling, W&B logging and
+full-state checkpoints. RunPod was the initial target platform; later Modal
+continuation completed epoch five and reached part of epoch six. The
+[checkpoint comparison](#checkpoint-comparison-4530-and-4830-2026-09-22) records
+the validation results. Final-test checkpoint selection and controlled GPU
+interruption/recovery checks remain open.
 
 The [run configuration](../../configs/training/arc_agi_1_epoch.json) records
-these decisions as `training_run` schema version 1. Its
+these decisions as `training_run` schema version 2. Its
 [loader](../../src/diffusion_arc/training/config.py) validates the complete
 recipe and normalizes it into the same `TrainingConfig` used by B3.
 The [trainer step](../../src/diffusion_arc/training/trainer.py) executes one
 complete optimizer update, including NVARC/VAE encoding. Sampler, loss, optimizer
 and scheduler are built outside and supplied to the trainer. The outer loop
 owns epoch accounting and checks its expected target/update totals.
-The [training entrypoint](../../scripts/train_single_gpu.py) loads this config
+The [training entrypoint](../../scripts/train.py) loads this config
 before importing the GPU runtime and calls
 [`run_training(config)`](../../src/diffusion_arc/training/runner.py). The runner
 checks that the prepared view contains the expected number of distinct tasks
@@ -789,10 +792,12 @@ Continuation requires the original workspace assets and full checkpoint, not
 the weights-only HF export. All existing checkpoints are retained. The current
 three-save policy requires 190 GiB of free workspace headroom before starting
 another complete epoch; a 300 GB volume holding the first epoch's checkpoints
-will generally need more space or an explicit cleanup decision. No remote GPU
-continuation has been validated yet; local tests cover fresh views, global and
-epoch-local cursors, unchanged first-epoch behavior, and real AdamW/RNG/LR
-checkpoint roundtrips.
+will generally need more space or an explicit cleanup decision. The
+[Modal continuation](#checkpoint-cadence) completed epoch five and reached
+checkpoint 4830 in epoch six. This establishes remote execution, while a
+controlled full-size GPU interruption/resume comparison remains open. Local
+tests cover fresh views, global and epoch-local cursors, unchanged first-epoch
+behavior, and real AdamW/RNG/LR checkpoint roundtrips.
 
 The runner loads FLUX from `transformer/`, reconstructs the frozen CPU cache,
 then restores optimizer/scheduler and RNGs before the next update. The data
@@ -805,8 +810,9 @@ extends past the checkpoint, training recomputes those updates and suppresses
 their duplicate log records until it catches up; existing history is preserved.
 Use the latest completed checkpoint for recovery. A checkpoint and a W&B upload
 are separate writes: records absent from the server at interruption are not
-reconstructed. W&B server resume and GPU/storage overhead still need the remote
-integration test; local tests substitute the resumed SDK state.
+reconstructed. Controlled W&B history recovery after interruption and measured
+GPU/storage overhead still need a dedicated remote integration test; local tests
+substitute the resumed SDK state.
 
 At roughly 4 billion parameters, FP32 weights plus two FP32 AdamW moments imply
 about **48 GB per full checkpoint**, or **144 GB for three**, before small metadata
@@ -816,12 +822,14 @@ space for its complete temporary directory before retention can remove older sav
 ## Remaining run setup
 
 Choose the checkpoint-selection rule before using the reserved test tasks.
-The proposed first-epoch protocol is to evaluate the final checkpoint at update
+The original first-epoch proposal was to evaluate the final checkpoint at update
 906 on all 300 reserved tasks, using two direct samples and 40 Euler steps per
 query. Keep final testing a separate explicit action after training; this
-proposal still needs agreement.
+proposal was not executed. The later checkpoint comparison motivates testing
+small sampling budgets before selecting the final checkpoint and protocol;
+final testing still requires a separate agreement.
 
-Implementation work:
+Implementation evidence and remaining checks:
 
 1. The validated configuration, deterministic data preparation and recipe core
    are implemented. CPU numerical tests cover regional loss and gradients,
@@ -830,7 +838,8 @@ Implementation work:
    Step results contain update scalars and individual CPU-only target metrics;
    logging derives grouped losses outside the trainer. Gradients are released
    before control returns to the outer loop. These tests use small substitute models;
-   GPU execution and tuning of the NVARC budget remain unverified.
+   the completed single-GPU runs establish execution, but do not establish an
+   optimal NVARC token budget.
 2. The normal training entrypoint and epoch runner are implemented, reusing B3
    model preparation and packing without starting a profiler. CPU orchestration
    tests cover complete and partial batches, incompatible prepared views,
@@ -863,14 +872,16 @@ Implementation work:
    no automatic system-stat records. A further offline media check preserved
    two distinct table versions with 33 query rows each and their comparison
    images. All inputs were synthetic. GPU reads were substituted; real GPU
-   measurements and logging overhead still need the integrated smoke run.
+   sensor validation and isolated logging overhead still need a dedicated
+   integrated measurement.
 4. Full-state save/resume is implemented and tested with real small HF
    safetensors. Tests cover numerical continuation, rejected incompatible or
    incomplete saves, failed writes, retention, data cursors and W&B history
-   catch-up. No remote run or full-size checkpoint has been created locally.
-5. Verify an integrated GPU smoke run, including interrupted continuation and
-   the existing W&B run, and measure logging/checkpoint overhead before the
-   full epoch.
+   catch-up. These local tests do not establish full-size GPU recovery
+   equivalence after interruption.
+5. Complete a controlled GPU interruption/resume comparison with the existing
+   W&B run and measure logging/checkpoint overhead. The completed epochs and
+   checkpoint exports do not replace those checks.
 
 Both launchers have local tests, including an actual detached subprocess using
 transferred source, failure exit codes, archive integrity and runtime constraints.
@@ -879,5 +890,6 @@ disabled echo, CRLF translation, detached execution, log reconnection, timeouts 
 disconnects. On 2026-09-16, a bounded test through the real RunPod proxy verified
 Python startup, the presence of required secrets and `/workspace`, and transfer of
 a 166,701-byte source archive with a matching SHA-256. It created no remote files or
-jobs and downloaded no models or data. Real downloads/uploads and the integrated
-H200 run remain deployment checks. The existing image can be used.
+jobs and downloaded no models or data. That transport-only test predates the
+completed Modal H200 continuation and HF exports documented above. It does not
+validate every RunPod launcher path or controlled interruption recovery.

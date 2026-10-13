@@ -306,6 +306,8 @@ therefore uses **16,384 tokens**, 33.3% more than DDP's budget, with 192 global
 targets. These probes select budgets to test in the full pipeline, rather than
 establishing universal bounds for other data, models, or memory policies.
 
+<a id="four-eight-gpu-results"></a>
+
 ## Four- and eight-GPU complete-pipeline results
 
 Each configuration ran one fresh repetition with ten warmup and **25 measured

@@ -52,16 +52,49 @@ The project is under active development. Existing work includes:
 - **Single-GPU training and profiling:** a measured training pipeline using
   FlashAttention-3 sequence packing, with documented optimization experiments
   and end-to-end benchmarks.
-- **Two-GPU DDP:** completed training-step benchmarks and a three-update
-  numerical comparison against single-GPU execution that passed the predefined
-  loss and gradient tolerances.
+- **Distributed training:** completed DDP and FSDP2 benchmarks on two, four,
+  and eight H200 GPUs. DDP with background joint packing is the preferred
+  strategy for the measured workload; FSDP2 remains a memory-capacity option.
 - **Training services:** configuration-driven validation, sampling, W&B logging,
   checkpointing, and resume. Validation of the complete distributed GPU
   lifecycle remains ongoing.
 
-The [performance reports](docs/performance/README.md) and
-[DDP investigation](docs/performance/ddp.md) describe the methods, results, and
-limitations.
+## Performance highlights
+
+These measurements cover full-parameter FLUX training with frozen NVARC and VAE
+encoders on NVIDIA H200 GPUs. Throughput counts training targets across all GPUs.
+
+| Finding | Measured result |
+| --- | --- |
+| [Single-GPU pipeline, B0 → B3](docs/performance/README.md#results) | **69.7% higher throughput**, from 3.094 to 5.250 targets/s; median step time fell from 15.45 to 9.06 s. |
+| [DDP on four and eight GPUs](docs/performance/fsdp2.md#four-eight-gpu-results) | **20.747 and 40.845 targets/s**: 1.97× throughput when both GPU count and global batch doubled, from 96 to 192 targets. |
+| [DDP versus FSDP2](docs/performance/fsdp2.md#implications) | FSDP2 saved peak allocated memory but delivered **1.7% and 2.9% less throughput** on four and eight GPUs, despite larger packs. |
+
+B0 and B3 each combine three repetitions of 50 measured updates; the four/eight-GPU
+configurations each use one repetition of 25. Every repetition excludes ten
+warm-up updates. Timing includes data retrieval, encoder preparation, and the
+complete training/optimizer step; model loading, validation, sampling, logging,
+and checkpoints are excluded. The four-to-eight-GPU result measures scaling at
+24 targets per GPU, rather than a fixed global batch.
+
+These bounded benchmarks do not establish long-run numerical equivalence.
+The initial single-GPU/FSDP2 comparison failed its loss tolerance, and the latest
+planner/strategy combinations still need dedicated GPU numerical validation.
+See the [numerical evidence](docs/performance/fsdp2.md#numerical-evidence-and-limits)
+and [benchmark reports](docs/performance/README.md) for methods and limitations.
+
+## Preliminary ARC result
+
+Broader ARC-AGI-1 training completed five epochs and continued partway through
+epoch six. In the documented checkpoint comparison, checkpoint 4830 with four
+Euler steps achieved **8/100 exact-grid pass@1 and 9/100 pass@2** on the fixed
+100-task validation set, without test-time training, augmentation, or voting.
+
+This is a validation result used to compare checkpoints and sampling budgets;
+the 300 reserved final-test tasks were not used. NVARC's prior benchmark exposure
+limits claims of unseen-task generalization for the complete system. See the
+[checkpoint comparison](docs/training/arc-agi-1-recipe.md#checkpoint-comparison-4530-and-4830-2026-09-22)
+for the sampling sensitivity, controls, and remaining failure modes.
 
 ## Getting started
 
@@ -110,15 +143,14 @@ Interpretation will account for
 
 - **Distributed validation:** complete GPU lifecycle checks for validation,
   sampling, checkpointing, interrupted runs, and reproducible continuation.
-- **Sharding and memory:** validate FSDP2 against the DDP reference and measure
-  the effects of sharding and activation checkpointing.
-- **Scaling and performance:** compare execution strategies at fixed global
-  batches and seeds, extending to 4 and 8 GPUs where hardware permits. Use
-  complete-step measurements to guide optimization.
-- **Broader ARC training:** test whether the single-task findings transfer to a
-  wider task distribution, develop the training recipe through bounded
-  experiments, and fix the recipe, compute budget, and checkpoint-selection
-  rule before final training.
+- **Numerical validation:** check the final planner/strategy combinations and
+  resolve the initial FSDP2 loss-tolerance failure before claiming equivalence.
+- **Scaling and memory:** extend the bounded results with repeated runs and
+  comparisons at fixed global batches and seeds. Revisit FSDP2 and activation
+  checkpointing when a concrete memory constraint requires them.
+- **ARC learning:** improve the broader-task training recipe through bounded
+  experiments, including sampling-budget and checkpoint comparisons. Fix the
+  recipe, compute budget, and checkpoint-selection rule before final training.
 - **Final evaluation:** compare FLUX and autoregressive NVARC on held-out tasks,
   including exact-grid accuracy, failure modes, and sampling cost.
 

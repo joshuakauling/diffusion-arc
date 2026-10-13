@@ -8,8 +8,8 @@ relevant code and detailed documentation. The root
 milestones, evaluation, and non-goals.
 
 The [first ARC-AGI-1 training recipe](arc-agi-1-recipe.md) records the agreed
-dataset, augmentation, objective, optimizer and validation setup for the next
-full-epoch run, including logging and checkpoint continuation.
+dataset, augmentation, objective, optimizer and validation setup, including
+logging, checkpoint continuation, and results through part of epoch six.
 
 ## Overall workflow
 
@@ -76,23 +76,31 @@ The separate [profiling entrypoint](../../scripts/profile_single_gpu.py) retains
 the B3 Torch/Nsight workflow. The auxiliary `TrainingCollator` serves diagnostics
 and is not part of the production step.
 
-## Selecting single-GPU or DDP execution
+## Selecting single-GPU, DDP or FSDP2 execution
 
-Both strategies use the same training loop. Schema v2 recipes require explicit
+All three strategies use the same training loop. Schema v2 recipes require explicit
 execution, RNG and packing choices; missing fields fail validation:
 
-| Recipe field | Native single GPU | DDP |
-| --- | --- | --- |
-| `execution.distributed_strategy` | `single_process` | `ddp` |
-| `deployment.gpu_count` | `1` | Requested rank count |
-| `flow.rng_scheme` | `legacy_stream_v1`, or `global_step_target_v1` | `global_step_target_v1` |
-| `execution.flux_packing_algorithm` | `legacy_bfd_v1`, or `balanced_release_v1` | `balanced_release_v1`, or `legacy_bfd_v1` |
+| Recipe field | Native single GPU | DDP | FSDP2 |
+| --- | --- | --- | --- |
+| `execution.distributed_strategy` | `single_process` | `ddp` | `fsdp2` |
+| `deployment.gpu_count` | `1` | Requested rank count | Requested rank count |
+| `flow.rng_scheme` | `legacy_stream_v1`, or `global_step_target_v1` | `global_step_target_v1` | `global_step_target_v1` |
+| `execution.flux_packing_algorithm` | `legacy_bfd_v1`, or `balanced_release_v1` | `balanced_release_v1`, or `legacy_bfd_v1` | `legacy_bfd_v1` |
 
 Use `python scripts/train.py --config <recipe>` for native execution and
 `torchrun --standalone --nproc-per-node=N scripts/train.py --config <recipe>`
-for a DDP recipe with `deployment.gpu_count=N`. The cloud training launchers
+for a DDP or FSDP2 recipe with `deployment.gpu_count=N`. The cloud training launchers
 select the corresponding command from the recipe. Native execution creates no
 process group. `scripts/train_single_gpu.py` remains a compatibility entrypoint.
+
+For the measured H200 workload, prefer DDP with
+`execution.rank_batch_assignment=joint_packing_v1` and `legacy_bfd_v1` packing.
+This mode requires prepared token lengths and `data.shuffle=false`; see the
+[background planner setup](#prepared-smoke-and-benchmark-runs) below. FSDP2 remains
+an option for memory constraints; the
+[four/eight-GPU comparison](../performance/fsdp2.md#four-eight-gpu-results)
+found no throughput advantage from its larger packs.
 
 For strategy comparisons, select `global_step_target_v1` and the same packing
 algorithm on both sides, with identical data, global batch size and seeds.
@@ -427,7 +435,7 @@ on the second update. The complete benchmark finished all 35 updates and
 measured a 4.821 s median, versus DDP's 4.677 s. The probe artifacts are stored
 under `artifacts/flux-capacity/20261013T155732028769Z/`.
 
-The [complete four/eight-GPU comparison](../performance/fsdp2.md#four--and-eight-gpu-complete-pipeline-results)
+The [complete four/eight-GPU comparison](../performance/fsdp2.md#four-eight-gpu-results)
 selects DDP with background joint packing for this workload. Larger FSDP packs
 reduced FLUX calls but did not improve throughput. Retain FSDP as a capacity
 option when an actual memory constraint requires it; the bounded runs do not
@@ -603,9 +611,15 @@ doubles; full-model GPU behavior is outside this test.
 
 - Single-GPU and DDP share training, validation, sampling, W&B, full-state resume
   and epoch continuation. Local CPU/Gloo tests cover the integrated lifecycle;
-  a full-model GPU smoke run of that lifecycle remains pending. The separate
-  [DDP report](../performance/ddp.md) records prior bounded GPU/NCCL/FA3 and
-  profiling experiments. FSDP2 and activation checkpointing remain pending.
+  full-model distributed GPU lifecycle validation remains pending. Single-GPU
+  ARC training reached part of epoch six; see the
+  [checkpoint results](arc-agi-1-recipe.md#checkpoint-comparison-4530-and-4830-2026-09-22).
+- DDP and FSDP2 have completed bounded benchmarks on two, four, and eight H200s.
+  The initial two-GPU DDP numerical comparison passed; the initial
+  single-GPU/FSDP2 loss comparison failed its predefined tolerance. The latest
+  planner/strategy combinations still need dedicated GPU numerical validation.
+  See the [FSDP2 evidence and limits](../performance/fsdp2.md#numerical-evidence-and-limits).
+  Activation checkpointing remains unmeasured.
 - All training, benchmark and profiling workloads use schema v2 with
   `config_type="training_run"`. Loss, timestep sampling, scheduler, execution
   strategy and packing are explicit choices. `validation`, `logging`,
