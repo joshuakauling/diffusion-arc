@@ -16,8 +16,26 @@ import modal
 
 REMOTE_ROOT = Path("/opt/diffusion-arc")
 LOCAL_ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else REMOTE_ROOT
-VOLUME_ROOT = Path("/mnt/diffusion-arc-models")
+
+
+def modal_storage_backend() -> tuple[str, Path, Path]:
+    """Validate the existing volume and contained model directory at import time."""
+    volume_name = os.environ.get("DIFFUSION_ARC_MODAL_VOLUME", "diffusion-arc-models")
+    mount = os.environ.get("DIFFUSION_ARC_MODAL_VOLUME_ROOT", "/mnt/diffusion-arc-models")
+    subdirectory = os.environ.get("DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY", ".")
+    if not volume_name.strip():
+        raise ValueError("DIFFUSION_ARC_MODAL_VOLUME must name an existing volume")
+    volume_root, model_subdirectory = Path(mount), Path(subdirectory)
+    if not volume_root.is_absolute() or ".." in volume_root.parts:
+        raise ValueError("DIFFUSION_ARC_MODAL_VOLUME_ROOT must be an absolute mount path without '..'")
+    if not subdirectory or model_subdirectory.is_absolute() or ".." in model_subdirectory.parts:
+        raise ValueError("DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY must be a contained relative path")
+    return volume_name, volume_root, model_subdirectory
+
+
+VOLUME_NAME, VOLUME_ROOT, MODEL_SUBDIRECTORY = modal_storage_backend()
 BUNDLE = "data/benchmarks/single_gpu_b0"
+SCALING_BUNDLES = ("data/benchmarks/ddp_4gpu", "data/benchmarks/ddp_8gpu")
 CONFIG = "configs/training/benchmarks/ddp_training.json"
 NUMERICS_CRITERIA = "configs/training/benchmarks/ddp_numerics.json"
 TIMEOUTS = {"smoke": 600, "benchmark": 1800, "diagnostic": 600, "memory": 1800,
@@ -28,10 +46,20 @@ sys.path.insert(0, str(LOCAL_ROOT))
 sys.path.insert(0, str(LOCAL_ROOT / "src"))
 from scripts.cloud._training_image import FA3_REVISION, training_image
 
+
+def uploaded_benchmark_bundles(repository: Path) -> tuple[str, ...]:
+    """Upload the baseline and only explicitly supported prepared scaling bundles."""
+    return (BUNDLE,) + tuple(bundle for bundle in SCALING_BUNDLES if (repository / bundle).is_dir())
+
+
 app = modal.App("diffusion-arc-ddp")
-model_volume = modal.Volume.from_name("diffusion-arc-models", create_if_missing=False)
-image = training_image(LOCAL_ROOT).workdir(REMOTE_ROOT)
-for directory in ("src", "scripts", "configs", BUNDLE):
+model_volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=False)
+image = training_image(LOCAL_ROOT).env({
+    "DIFFUSION_ARC_MODAL_VOLUME": VOLUME_NAME,
+    "DIFFUSION_ARC_MODAL_VOLUME_ROOT": str(VOLUME_ROOT),
+    "DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": MODEL_SUBDIRECTORY.as_posix(),
+}).workdir(REMOTE_ROOT)
+for directory in ("src", "scripts", "configs", *uploaded_benchmark_bundles(LOCAL_ROOT)):
     image = image.add_local_dir(
         LOCAL_ROOT / directory, remote_path=str(REMOTE_ROOT / directory),
         ignore=["**/__pycache__/**", "**/*.pyc"],
@@ -65,9 +93,11 @@ def check_inputs(repository: Path, config: str, *, remote: bool = False):
     experiment = load_training_benchmark_config(config_path)
     training = experiment.training
     training.path.relative_to(repository / "configs")
-    expected_split = repository / BUNDLE / "splits/train"
-    if training.data.split_directory != expected_split:
-        raise ValueError(f"this launcher uploads only the benchmark bundle at {expected_split}")
+    expected_split = training.data.split_directory
+    uploaded_splits = tuple(repository / bundle / "splits/train"
+                            for bundle in uploaded_benchmark_bundles(repository))
+    if expected_split not in uploaded_splits:
+        raise ValueError(f"this launcher uploads only the benchmark splits at {uploaded_splits}")
     if not (expected_split / "config.json").is_file():
         raise FileNotFoundError(f"benchmark data is not prepared: {expected_split}")
     # Dataset construction validates source files and split boundaries; tokenization
@@ -83,7 +113,7 @@ def check_inputs(repository: Path, config: str, *, remote: bool = False):
         load_source_token_lengths(dataset,
             min_context_pairs_before_target=training.loop.min_context_pairs_before_target)
     for checkpoint in (training.models.nvarc_checkpoint, training.models.flux_checkpoint):
-        checkpoint.relative_to((repository / "checkpoints").resolve())
+        checkpoint.relative_to(VOLUME_ROOT.resolve() if remote else (repository / "checkpoints").resolve())
         if remote and not checkpoint.is_dir():
             raise FileNotFoundError(f"required cached model is missing: {checkpoint}")
     return experiment
@@ -197,16 +227,19 @@ def train_ddp(config: str, gpus: int, mode: str, metadata: dict, diagnostic_batc
     destination.mkdir(parents=True, exist_ok=False)
     launch = dict(status="running", metadata=metadata, resources=allocation,
                   fa3_revision=FA3_REVISION, mode=mode, gpus=gpus,
-                  allocator_config=ALLOCATOR_CONFIG)
+                  allocator_config=ALLOCATOR_CONFIG,
+                  model_volume=dict(name=VOLUME_NAME, mount_path=str(VOLUME_ROOT),
+                                    model_subdirectory=MODEL_SUBDIRECTORY.as_posix()))
     try:
         link = REMOTE_ROOT / "checkpoints"
+        model_root = VOLUME_ROOT / MODEL_SUBDIRECTORY
         if link.is_symlink():
-            if link.resolve() != VOLUME_ROOT:
+            if link.resolve() != model_root.resolve():
                 raise RuntimeError(f"unexpected checkpoint symlink: {link}")
         elif link.exists():
             raise RuntimeError(f"checkpoint path already exists: {link}")
         else:
-            link.symlink_to(VOLUME_ROOT, target_is_directory=True)
+            link.symlink_to(model_root, target_is_directory=True)
         experiment = check_inputs(REMOTE_ROOT, config, remote=True)
         if mode == "profile" and experiment.warmup_steps < 1:
             raise ValueError("profile requires at least one configured warmup step")

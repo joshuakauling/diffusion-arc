@@ -90,7 +90,8 @@ def source_prefix_lengths_from_steps(dataset, steps_jsonl: Path, *, min_context_
     return tuple(lengths_by_source[index] for index in range(len(dataset.keys))), provenance
 
 
-def prepare_training_token_lengths(config_path: Path, *, steps_jsonl: Path | None = None) -> Path:
+def prepare_training_token_lengths(config_path: Path, *, steps_jsonl: Path | None = None,
+                                  tokenizer_directory: Path | None = None) -> Path:
     """Create only length metadata, loading a cached tokenizer when needed."""
     config_path = Path(config_path).resolve()
     payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -99,8 +100,10 @@ def prepare_training_token_lengths(config_path: Path, *, steps_jsonl: Path | Non
               else load_training_config(config_path, expected_type="training_run"))
     tokenizer = None
     if steps_jsonl is None:
+        tokenizer_path = (config.models.nvarc_checkpoint if tokenizer_directory is None
+                          else Path(tokenizer_directory).resolve())
         tokenizer = AutoTokenizer.from_pretrained(
-            config.models.nvarc_checkpoint, local_files_only=True, trust_remote_code=False,
+            tokenizer_path, local_files_only=True, trust_remote_code=False,
         )
         tokenizer.model_max_length = NVARC_TOKENIZER_MAX_TOKENS
     dataset = ArcTrainingDataset(config.data.split_directory, config.data.view_name, tokenizer=tokenizer)
@@ -116,6 +119,7 @@ def prepare_training_token_lengths(config_path: Path, *, steps_jsonl: Path | Non
         provenance = {
             "method": "cpu_tokenization",
             "nvarc_checkpoint": str(config.models.nvarc_checkpoint),
+            "tokenizer_directory": str(tokenizer_path),
             "transformers_version": version("transformers"),
             "tokenizer_max_tokens": NVARC_TOKENIZER_MAX_TOKENS,
         }
@@ -131,8 +135,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--steps-jsonl", type=Path,
                         help="Reuse a complete benchmark view instead of tokenizing its sources.")
+    parser.add_argument("--tokenizer-directory", type=Path,
+                        help="Use cached tokenizer metadata without local model weights.")
     args = parser.parse_args(argv)
-    destination = prepare_training_token_lengths(args.config, steps_jsonl=args.steps_jsonl)
+    if args.steps_jsonl is not None and args.tokenizer_directory is not None:
+        parser.error("--steps-jsonl and --tokenizer-directory are alternatives")
+    destination = prepare_training_token_lengths(args.config, steps_jsonl=args.steps_jsonl,
+                                                tokenizer_directory=args.tokenizer_directory)
     print(f"Prepared source token lengths: {destination}")
 
 

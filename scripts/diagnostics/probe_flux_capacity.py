@@ -56,12 +56,10 @@ def validate_options(start_tokens, step_tokens, max_tokens, updates, reshard_aft
         raise ValueError("reshard_after_forward must be a boolean")
 
 
-def shard_probe_flux(flux_model, *, runtime, reshard_after_forward):
+def shard_probe_flux(flux_model, *, runtime, reshard_after_forward, blocks_per_group=1):
     """Select the diagnostic block policy while preserving root/backward sharding."""
-    flux_model = shard_flux(flux_model, runtime=runtime)
-    if not reshard_after_forward:
-        flux_model.set_reshard_after_forward(False)
-    return flux_model
+    return shard_flux(flux_model, runtime=runtime, reshard_after_forward=reshard_after_forward,
+                      blocks_per_group=blocks_per_group)
 
 
 def load_probe_config(path: Path, *, require_checkpoints: bool = True):
@@ -76,12 +74,15 @@ def load_probe_config(path: Path, *, require_checkpoints: bool = True):
     else:
         config = load_training_config(path, expected_type="training_run")
     recipe = config.recipe_dict()
+    gpu_count = recipe["deployment"]["gpu_count"]
     if (recipe["execution"]["distributed_strategy"] != "fsdp2"
-            or recipe["deployment"]["gpu_count"] != 2
-            or config.loop.optimizer_batch_size != 48 or config.targets_per_sequence != 3
+            or gpu_count not in (2, 4, 8)
+            or config.loop.optimizer_batch_size != LOCAL_TRAINING_TARGETS * gpu_count
+            or config.targets_per_sequence != 3
             or recipe["models"]["initialization"] != "base_checkpoint"
             or recipe["models"]["resume_from"] is not None):
-        raise ValueError("probe requires fresh two-GPU FSDP2 with 48 targets and three targets per source")
+        raise ValueError("probe requires fresh 2/4/8-GPU FSDP2 with 24 targets per GPU "
+                         "and three targets per source")
     if require_checkpoints:
         for checkpoint in (config.models.nvarc_checkpoint, config.models.flux_checkpoint):
             if not checkpoint.is_dir():
@@ -122,7 +123,10 @@ def _tensor_bytes(tensor):
 def _memory(device):
     if device.type != "cuda":
         return {}  # Explicit CPU test injection; the production worker requires CUDA.
-    return dict(allocated_bytes=torch.cuda.memory_allocated(device),
+    statistics = torch.cuda.memory_stats(device)
+    return dict(allocator_retry_count=statistics.get("num_alloc_retries", 0),
+                allocator_oom_count=statistics.get("num_ooms", 0),
+                allocated_bytes=torch.cuda.memory_allocated(device),
                 reserved_bytes=torch.cuda.memory_reserved(device),
                 peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                 peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
@@ -155,8 +159,8 @@ def run_probe_updates(flux_model, optimizer, *, runtime, sources, text_lengths, 
                       on_progress=lambda *_: None, on_update=lambda *_: None):
     """Accumulate two full packs per update, including production clipping.
 
-    This repeats one stress pack rather than reproducing 48 distinct training
-    targets. Both ranks have the same shapes and number of synchronized calls.
+    This repeats one stress pack rather than reproducing distinct training
+    targets. All ranks have the same shapes and number of synchronized calls.
     Source buffers remain live throughout; per-call tensors are released after
     backward as in training. Update two runs with actual AdamW moments resident.
     FSDP2 reduces accumulated gradients in the final pack before clipping.
@@ -221,20 +225,23 @@ def run_candidate(args):
     _write_json(result_path, result)
     try:
         config = load_probe_config(args.config)
+        gpu_count = config.recipe["deployment"]["gpu_count"]
         result.update(fsdp_reshard_after_forward=args.reshard_after_forward,
+                      gpu_count=gpu_count, fsdp_blocks_per_group=config.fsdp_blocks_per_group,
                       fsdp_root_reshard_after_forward=False, fsdp_reshard_after_backward=True,
                       fsdp_gradient_sync="last_microbatch")
         _write_json(result_path, result)
         with distributed_runtime(config) as runtime:
             try:
-                if runtime.world_size != 2 or runtime.device.type != "cuda":
-                    raise ValueError("capacity worker requires exactly two CUDA ranks")
+                if runtime.world_size != gpu_count or runtime.device.type != "cuda":
+                    raise ValueError("capacity worker requires the configured number of CUDA ranks")
                 seed_process(config.seed)
                 models = load_models(config, device=runtime.device)
                 flux_model = shard_probe_flux(PackedFluxForward(models.flux_transformer,
                                         compute_dtype=models.flux_compute_dtype,
                                         backend=models.flux_packing_backend), runtime=runtime,
-                                        reshard_after_forward=args.reshard_after_forward)
+                                        reshard_after_forward=args.reshard_after_forward,
+                                        blocks_per_group=config.fsdp_blocks_per_group)
                 optimizer = build_optimizer(config, flux_transformer=flux_model)
                 scheduler = build_lr_scheduler(config, optimizer=optimizer)
                 generator = torch.Generator(device=runtime.device).manual_seed(config.seed + rank)
@@ -280,13 +287,14 @@ def run_candidate(args):
     return 0
 
 
-def collect_candidate(directory, *, tokens, updates, returncode, timed_out=False):
-    """Accept only complete two-rank passes or an explicitly recorded probe OOM."""
-    ranks = [json.loads(path.read_text()) for rank in range(2)
+def collect_candidate(directory, *, tokens, updates, returncode, timed_out=False, world_size=2):
+    """Accept only complete all-rank passes or an explicitly recorded probe OOM."""
+    expected_ranks = set(range(world_size))
+    ranks = [json.loads(path.read_text()) for rank in range(world_size)
              if (path := directory / f"rank-{rank}.json").is_file()]
     result = dict(joint_tokens=tokens, text_lengths=probe_text_lengths(tokens),
                   ranks=ranks, worker_returncode=returncode, result_directory=str(directory))
-    if any(row.get("joint_tokens") != tokens or row.get("rank") not in (0, 1) for row in ranks):
+    if any(row.get("joint_tokens") != tokens or row.get("rank") not in expected_ranks for row in ranks):
         return dict(result, status="error", error="worker identity differs from the candidate")
     independent_errors = [row for row in ranks if row.get("status") == "error"
                           and row.get("error_type") not in ("DistBackendError", "DistNetworkError")]
@@ -297,7 +305,7 @@ def collect_candidate(directory, *, tokens, updates, returncode, timed_out=False
         return dict(result, status="error", error="recorded worker failure; inspect rank files/log")
     if timed_out:
         return dict(result, status="time_limit")
-    if (returncode == 0 and len(ranks) == 2 and {row["rank"] for row in ranks} == {0, 1}
+    if (returncode == 0 and len(ranks) == world_size and {row["rank"] for row in ranks} == expected_ranks
             and all(row.get("status") == "success" and len(row.get("updates", [])) == updates
                     and [item.get("update") for item in row["updates"]] == list(range(1, updates + 1))
                     for row in ranks)):
@@ -383,6 +391,7 @@ def run_search(args, *, metadata=None, on_candidate_end=None, timeout_seconds=17
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
     config = load_probe_config(args.config)
+    gpu_count = config.recipe["deployment"]["gpu_count"]
     source = source_metadata() if metadata is None else metadata
     if metadata is not None:
         if metadata["source_sha256"] != source_metadata()["source_sha256"]:
@@ -390,12 +399,13 @@ def run_search(args, *, metadata=None, on_candidate_end=None, timeout_seconds=17
         if metadata["config_sha256"] != hashlib.sha256(args.config.read_bytes()).hexdigest():
             raise ValueError("uploaded config differs from launch metadata")
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    manifest = dict(status="running", config=config.recipe_dict(), seed=config.seed,
+    manifest = dict(status="running", config=config.recipe_dict(), seed=config.seed, gpu_count=gpu_count,
         start_tokens=args.start_tokens, step_tokens=args.step_tokens, max_tokens=args.max_tokens,
         updates=args.updates, timeout_seconds=timeout_seconds, launch_metadata=source,
         fsdp_reshard_after_forward=args.reshard_after_forward,
         fsdp_root_reshard_after_forward=False, fsdp_reshard_after_backward=True,
         fsdp_gradient_sync="last_microbatch",
+        fsdp_blocks_per_group=config.fsdp_blocks_per_group,
         workload="synthetic_long_text_packed_flux", frozen_model_weights_resident=True,
         frozen_encoder_execution_measured=False, global_training_batch_reproduced=False,
         full_pipeline_capacity_validated=False, checkpoint_weights_hashed=False)
@@ -410,7 +420,7 @@ def run_search(args, *, metadata=None, on_candidate_end=None, timeout_seconds=17
         directory = args.output_dir / f"tokens-{tokens:06d}"
         directory.mkdir()
         command = [sys.executable, "-B", "-m", "torch.distributed.run", "--standalone",
-                   "--nnodes=1", "--nproc_per_node=2", "--max_restarts=0", str(Path(__file__).resolve()),
+                   "--nnodes=1", f"--nproc_per_node={gpu_count}", "--max_restarts=0", str(Path(__file__).resolve()),
                    "--config", str(args.config.resolve()), "--candidate-tokens", str(tokens),
                    "--updates", str(args.updates), "--output-dir", str(directory)]
         command.append("--reshard-after-forward" if args.reshard_after_forward else "--no-reshard-after-forward")
@@ -418,7 +428,7 @@ def run_search(args, *, metadata=None, on_candidate_end=None, timeout_seconds=17
         with (directory / "torchrun.log").open("w") as log:
             code, timed_out = _run_worker(command, log=log, timeout=remaining)
         result = collect_candidate(directory, tokens=tokens, updates=args.updates,
-                                   returncode=code, timed_out=timed_out)
+                                   returncode=code, timed_out=timed_out, world_size=gpu_count)
         candidates.append(result)
         _write_json(directory / "result.json", result)
         _write_json(args.output_dir / "candidates.json", candidates)

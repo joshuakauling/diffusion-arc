@@ -94,7 +94,7 @@ class FluxCapacityTests(unittest.TestCase):
         config = probe.load_probe_config(probe.REPOSITORY_ROOT / "configs/training/benchmarks/fsdp2_training.json",
                                         require_checkpoints=False)
         self.assertEqual(config.recipe["execution"]["distributed_strategy"], "fsdp2")
-        with self.assertRaisesRegex(ValueError, "fresh two-GPU FSDP2"):
+        with self.assertRaisesRegex(ValueError, "fresh 2/4/8-GPU FSDP2"):
             probe.load_probe_config(probe.REPOSITORY_ROOT / "configs/training/benchmarks/ddp_training.json",
                                     require_checkpoints=False)
         with self.assertRaisesRegex(ValueError, "capacity probe does not support benchmark fsdp_gradient_sync"):
@@ -317,6 +317,57 @@ class FluxCapacityTests(unittest.TestCase):
             self.assertFalse(manifest["frozen_encoder_execution_measured"])
             self.assertFalse(manifest["global_training_batch_reproduced"])
             self.assertEqual(json.loads((args.output_dir / "summary.json").read_text())["largest_tested_success"], 13312)
+
+    def test_scaling_capacity_configs_preserve_24_targets_and_eight_source_reserves_per_rank(self):
+        for gpus in (4, 8):
+            path = probe.REPOSITORY_ROOT / f"configs/training/benchmarks/fsdp2_{gpus}gpu_12k_background_packing.json"
+            config = probe.load_probe_config(path, require_checkpoints=False)
+            self.assertEqual(config.recipe["deployment"]["gpu_count"], gpus)
+            self.assertEqual(config.loop.optimizer_batch_size, 24 * gpus)
+            self.assertEqual(config.rank_batch_assignment, "joint_packing_v1")
+            self.assertFalse(config.fsdp_reshard_after_forward)
+            models = SimpleNamespace(flux_transformer=_model())
+            sources, latents, reserve = probe.allocate_source_reserve(
+                config, models, device=torch.device("cpu"), generator=torch.Generator().manual_seed(1))
+            self.assertEqual(len(sources), 8)
+            self.assertEqual(reserve["target_slots"], 24)
+            self.assertEqual(latents.shape[0], 48)
+
+    def test_scaling_search_requires_every_rank_and_uses_the_configured_torchrun_size(self):
+        for gpus in (4, 8):
+            with self.subTest(gpus=gpus), tempfile.TemporaryDirectory() as directory:
+                args = SimpleNamespace(config=probe.REPOSITORY_ROOT /
+                    f"configs/training/benchmarks/fsdp2_{gpus}gpu_12k_background_packing.json",
+                    output_dir=Path(directory) / "output", start_tokens=12288,
+                    step_tokens=2048, max_tokens=14336, updates=2, reshard_after_forward=False)
+                commands = []
+
+                def worker(command, *, log, timeout):
+                    commands.append(command)
+                    root = Path(command[command.index("--output-dir") + 1])
+                    tokens = int(command[command.index("--candidate-tokens") + 1])
+                    for rank in range(gpus):
+                        probe._write_json(root / f"rank-{rank}.json", dict(rank=rank, status="success",
+                            phase="probe", joint_tokens=tokens, updates=[dict(update=i,
+                                peak_allocated_bytes=100 + rank, peak_reserved_bytes=200 + rank) for i in (1, 2)]))
+                    return 0, False
+
+                loader = probe.load_probe_config
+                with patch.object(probe, "load_probe_config", side_effect=lambda path: loader(path, require_checkpoints=False)), \
+                        patch.object(probe, "_run_worker", side_effect=worker):
+                    summary = probe.run_search(args, timeout_seconds=60)
+                self.assertEqual(summary["status"], "complete")
+                self.assertTrue(all(f"--nproc_per_node={gpus}" in command for command in commands))
+                self.assertTrue(all(len(row["ranks"]) == gpus for row in summary["candidates"]))
+                manifest = json.loads((args.output_dir / "manifest.json").read_text())
+                self.assertEqual(manifest["gpu_count"], gpus)
+                self.assertEqual(manifest["fsdp_blocks_per_group"], 1)
+                candidate = Path(summary["candidates"][0]["result_directory"])
+                self.assertEqual(probe.collect_candidate(candidate, tokens=12288, updates=2,
+                    returncode=0, world_size=gpus)["status"], "success")
+                (candidate / f"rank-{gpus - 1}.json").unlink()
+                self.assertEqual(probe.collect_candidate(candidate, tokens=12288, updates=2,
+                    returncode=0, world_size=gpus)["status"], "error")
 
 
 if __name__ == "__main__":

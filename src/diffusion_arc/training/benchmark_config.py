@@ -42,8 +42,9 @@ class TrainingBenchmarkConfig:
     """A bounded run with global batch size and the original training schedule.
 
     The wrapper explicitly selects its execution strategy and benchmark view.
-    The recipe retains the original training schedule and objective; its epoch
-    counts and validation/checkpoint cadences are not benchmark instructions.
+    The recipe retains its training schedule and loss; explicit batch and
+    full-batch endpoint overrides support weak scaling. Its epoch counts and
+    validation/checkpoint cadences are not benchmark instructions.
     Optional precomputed packing changes only this bounded benchmark's batch plans.
     """
 
@@ -67,10 +68,10 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
 
     All paths are relative to the file that declares them. The referenced
     training_run is loaded normally, then explicit execution choices are validated
-    and the data view is selected. Optional pack-capacity and FSDP grouping/resharding
-    overrides retain the recipe's settings when omitted. Precomputed packing
-    requires prepared token metadata and indexed flow RNG. Timing warmup never
-    changes the LR schedule.
+    and the data view is selected. Optional batch, full-batch endpoint, pack-capacity,
+    and FSDP grouping/resharding overrides retain the recipe's settings when
+    omitted. Precomputed packing requires prepared token metadata and indexed
+    flow RNG. Timing warmup never changes the LR schedule.
     """
 
     config_path = Path(path).resolve()
@@ -83,6 +84,13 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
         schema["precompute_packing"] = bool
     if "fsdp_gradient_sync" in payload:
         schema["fsdp_gradient_sync"] = _choice_validator("last_microbatch", "per_microbatch")
+    optional_recipe = {
+        "loop": {"optimizer_batch_size": _validate_positive_integer},
+        "flow": {"endpoint_targets_per_full_batch": _validate_nonnegative_integer},
+    }
+    for section, fields in optional_recipe.items():
+        if section in payload:
+            schema[section] = fields
     optional_execution = {"flux_max_joint_tokens": _validate_positive_integer,
                           "fsdp_reshard_after_forward": bool,
                           "fsdp_blocks_per_group": _validate_positive_integer,
@@ -113,6 +121,9 @@ def load_training_benchmark_config(path: str | Path) -> TrainingBenchmarkConfig:
             recipe["execution"][name] = execution[name]
     recipe["deployment"]["gpu_count"] = execution["gpu_count"]
     recipe["flow"]["rng_scheme"] = execution["rng_scheme"]
+    for section in optional_recipe:
+        if section in payload:
+            recipe[section].update(payload[section])
     training = parse_training_config(recipe, config_path=recipe_path)
     data = payload["data"]
     training = replace(training, data=replace(

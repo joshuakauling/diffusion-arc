@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import signal
@@ -20,26 +21,45 @@ from tests.training.test_training_modal import _App, RecordingImage
 ROOT = Path(__file__).resolve().parents[2]
 FSDP_CONFIG = "configs/training/benchmarks/fsdp2_training.json"
 PRECOMPUTED_CONFIG = "configs/training/benchmarks/b15_fsdp2_14k_precomputed_packing.json"
+SCALING_CONFIGS = {
+    4: "configs/training/benchmarks/ddp_4gpu_12k_background_packing.json",
+    8: "configs/training/benchmarks/ddp_8gpu_12k_background_packing.json",
+}
 
 
 class TrainDdpModalTests(unittest.TestCase):
     def setUp(self):
+        self.load_launcher()
+
+    def load_launcher(self, *, environment=None, scaling_bundles=()):
         self.volume, self.image = Mock(), RecordingImage()
-        volume_factory = Mock(return_value=self.volume)
+        self.volume_factory = Mock(return_value=self.volume)
         fake_modal = SimpleNamespace(
             App=_App, is_local=lambda: True, __version__="test",
             Image=SimpleNamespace(from_registry=Mock(return_value=self.image)),
-            Volume=SimpleNamespace(from_name=volume_factory),
+            Volume=SimpleNamespace(from_name=self.volume_factory),
         )
         spec = importlib.util.spec_from_file_location(
             "_ddp_modal_test", ROOT / "scripts/cloud/train_ddp_modal.py",
         )
         self.launcher = importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules, {"modal": fake_modal}), patch.object(sys, "path", list(sys.path)):
+        backend_keys = {"DIFFUSION_ARC_MODAL_VOLUME", "DIFFUSION_ARC_MODAL_VOLUME_ROOT",
+                        "DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY"}
+        backend_environment = {key: value for key, value in os.environ.items() if key not in backend_keys}
+        backend_environment.update(environment or {})
+        available_bundles = {ROOT / bundle for bundle in scaling_bundles}
+        with patch.dict(sys.modules, {"modal": fake_modal}), \
+                patch.dict("os.environ", backend_environment, clear=True), \
+                patch.object(sys, "path", list(sys.path)), \
+                patch.object(Path, "is_dir", autospec=True,
+                             side_effect=lambda path: path in available_bundles):
             spec.loader.exec_module(self.launcher)
-        volume_factory.assert_called_once_with("diffusion-arc-models", create_if_missing=False)
+        self.volume_factory.assert_called_once_with(
+            backend_environment.get("DIFFUSION_ARC_MODAL_VOLUME", "diffusion-arc-models"), create_if_missing=False,
+        )
 
-    def make_repository(self, directory, *, warmup_steps=0, measured_steps=1, config=None):
+    def make_repository(self, directory, *, warmup_steps=0, measured_steps=1,
+                        config=None, benchmark_root=None):
         repository = Path(directory).resolve()
         config_name = config or self.launcher.CONFIG
         config_path = repository / config_name
@@ -47,14 +67,17 @@ class TrainDdpModalTests(unittest.TestCase):
         shutil.copyfile(ROOT / "configs/training/arc_agi_1_epoch.json", config_path.parent.parent / "arc_agi_1_epoch.json")
         benchmark = json.loads((ROOT / config_name).read_text())
         benchmark.update(smoke_steps=1, warmup_steps=warmup_steps, measured_steps=measured_steps)
-        benchmark["data"]["expected_source_count"] = 16 * (warmup_steps + measured_steps)
+        targets_per_batch = benchmark.get("loop", {}).get("optimizer_batch_size", 48)
+        benchmark["data"]["expected_source_count"] = targets_per_batch // 3 * (warmup_steps + measured_steps)
+        if benchmark_root is not None:
+            benchmark["data"]["split_directory"] = str(repository / benchmark_root / "splits/train")
         write_json(config_path, benchmark)
         write_json(repository / self.launcher.NUMERICS_CRITERIA, dict(
             schema_version=1, steps=3, loss_rtol=0.001,
             gradient_relative_l2_max=0.05, chunk_elements=1048576,
         ))
-        bundle = repository / self.launcher.BUNDLE
-        split = bundle / "splits/train"
+        split = (config_path.parent / benchmark["data"]["split_directory"]).resolve()
+        bundle = split.parent.parent
         data_config = make_split_config()
         data_config["limits"]["max_pairs"] = 5
         write_json(split / "config.json", data_config)
@@ -69,6 +92,9 @@ class TrainDdpModalTests(unittest.TestCase):
         return repository
 
     def test_cloud_resources_and_dispatch_follow_gpu_count_and_mode(self):
+        self.assertEqual(self.launcher.VOLUME_NAME, "diffusion-arc-models")
+        self.assertEqual(self.launcher.VOLUME_ROOT, Path("/mnt/diffusion-arc-models"))
+        self.assertEqual(self.launcher.MODEL_SUBDIRECTORY, Path("."))
         options = self.launcher.app.function_options
         self.assertEqual(options["volumes"], {str(self.launcher.VOLUME_ROOT): self.volume})
         self.assertEqual((options["max_containers"], options["retries"]), (1, 0))
@@ -94,6 +120,82 @@ class TrainDdpModalTests(unittest.TestCase):
                 )
                 self.assertEqual(remote.with_options.return_value.remote.call_args.args[:3],
                                  (self.launcher.CONFIG, gpus, mode))
+
+    def test_new_backend_is_propagated_to_worker_image_and_mount(self):
+        backend = {
+            "DIFFUSION_ARC_MODAL_VOLUME": "diffusion-arc-training-v2",
+            "DIFFUSION_ARC_MODAL_VOLUME_ROOT": "/workspace",
+            "DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "models",
+        }
+        self.load_launcher(environment=backend)
+        self.assertEqual(self.launcher.app.function_options["volumes"], {"/workspace": self.volume})
+        self.assertEqual(self.launcher.VOLUME_ROOT / self.launcher.MODEL_SUBDIRECTORY, Path("/workspace/models"))
+        environment = {key: value for call, args, _ in self.image.calls if call == "env"
+                       for key, value in args[0].items()}
+        for name, value in backend.items():
+            self.assertEqual(environment[name], value)
+
+    def test_invalid_backend_paths_fail_before_selecting_a_volume(self):
+        for environment in (
+            {"DIFFUSION_ARC_MODAL_VOLUME": ""},
+            {"DIFFUSION_ARC_MODAL_VOLUME_ROOT": "workspace"},
+            {"DIFFUSION_ARC_MODAL_VOLUME_ROOT": "/workspace/../outside"},
+            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "/models"},
+            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "../models"},
+            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "models/../outside"},
+            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": ""},
+        ):
+            with self.subTest(environment=environment), self.assertRaisesRegex(ValueError, "DIFFUSION_ARC_MODAL"):
+                self.load_launcher(environment=environment)
+            self.volume_factory.assert_not_called()
+
+    def test_image_uploads_only_the_baseline_and_present_explicit_scaling_bundles(self):
+        for bundles in ((), ("data/benchmarks/ddp_4gpu",),
+                        ("data/benchmarks/ddp_4gpu", "data/benchmarks/ddp_8gpu")):
+            with self.subTest(bundles=bundles):
+                self.load_launcher(scaling_bundles=bundles)
+                uploads = [args[0].relative_to(ROOT).as_posix()
+                           for call, args, _ in self.image.calls if call == "add_local_dir"]
+                self.assertEqual(uploads, ["src", "scripts", "configs", self.launcher.BUNDLE, *bundles])
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            (repository / "data/benchmarks/unsupported").mkdir(parents=True)
+            self.assertEqual(self.launcher.uploaded_benchmark_bundles(repository), (self.launcher.BUNDLE,))
+
+    def test_scaling_configs_require_their_prepared_bundle_and_token_lengths_before_dispatch(self):
+        from diffusion_arc.training.data import ArcTrainingDataset
+        from diffusion_arc.training.source_lengths import write_source_token_lengths
+
+        for gpus, config_name in SCALING_CONFIGS.items():
+            with self.subTest(gpus=gpus), tempfile.TemporaryDirectory() as directory:
+                repository = self.make_repository(directory, config=config_name)
+                split = repository / f"data/benchmarks/ddp_{gpus}gpu/splits/train"
+                with patch.object(self.launcher, "LOCAL_ROOT", repository), \
+                        patch.object(self.launcher, "train_ddp") as remote:
+                    with self.assertRaisesRegex(FileNotFoundError, "Missing source token lengths"):
+                        self.launcher.main(gpus=gpus, config=config_name)
+                    remote.with_options.assert_not_called()
+                    dataset = ArcTrainingDataset(split, "train", tokenizer=None)
+                    write_source_token_lengths(dataset, ((10, 20, 30),) * len(dataset.keys),
+                        min_context_pairs_before_target=2, provenance={})
+                    experiment = self.launcher.check_inputs(repository, config_name)
+                    self.assertEqual(experiment.expected_source_count, 8 * gpus)
+                    self.assertEqual(experiment.training.loop.optimizer_batch_size, 24 * gpus)
+                    self.assertEqual(experiment.training.recipe["flow"]["endpoint_targets_per_full_batch"], 2 * gpus)
+                    self.launcher.main(gpus=gpus, config=config_name)
+                    self.assertEqual(remote.with_options.return_value.remote.call_args.args[:3],
+                                     (config_name, gpus, "smoke"))
+                    remote.reset_mock()
+                    shutil.rmtree(split.parent.parent)
+                    with self.assertRaisesRegex(ValueError, "uploads only"):
+                        self.launcher.main(gpus=gpus, config=config_name)
+                    remote.with_options.assert_not_called()
+
+    def test_preflight_rejects_unsupported_benchmark_bundle_even_when_prepared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(directory, benchmark_root="data/benchmarks/unsupported")
+            with self.assertRaisesRegex(ValueError, "uploads only"):
+                self.launcher.check_inputs(repository, self.launcher.CONFIG)
 
     def test_missing_data_or_invalid_options_never_dispatch(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -380,11 +482,59 @@ class TrainDdpModalTests(unittest.TestCase):
             repository = self.make_repository(directory)
             config = self.launcher.CONFIG
             self.assertEqual(self.launcher.check_inputs(repository, config).expected_source_count, 16)
-            with self.assertRaisesRegex(FileNotFoundError, "cached model"):
+            with patch.object(self.launcher, "VOLUME_ROOT", repository / "checkpoints"), \
+                    self.assertRaisesRegex(FileNotFoundError, "cached model"):
                 self.launcher.check_inputs(repository, config, remote=True)
             write_json(repository / self.launcher.BUNDLE / "splits/train/validation.json", ["task-0"])
             with self.assertRaisesRegex(ValueError, "overlap"):
                 self.launcher.check_inputs(repository, config)
+
+    def test_new_model_alias_resolves_nvarc_cache_inside_the_volume_and_records_backend(self):
+        self.load_launcher(environment={
+            "DIFFUSION_ARC_MODAL_VOLUME": "diffusion-arc-training-v2",
+            "DIFFUSION_ARC_MODAL_VOLUME_ROOT": "/workspace",
+            "DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "models",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(Path(directory) / "repository")
+            volume = Path(directory).resolve() / "workspace"
+            models = volume / "models"
+            (models / "flux2-klein-base-4b").mkdir(parents=True)
+            cached_nvarc = volume / ".cache/kagglehub/models/sorokin/qwen3_4b_grids15_sft139/transformers/bfloat16/1"
+            cached_nvarc.mkdir(parents=True)
+            (models / "nvarc-qwen3-4b-grids15-sft139").symlink_to(cached_nvarc, target_is_directory=True)
+
+            def worker(command, *, timeout):
+                experiment = self.launcher.check_inputs(repository, self.launcher.CONFIG, remote=True)
+                self.assertEqual(experiment.training.models.nvarc_checkpoint, cached_nvarc)
+                self.assertEqual(experiment.training.models.flux_checkpoint, models / "flux2-klein-base-4b")
+                write_json(Path(command[-1]) / "summary.json", dict(event="complete", optimizer_steps=1))
+
+            with patch.object(self.launcher, "REMOTE_ROOT", repository), \
+                    patch.object(self.launcher, "VOLUME_ROOT", volume), \
+                    patch.object(self.launcher, "run_worker", side_effect=worker) as run:
+                self.launcher.train_ddp(self.launcher.CONFIG, 2, "smoke", {})
+                run.assert_called_once()
+                with self.assertRaises(ValueError):
+                    self.launcher.check_inputs(repository, self.launcher.CONFIG)
+            self.assertEqual((repository / "checkpoints").resolve(), models)
+            launch = json.loads(next((volume / "results/ddp").glob("*/launch.json")).read_text())
+            self.assertEqual(launch["model_volume"], dict(
+                name="diffusion-arc-training-v2", mount_path=str(volume), model_subdirectory="models",
+            ))
+
+    def test_remote_preflight_rejects_a_model_alias_outside_the_mounted_volume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.make_repository(Path(directory) / "repository")
+            volume = Path(directory).resolve() / "volume"
+            volume.mkdir()
+            outside = Path(directory).resolve() / "outside-models"
+            outside.mkdir()
+            (volume / "nvarc-qwen3-4b-grids15-sft139").symlink_to(outside, target_is_directory=True)
+            (volume / "flux2-klein-base-4b").mkdir()
+            (repository / "checkpoints").symlink_to(volume, target_is_directory=True)
+            with patch.object(self.launcher, "VOLUME_ROOT", volume), self.assertRaises(ValueError):
+                self.launcher.check_inputs(repository, self.launcher.CONFIG, remote=True)
 
     def test_remote_persists_success_and_failure_and_checks_complete_window(self):
         for outcome in ("complete", "failed", "incomplete", "diagnostic", "memory"):

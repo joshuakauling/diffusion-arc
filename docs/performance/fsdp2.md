@@ -6,7 +6,10 @@ through larger FLUX packs. The measured gain was modest, so subsequent experimen
 reduced communication and balanced work across GPUs. The strongest measured
 combination is useful as a reference. Retesting the original sharding policy
 with the improved batch planner made its 16k packs faster, but did not beat the
-retained-weight 12k reference.
+retained-weight 12k reference. Complete four- and eight-GPU benchmarks with
+dynamic CPU planning also favored DDP, despite larger FSDP packs. For this
+workload, DDP with background joint packing is the preferred execution strategy;
+FSDP remains an option when device-memory capacity is the limiting requirement.
 
 ## What the initial FSDP2 policy saved
 
@@ -231,7 +234,7 @@ explicitly sets the benchmark-only `fsdp_gradient_sync="per_microbatch"` control
 Its policy is recorded in the manifest; the regular training default is unchanged.
 Numerical and capacity diagnostics reject this override rather than ignoring it.
 
-## Best measured combination so far
+## Best measured two-GPU FSDP combination
 
 The fastest tested FSDP2 configuration retains forward weights, reduces
 gradients at the optimizer-batch end, and uses joint CPU plans at 12,288 tokens.
@@ -260,10 +263,101 @@ Full parameters are still gathered before each microbatch and resharded after
 backward. Earlier calls retain full local gradients, so this policy preserves
 less of the initial gradient-memory saving.
 
-## Measurement contract
+## Four-GPU pack-budget selection
 
-Complete runs use two H200 GPUs, 16 allocated CPU cores, 128 GiB host RAM,
-and the same 960-source prepared view. Each optimizer batch contains 48 targets
+The [four-H200 capacity search](../../artifacts/flux-capacity/20261013T141358283533Z/summary.json)
+retained weights after forward, reduced gradients at batch end, and used one
+transformer block per FSDP group. Each candidate started fresh and ran two
+synthetic AdamW updates with frozen models and maximal source-state reserves
+resident. The second update included initialized optimizer moments.
+
+| Joint-token budget | Result | Peak allocated / GPU | Peak reserved / GPU | Allocator retries / GPU |
+| --- | --- | ---: | ---: | ---: |
+| 12,288 | Passed | 114.22 GiB | 121.90 GiB | 0 |
+| **14,336** | **Passed without retries** | **124.01 GiB** | **132.28 GiB** | **0** |
+| 16,384 | Passed with memory pressure | 133.81 GiB | 138.18 GiB | 2 |
+| 18,432 | OOM during the second update's forward on every rank | — | — | 5 |
+
+At 16,384 tokens, the slowest rank's second synthetic update took 4.99 s,
+versus 2.04 s at 14,336. The retries and slowdown make 16,384 unsuitable as the
+starting benchmark budget, despite completing the probe. At 18,432, an
+additional 108 MiB allocation failed with approximately 31 MiB free.
+
+The selected [four-GPU benchmark configuration](../../configs/training/benchmarks/fsdp2_4gpu_14k_background_packing.json)
+uses **14,336 tokens**, 16.7% more than the 12,288-token DDP reference. It keeps
+96 global targets, dynamic joint CPU packing, retained weights, batch-end
+gradient reduction, and one block per group. One fresh repetition uses ten
+warmup and 25 measured updates on the same prepared view as four-GPU DDP.
+The complete benchmark below confirmed that this budget finished all requested
+updates. The synthetic timings are not comparable to complete DDP training steps.
+
+## Eight-GPU pack-budget selection
+
+The [eight-H200 capacity search](../../artifacts/flux-capacity/20261013T155732028769Z/summary.json)
+used the same retained-weight, batch-end-reduction policy and synthetic protocol.
+At **16,384 tokens**, all eight ranks completed both AdamW updates without
+allocator retries. Peak allocated memory was **128.40 GiB** and peak reserved
+memory **135.60 GiB** on one GPU. At **18,432 tokens**, every rank failed during
+the second update's forward; passing the first update did not establish capacity
+with optimizer moments resident.
+
+The selected [eight-GPU benchmark configuration](../../configs/training/benchmarks/fsdp2_8gpu_16k_background_packing.json)
+therefore uses **16,384 tokens**, 33.3% more than DDP's budget, with 192 global
+targets. These probes select budgets to test in the full pipeline, rather than
+establishing universal bounds for other data, models, or memory policies.
+
+## Four- and eight-GPU complete-pipeline results
+
+Each configuration ran one fresh repetition with ten warmup and **25 measured
+optimizer updates**. Four GPUs used **96 global targets** per update and eight
+used **192**, averaging 24 targets per GPU. The prepared views contained 1,120
+and 2,240 sources respectively. Both strategies used dynamic `joint_packing_v1`
+CPU planning, indexed flow RNG, FA3, and the same precision policy as the
+two-GPU runs. FSDP retained weights after forward, reduced gradients at batch
+end, and used one block per group.
+
+| H200 GPUs | Strategy | Pack budget | Median step | Mean step | Targets/s | Peak allocated / GPU |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 4 | [DDP](../../artifacts/ddp/20261013T001443089046Z-benchmark-4gpu/summary.json) | [12,288](../../configs/training/benchmarks/ddp_4gpu_12k_background_packing.json) | **4.680 s** | **4.627 s** | **20.747** | 131.13 GiB |
+| 4 | [FSDP2](../../artifacts/fsdp2/20261013T161956774753Z-benchmark-4gpu/summary.json) | [14,336](../../configs/training/benchmarks/fsdp2_4gpu_14k_background_packing.json) | 4.762 s | 4.708 s | 20.389 | 123.30 GiB |
+| 8 | [DDP](../../artifacts/ddp/20261013T005129621465Z-benchmark-8gpu/summary.json) | [12,288](../../configs/training/benchmarks/ddp_8gpu_12k_background_packing.json) | **4.677 s** | **4.701 s** | **40.845** | 131.12 GiB |
+| 8 | [FSDP2](../../artifacts/fsdp2/20261013T163910083403Z-benchmark-8gpu/summary.json) | [16,384](../../configs/training/benchmarks/fsdp2_8gpu_16k_background_packing.json) | 4.821 s | 4.839 s | 39.680 | 127.63 GiB |
+
+All 35 updates completed in every run. Summaries were recomputed from step
+records, and global source keys and target-prefix lengths matched DDP/FSDP
+for every update at each GPU count. Hardware, software, data fingerprints,
+precision settings, and measurement contracts also matched. These timings
+include data retrieval and the complete training/optimizer step, synchronized
+with CUDA and reported as the slowest rank's duration. Waiting for background
+plans during retrieval is included; the initial plan and DataLoader prefetch,
+model loading, outer barrier, logging, and profiling are excluded. Allocations
+used eight CPU cores and 64 GiB host RAM per GPU.
+
+On four GPUs, FSDP's median was **1.8% higher** and throughput **1.7% lower**.
+Scheduled FLUX calls per rank/update fell from **6.06 to 5.28**, with no measured
+dummy calls. Peak allocated memory fell by **7.83 GiB** per GPU.
+
+On eight GPUs, FSDP's median was **3.1% higher** and throughput **2.9% lower**.
+Scheduled calls fell from **6.08 to 4.96**, including eight dummy calls across
+two measured updates. Real FSDP calls averaged **4.92**. Excluding those same
+two updates from both runs leaves FSDP **2.8% slower on mean step time**; this
+subset is a sensitivity check, while the primary table includes every step.
+FSDP was slower in all 25 paired measured updates. Peak allocated memory fell
+by **3.49 GiB**, while peak reserved memory was **135.88 GiB**, versus DDP's
+**133.24 GiB**. Allocated savings alone do not imply equal free-memory gains.
+
+Doubling the global batch from four to eight GPUs increased throughput by
+**1.97x for DDP** and **1.95x for FSDP**. The FSDP pack budget also changed, so
+this compares complete configurations rather than isolating GPU count.
+Larger packs reduced call counts, but did not produce a speed advantage at
+either scale. These single-repetition results support the current execution
+decision, rather than a universal ordering of DDP and FSDP. The runs do not
+isolate exposed communication time or establish long-run numerical equivalence.
+
+## Two-GPU measurement contract
+
+The completed two-GPU benchmarks use two H200 GPUs, 16 allocated CPU cores,
+128 GiB host RAM, and the same 960-source prepared view. Each optimizer batch contains 48 targets
 from 16 sources. Seed `167` and `global_step_target_v1` preserve global batch
 membership and indexed noise/timestep draws when ownership changes. Actual
 source keys, target-prefix lengths, endpoint counts, and learning rates were
@@ -291,8 +385,8 @@ including some NCCL buffers, are not included.
 
 Joint plans are computed before the timed loop. The optimized 12k run spent
 **3.55 s** planning all 60 batches, excluded from throughput. This measures GPU
-execution with prepared plans; dynamic background planning has not been
-measured on GPUs. Regular training now supports `joint_packing_v1`, which uses
+execution with prepared plans; these two-GPU FSDP2 results exclude dynamic background
+planning. Regular training now supports `joint_packing_v1`, which uses
 the same planner through bounded spawned CPU workers; see the
 [training guide](../training/README.md).
 
@@ -372,21 +466,23 @@ established as an isolated FSDP communication cost.
 
 ## Implications
 
-For this two-GPU workload, use retained-weight 12k FSDP2 with joint plans and
-token-balanced DDP as measured references. The original-policy 16k retest did
-not displace them; forward retention with per-microbatch reduction remains
-unmeasured with joint plans. Source balancing transfers to both strategies.
-Joint planning adds a measured gain with retained weights, while its startup
-cost is excluded. Bounded background planning is now implemented for regular
-training with the same source and target identities. CPU tests cover 1/2/4/8
-rank plans and actual optimizer updates; its GPU throughput remains unmeasured.
+Use **DDP with dynamic joint CPU packing** for the current H200 workload.
+The completed four- and eight-GPU benchmarks did not reveal a FSDP throughput
+advantage, even with larger packs and fewer FLUX calls. Stop further FSDP
+throughput tuning for this workload; the missing policy combinations and
+grouped-block benchmark are not required to make the current decision.
 
-Memory and communication settings should be reassessed together when scaling
-to four or eight GPUs and larger global batches. Current results establish
-neither that DDP remains faster at those sizes nor that larger FSDP packs become
-beneficial. Activation checkpointing and other precision policies were not
-tested. Numerical validation of the final combination and exposed communication
-analysis remain separate from throughput measurements.
+Keep the shared background planner for both strategies: source assignment and
+aligned microbatches are independent of sharding. Retain the FSDP configurations
+and capacity diagnostics for a concrete future memory constraint, such as a
+larger model or longer individual sequences that DDP cannot accommodate.
+Changing the pack budget alone does not change individual sequence lengths.
+
+These results cover bounded benchmarks on H200s, with one repetition at four
+and eight GPUs. Activation checkpointing and other precision policies were not
+tested. Numerical validation of the final combinations and exposed communication
+analysis remain separate from throughput measurements; completing the benchmark
+does not establish long-run training equivalence.
 
 ## Evidence
 
@@ -424,6 +520,10 @@ Additional evidence:
 - [Historical DDP benchmark](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/20260917T085250710411Z-benchmark-2gpu/summary.json)
   and [single-GPU loss records](../../artifacts/retired-worktrees/ddp-7b16/artifacts/ddp/benchmark-1gpu-20260915T153715-steps.jsonl).
 
-Modal artifacts use Volume `diffusion-arc-models` in environment `diffusion-arc`,
-under `results/ddp/<dated-run-id>/`, with numerical diagnostics under
-`results/fsdp2/`. Historical directory names do not specify execution strategy.
+Two-GPU Modal artifacts use Volume `diffusion-arc-models` in environment
+`diffusion-arc`. Four- and eight-GPU benchmarks and capacity searches use
+`diffusion-arc-training-v2` in profile `joshuakauling`, environment `main`.
+Complete-pipeline benchmarks are stored under `results/ddp/<dated-run-id>/`
+for both strategies; capacity probes use `results/flux-capacity/` and numerical
+diagnostics use `results/fsdp2/`. Directory names alone do not specify strategy;
+the effective recipe in the manifest does.

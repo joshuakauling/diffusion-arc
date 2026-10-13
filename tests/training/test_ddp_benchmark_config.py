@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from diffusion_arc.training.benchmark_config import load_training_benchmark_config
-from diffusion_arc.training.config import load_training_config
+from diffusion_arc.training.config import load_training_config, parse_training_config
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,6 +90,139 @@ class DdpBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(config.training.recipe["loss"]["type"], "region_weighted_velocity_mse")
         self.assertEqual(config.training.recipe["flow"]["endpoint_targets_per_full_batch"], 4)
         self.assertIsNone(config.training.benchmark)
+
+    def test_weak_scaling_configs_select_full_views_and_preserve_the_recipe_contract(self):
+        original = load_training_config(RECIPE)
+        for gpu_count, batch_size, source_count, endpoint_count, epoch_steps in (
+            (4, 96, 1120, 8, 453), (8, 192, 2240, 16, 227),
+        ):
+            with self.subTest(gpu_count=gpu_count):
+                config = load_training_benchmark_config(
+                    BENCHMARK.parent / f"ddp_{gpu_count}gpu_12k_background_packing.json",
+                )
+                training = config.training
+                expected = original.recipe_dict()
+                expected["execution"].update(
+                    distributed_strategy="ddp", flux_packing_algorithm="legacy_bfd_v1",
+                    flux_max_joint_tokens=12288, rank_batch_assignment="joint_packing_v1",
+                )
+                expected["deployment"]["gpu_count"] = gpu_count
+                expected["loop"]["optimizer_batch_size"] = batch_size
+                expected["flow"].update(rng_scheme="global_step_target_v1",
+                                         endpoint_targets_per_full_batch=endpoint_count)
+                self.assertEqual(training.recipe_dict(), expected)
+                reparsed = parse_training_config(training.recipe_dict(), config_path=RECIPE)
+                self.assertEqual(reparsed.recipe_dict(), expected)
+                self.assertEqual(reparsed.loop, training.loop)
+                self.assertEqual(training.path, RECIPE)
+                self.assertEqual(training.models, original.models)
+                self.assertEqual(training.optimizer, original.optimizer)
+                self.assertEqual(training.scheduler, original.scheduler)
+                self.assertEqual(training.loop.optimizer_batch_size, batch_size)
+                self.assertEqual(batch_size // gpu_count, 24)
+                self.assertEqual(training.loop.max_optimizer_steps, epoch_steps)
+                self.assertEqual(training.epoch_optimizer_steps, epoch_steps)
+                self.assertEqual(training.recipe["loop"]["expected_target_count"], 43470)
+                self.assertEqual(training.final_batch_target_count, 78)
+                self.assertEqual(training.recipe["flow"]["endpoint_targets_in_final_batch"], 3)
+                self.assertEqual(endpoint_count / batch_size, 4 / 48)
+                self.assertEqual(training.recipe["validation"]["loss"]["endpoint_weight"], 4 / 48)
+                self.assertEqual(training.data.split_directory,
+                                 ROOT / f"data/benchmarks/ddp_{gpu_count}gpu/splits/train")
+                self.assertEqual(training.data.view_name, "train")
+                self.assertFalse(training.data.shuffle)
+                self.assertEqual(config.expected_source_count, source_count)
+                self.assertEqual(training.targets_per_sequence, 3)
+                self.assertEqual(source_count * training.targets_per_sequence,
+                                 config.benchmark_steps * batch_size)
+                self.assertEqual((config.repetitions, config.smoke_steps, config.warmup_steps,
+                                  config.measured_steps, config.benchmark_steps), (1, 3, 10, 25, 35))
+                self.assertFalse(config.precompute_packing)
+                self.assertEqual(config.fsdp_gradient_sync, "last_microbatch")
+        self.assertEqual(load_training_config(RECIPE).recipe_dict(), original.recipe_dict())
+
+    def test_weak_scaling_flow_policy_uses_full_batch_quota_for_the_benchmark_prefix(self):
+        from diffusion_arc.training.step.flow_sampling import build_flow_policy
+
+        for gpu_count, batch_size, endpoint_count in ((4, 96, 8), (8, 192, 16)):
+            with self.subTest(gpu_count=gpu_count):
+                config = load_training_benchmark_config(
+                    BENCHMARK.parent / f"ddp_{gpu_count}gpu_12k_background_packing.json",
+                )
+                policy = build_flow_policy(config.training)
+                self.assertEqual(policy.endpoint_count(batch_size), endpoint_count)
+                self.assertEqual(policy.final_batch_size, 78)
+                self.assertEqual(policy.endpoint_count(policy.final_batch_size), 3)
+                self.assertEqual(policy.high_noise_count(batch_size), 0)
+
+    def test_batch_and_endpoint_overrides_are_strictly_validated_before_recipe_loading(self):
+        for section, field, values in (
+            ("loop", "optimizer_batch_size", (None, True, False, 0, -1, 96.0, "96")),
+            ("flow", "endpoint_targets_per_full_batch", (None, True, False, -1, 8.0, "8")),
+        ):
+            for value in values:
+                payload = copy.deepcopy(self.payload)
+                payload[section] = {field: value}
+                with self.subTest(section=section, value=value), \
+                        patch("diffusion_arc.training.benchmark_config.load_training_config") as load_recipe:
+                    with self.assertRaisesRegex((TypeError, ValueError), field):
+                        self.load(payload)
+                    load_recipe.assert_not_called()
+        for section, field, unknown in (
+            ("loop", "optimizer_batch_size", "max_steps"),
+            ("flow", "endpoint_targets_per_full_batch", "endpoint_targets_in_final_batch"),
+        ):
+            for value in (None, [], "override", {}, {field: 48, unknown: 3}):
+                payload = copy.deepcopy(self.payload)
+                payload[section] = value
+                with self.subTest(section=section, value=value), \
+                        patch("diffusion_arc.training.benchmark_config.load_training_config") as load_recipe:
+                    with self.assertRaisesRegex((TypeError, ValueError), section):
+                        self.load(payload)
+                    load_recipe.assert_not_called()
+
+    def test_batch_and_endpoint_overrides_retain_shared_recipe_relationship_checks(self):
+        for loop, flow, error in (
+            ({"optimizer_batch_size": 97}, {"endpoint_targets_per_full_batch": 8}, "whole training sequences"),
+            ({"optimizer_batch_size": 96}, {"endpoint_targets_per_full_batch": 97}, "exceeds its batch"),
+            ({"optimizer_batch_size": 96}, {"endpoint_targets_per_full_batch": 7}, "weights must match"),
+        ):
+            payload = copy.deepcopy(self.payload)
+            payload.update(loop=loop, flow=flow)
+            with self.subTest(loop=loop, flow=flow), self.assertRaisesRegex(ValueError, error):
+                self.load(payload)
+
+    def test_nonnegative_endpoint_override_requires_a_compatible_flow_distribution(self):
+        recipe = load_training_config(RECIPE).recipe_dict()
+        recipe["validation"] = None
+        recipe_path = self.path.parent / "recipe.json"
+        recipe_path.write_text(json.dumps(recipe))
+        self.payload["training_recipe"] = str(recipe_path)
+        self.payload["flow"] = {"endpoint_targets_per_full_batch": 0}
+        self.assertEqual(self.load().training.recipe["flow"]["endpoint_targets_per_full_batch"], 0)
+        recipe["flow"] = {key: value for key, value in recipe["flow"].items()
+                          if not key.startswith("endpoint_")}
+        recipe["flow"]["time_distribution"] = "uniform"
+        recipe_path.write_text(json.dumps(recipe))
+        with self.assertRaisesRegex(ValueError, "endpoint_targets_per_full_batch"):
+            self.load()
+
+    def test_weak_scaling_views_and_timing_require_complete_full_batches(self):
+        for gpu_count, source_count in ((4, 1120), (8, 2240)):
+            payload = json.loads((
+                BENCHMARK.parent / f"ddp_{gpu_count}gpu_12k_background_packing.json"
+            ).read_text())
+            payload["training_recipe"] = str(RECIPE)
+            for count in (source_count - 1, source_count + 1):
+                payload["data"]["expected_source_count"] = count
+                with self.subTest(gpu_count=gpu_count, count=count), \
+                        self.assertRaisesRegex(ValueError, "complete view"):
+                    self.load(payload)
+            payload["data"]["expected_source_count"] = source_count
+            payload["smoke_steps"] = 36
+            with self.subTest(gpu_count=gpu_count), \
+                    self.assertRaisesRegex(ValueError, "smoke_steps must not exceed"):
+                self.load(payload)
 
     def test_resolves_paths_at_the_declaring_file_without_requiring_artifacts(self):
         recipe_directory = self.path.parent / "recipes"

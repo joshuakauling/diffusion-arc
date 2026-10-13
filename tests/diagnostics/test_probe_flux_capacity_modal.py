@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -20,6 +21,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class FluxCapacityModalTests(unittest.TestCase):
     def setUp(self):
+        self.load_launcher()
+        self.launcher.probe_flux_capacity.with_options = Mock(return_value=self.launcher.probe_flux_capacity)
+        self.path_patch = patch.object(sys, "path", list(sys.path))
+        self.path_patch.start()
+        self.addCleanup(self.path_patch.stop)
+
+    def load_launcher(self, environment=None):
         self.image = _Image()
         self.volume = SimpleNamespace(commit=Mock())
         self.volume_factory = Mock(return_value=self.volume)
@@ -32,11 +40,12 @@ class FluxCapacityModalTests(unittest.TestCase):
             "_flux_capacity_modal_test", ROOT / "scripts/cloud/probe_flux_capacity_modal.py",
         )
         self.launcher = importlib.util.module_from_spec(spec)
-        with patch.dict(sys.modules, {"modal": fake_modal}), patch.object(sys, "path", list(sys.path)):
+        backend_environment = {key: value for key, value in os.environ.items()
+                               if not key.startswith("DIFFUSION_ARC_MODAL_")}
+        backend_environment.update(environment or {})
+        with patch.dict(sys.modules, {"modal": fake_modal}), patch.object(sys, "path", list(sys.path)), \
+                patch.dict(os.environ, backend_environment, clear=True):
             spec.loader.exec_module(self.launcher)
-        self.path_patch = patch.object(sys, "path", list(sys.path))
-        self.path_patch.start()
-        self.addCleanup(self.path_patch.stop)
 
     def make_repository(self, root):
         repository = Path(root).resolve()
@@ -52,18 +61,20 @@ class FluxCapacityModalTests(unittest.TestCase):
         repository = self.make_repository(root / "repo")
         volume = root / "volume"
         for name in ("nvarc-qwen3-4b-grids15-sft139", "flux2-klein-base-4b"):
-            (volume / name).mkdir(parents=True)
+            (volume / self.launcher.MODEL_SUBDIRECTORY / name).mkdir(parents=True)
         return repository, volume
 
-    def test_fixed_two_h200_budget_cached_volume_and_code_only_upload(self):
+    def test_default_budget_new_backend_and_code_only_upload(self):
         options = self.launcher.app.function_options
         self.assertEqual(options["gpu"], "H200:2")
         self.assertEqual(options["cpu"], (16.0, 16.0))
         self.assertEqual(options["memory"], (128 * 1024, 128 * 1024))
-        self.assertEqual(options["timeout"], 1800)
+        self.assertEqual(options["timeout"], 690)
         self.assertEqual((options["max_containers"], options["retries"]), (1, 0))
         self.assertEqual(options["volumes"], {str(self.launcher.VOLUME_ROOT): self.volume})
-        self.volume_factory.assert_called_once_with("diffusion-arc-models", create_if_missing=False)
+        self.volume_factory.assert_called_once_with("diffusion-arc-training-v2", create_if_missing=False)
+        self.assertEqual(self.launcher.VOLUME_ROOT, Path("/workspace"))
+        self.assertEqual(self.launcher.MODEL_SUBDIRECTORY, Path("models"))
         self.assertEqual([path.relative_to(ROOT).as_posix() for path in self.image.directories],
                          ["src", "scripts", "configs"])
 
@@ -79,7 +90,9 @@ class FluxCapacityModalTests(unittest.TestCase):
             arguments = self.launcher.probe_flux_capacity.remote.call_args.args
             self.assertEqual(arguments[:5], (self.launcher.CONFIG, 12288, 1024, 49152, 2))
             self.assertTrue(arguments[6])
-            self.assertEqual(len(arguments), 7)
+            self.assertEqual(arguments[7:], (2, 600))
+            self.launcher.probe_flux_capacity.with_options.assert_called_once_with(
+                **self.launcher.resources(2, 600))
             metadata = arguments[5]
             self.assertEqual({key: metadata[key] for key in identity}, identity)
             self.assertEqual(metadata["command"], sys.argv)
@@ -118,7 +131,7 @@ class FluxCapacityModalTests(unittest.TestCase):
         arguments = self.launcher.probe_flux_capacity.remote.call_args.args
         self.assertEqual(arguments[:5], (self.launcher.CONFIG, 12288, 1024, 49152, 2))
         self.assertFalse(arguments[6])
-        self.assertEqual(len(arguments), 7)
+        self.assertEqual(arguments[7:], (2, 600))
 
     def test_both_model_paths_must_remain_in_the_cached_checkpoint_mount(self):
         for model_path in ("nvarc_checkpoint", "flux_checkpoint"):
@@ -144,7 +157,7 @@ class FluxCapacityModalTests(unittest.TestCase):
                     self.assertEqual((args.start_tokens, args.step_tokens, args.max_tokens, args.updates),
                                      (15360, 1024, 17408, 2))
                     self.assertFalse(args.reshard_after_forward)
-                    self.assertEqual(timeout_seconds, 1710)
+                    self.assertEqual(timeout_seconds, 600)
                     self.assertEqual(metadata["git_commit"], "head")
                     self.assertEqual(metadata["modal_resources"], self.launcher.RESOURCES)
                     self.assertEqual(metadata["fa3_revision"], self.launcher.FA3_REVISION)
@@ -165,7 +178,7 @@ class FluxCapacityModalTests(unittest.TestCase):
                 run.assert_called_once()
                 load.assert_called_once_with(repository / self.launcher.CONFIG, require_checkpoints=True)
                 self.assertEqual(self.volume.commit.call_count, 2)
-                self.assertEqual((repository / "checkpoints").resolve(), volume)
+                self.assertEqual((repository / "checkpoints").resolve(), volume / self.launcher.MODEL_SUBDIRECTORY)
                 self.assertTrue((Path(result) / "candidate.json").is_file())
                 self.assertFalse((repository / "data").exists())
 
@@ -214,6 +227,41 @@ class FluxCapacityModalTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertEqual(marker.read_text(), "preserve")
                 self.volume.commit.assert_called_once_with()
+
+    def test_scaling_dispatch_matches_configuration_and_caps_gpu_time(self):
+        for gpus in (4, 8):
+            name = f"configs/training/benchmarks/fsdp2_{gpus}gpu_12k_background_packing.json"
+            remote = Mock()
+            with self.subTest(gpus=gpus), patch.object(self.launcher, "probe_flux_capacity", remote), \
+                    patch.object(probe, "source_metadata", return_value={}):
+                self.launcher.main(config=name, gpus=gpus, start_tokens=12288, step_tokens=2048,
+                                   max_tokens=32768, updates=2, reshard_after_forward=False)
+            remote.with_options.assert_called_once_with(
+                gpu=f"H200:{gpus}", cpu=(8. * gpus,) * 2, memory=(65536 * gpus,) * 2, timeout=690)
+            self.assertEqual(remote.with_options.return_value.remote.call_args.args[:5],
+                             (name, 12288, 2048, 32768, 2))
+            self.assertEqual(remote.with_options.return_value.remote.call_args.args[6:], (False, gpus, 600))
+        for options in (dict(gpus=3), dict(gpus=True), dict(time_limit_seconds=29),
+                        dict(time_limit_seconds=1801), dict(time_limit_seconds=True),
+                        dict(config="configs/training/benchmarks/fsdp2_4gpu_12k_background_packing.json", gpus=8)):
+            with self.subTest(options=options), patch.object(self.launcher, "probe_flux_capacity", Mock()) as remote:
+                with self.assertRaises(ValueError):
+                    self.launcher.main(**options)
+                remote.with_options.assert_not_called()
+
+    def test_legacy_storage_override_and_invalid_paths(self):
+        self.load_launcher(environment={"DIFFUSION_ARC_MODAL_VOLUME": "diffusion-arc-models",
+                                        "DIFFUSION_ARC_MODAL_VOLUME_ROOT": "/mnt/diffusion-arc-models",
+                                        "DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "."})
+        self.assertEqual(self.launcher.MODEL_SUBDIRECTORY, Path("."))
+        self.volume_factory.assert_called_once_with("diffusion-arc-models", create_if_missing=False)
+        for environment in ({"DIFFUSION_ARC_MODAL_VOLUME": ""},
+                            {"DIFFUSION_ARC_MODAL_VOLUME_ROOT": "relative"},
+                            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "../models"},
+                            {"DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY": "/models"}):
+            with self.subTest(environment=environment), self.assertRaises(ValueError):
+                self.load_launcher(environment=environment)
+            self.volume_factory.assert_not_called()
 
 
 if __name__ == "__main__":

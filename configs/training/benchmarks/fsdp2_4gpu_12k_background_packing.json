@@ -1,0 +1,30 @@
+{
+  "config_type": "ddp_benchmark",
+  "schema_version": 1,
+  "training_recipe": "../arc_agi_1_epoch.json",
+  "data": {
+    "split_directory": "../../../data/benchmarks/ddp_4gpu/splits/train",
+    "view_name": "train",
+    "expected_source_count": 1120
+  },
+  "repetitions": 1,
+  "smoke_steps": 3,
+  "warmup_steps": 10,
+  "measured_steps": 25,
+  "execution": {
+    "distributed_strategy": "fsdp2",
+    "gpu_count": 4,
+    "flux_packing_algorithm": "legacy_bfd_v1",
+    "flux_max_joint_tokens": 12288,
+    "rng_scheme": "global_step_target_v1",
+    "rank_batch_assignment": "joint_packing_v1",
+    "fsdp_reshard_after_forward": false,
+    "fsdp_blocks_per_group": 1
+  },
+  "loop": {
+    "optimizer_batch_size": 96
+  },
+  "flow": {
+    "endpoint_targets_per_full_batch": 8
+  }
+}

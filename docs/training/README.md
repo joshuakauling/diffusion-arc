@@ -354,6 +354,27 @@ numerical and checkpoint identities. B10's
 matches B9's 12,288-token, no-forward-resharding settings with one repetition;
 only source assignment changes. CPU planning estimates do not establish GPU throughput.
 
+The synthetic [FLUX capacity launcher](../../scripts/cloud/probe_flux_capacity_modal.py)
+accepts `--gpus 2`, `4` or `8`, matching the selected FSDP configuration and
+24 training targets per GPU. The
+[four-GPU](../../configs/training/benchmarks/fsdp2_4gpu_12k_background_packing.json)
+and [eight-GPU](../../configs/training/benchmarks/fsdp2_8gpu_12k_background_packing.json) configurations
+retain gathered weights after forward and reduce gradients at batch end.
+Use `--no-reshard-after-forward` for that capacity policy. Each candidate runs
+in fresh processes for at least two AdamW updates with frozen model weights and
+eight maximal source-state buffers resident per rank. This synthetic workload
+uses two full stress packs per update; it does not execute the encoders or the
+background batch planner. It establishes a tested pack bound to confirm in the
+full pipeline, not a universal training capacity guarantee. Candidate reports
+include CUDA allocator retries as well as peak memory and hard OOMs.
+
+The capacity launcher defaults to the new `diffusion-arc-training-v2` volume
+mounted at `/workspace`, with models under `models/`. Existing
+`DIFFUSION_ARC_MODAL_*` overrides remain accepted. `--time-limit-seconds 600`
+limits the complete search to ten minutes, with another 90 seconds reserved
+for cleanup and persistence. Results remain in `results/flux-capacity/` on
+that volume, including completed candidates when the time limit is reached.
+
 Set `execution.rank_batch_assignment=joint_packing_v1` to plan source ownership
 and aligned FLUX microbatches during regular training or a benchmark. It uses
 the same bounded joint planner as the precomputed experiments. Each training
@@ -376,7 +397,51 @@ The Modal benchmark launcher accepts 1, 2, 4 or 8 GPUs, matching
 `execution.gpu_count` in the benchmark config; numerical diagnostics still use
 exactly two GPUs and reject background packing. Modal supports up to eight
 H200s in one container ([GPU documentation](https://modal.com/docs/guide/gpu)).
-Larger optimizer batches must be selected explicitly in the training recipe.
+Larger optimizer batches must be selected explicitly in the training recipe or
+the benchmark wrapper's `loop.optimizer_batch_size`. An optional wrapper
+`flow.endpoint_targets_per_full_batch` keeps the endpoint fraction constant.
+
+The [four-GPU](../../configs/training/benchmarks/ddp_4gpu_12k_background_packing.json)
+and [eight-GPU](../../configs/training/benchmarks/ddp_8gpu_12k_background_packing.json)
+DDP configurations use background joint packing and a 12,288-token FLUX budget.
+They select 96 and 192 global targets respectively, retaining 24 targets per GPU
+on average and the original endpoint fraction. Each runs one repetition with
+ten warmup updates and 25 measured updates. Their separate prepared views contain
+1,120 and 2,240 sources from the same seeded training-only selection; existing
+benchmark bundles remain unchanged. The launcher uploads these explicit views
+when present, including their prepared token lengths.
+
+The selected [four-GPU FSDP2 benchmark](../../configs/training/benchmarks/fsdp2_4gpu_14k_background_packing.json)
+uses the same 96-target batch, prepared view and 10/25-update measurement window,
+with a 14,336-token pack budget, forward weight retention, batch-end gradient
+reduction and one block per FSDP group. Background joint packing remains enabled.
+The [capacity result](../performance/fsdp2.md#four-gpu-pack-budget-selection)
+selected this budget; the complete benchmark finished all 35 updates and
+measured a 4.762 s median, versus DDP's 4.680 s.
+
+The selected [eight-GPU FSDP2 benchmark](../../configs/training/benchmarks/fsdp2_8gpu_16k_background_packing.json)
+uses 16,384 tokens with the same FSDP settings and measurement window, 192 global
+targets and the prepared eight-GPU view. The capacity probe completed two updates
+at this budget without allocator retries on all eight ranks; 18,432 tokens failed
+on the second update. The complete benchmark finished all 35 updates and
+measured a 4.821 s median, versus DDP's 4.677 s. The probe artifacts are stored
+under `artifacts/flux-capacity/20261013T155732028769Z/`.
+
+The [complete four/eight-GPU comparison](../performance/fsdp2.md#four--and-eight-gpu-complete-pipeline-results)
+selects DDP with background joint packing for this workload. Larger FSDP packs
+reduced FLUX calls but did not improve throughput. Retain FSDP as a capacity
+option when an actual memory constraint requires it; the bounded runs do not
+establish long-run numerical equivalence.
+
+For the `joshuakauling` profile's `main` environment, select the existing storage
+with `DIFFUSION_ARC_MODAL_VOLUME=diffusion-arc-training-v2`,
+`DIFFUSION_ARC_MODAL_VOLUME_ROOT=/workspace` and
+`DIFFUSION_ARC_MODAL_MODEL_SUBDIRECTORY=models`. The mount preserves the cached
+NVARC symlink's absolute target. Before the first GPU run,
+[`prepare_ddp_backend_modal.py`](../../scripts/cloud/prepare_ddp_backend_modal.py)
+copies only the missing original FLUX transformer from the old workspace using
+a separate CPU allocation. It does not substitute a trained checkpoint.
+The launch record stores the selected volume, mount and model directory.
 
 The [12k background-packing benchmark](../../configs/training/benchmarks/fsdp2_12k_background_packing.json)
 retains the measured FSDP reference's sharding and optimizer policies, with one
@@ -384,14 +449,16 @@ repetition. Its manifest records the planner contract and implementation hash;
 step records retain the executed packs. Waiting for a future plan during timed
 data retrieval is included in throughput. The first plan and initial DataLoader
 prefetch occur before the timed loop and are excluded. CPU tests cover 1/2/4/8
-rank plans, worker prefetch, resume, errors and real optimizer updates; GPU
-throughput with overlapping planning remains unmeasured.
+rank plans, worker prefetch, resume, errors and real optimizer updates. The
+four- and eight-GPU benchmarks above include overlapping background planning.
 
-`--mode smoke` runs the first three updates. `--mode benchmark` runs ten training
-updates excluded from statistics, followed by 50 measured updates. Both modes
+`--mode smoke` runs the first three updates. The two-GPU reference configs use
+`--mode benchmark` for ten training updates excluded from statistics, followed
+by 50 measured updates; other configs select their own window. Both modes
 start fresh from the base checkpoint and share their initial data/noise sequence.
 The Modal launcher executes the configured repetitions automatically in benchmark
-mode (three for the checked-in DDP/FSDP2 configs), each in fresh worker processes.
+mode (three for the historical reference configs, one for the scaling configs),
+each in fresh worker processes.
 Smoke mode runs once. Inspect smoke counts and finite global losses before the
 benchmark. One GPU uses the same DDP path with `world_size=1`; select a benchmark
 config with `execution.gpu_count=1` for that run. The checked-in reference below

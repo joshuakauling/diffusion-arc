@@ -218,6 +218,19 @@ class SourceLengthTests(unittest.TestCase):
         self.assertEqual(self._load(), ((4, 7, 10),) * 3)
         self.assertEqual(json.loads(destination.read_text())["provenance"]["method"], "cpu_tokenization")
 
+    def test_cpu_preparation_accepts_tokenizer_metadata_without_model_weights(self):
+        config = preparation.REPOSITORY_ROOT / "configs/training/arc_agi_1_epoch.json"
+        tokenizer_directory = self.root / "cached-tokenizer"
+        with patch.object(preparation, "ArcTrainingDataset", return_value=self.dataset), \
+                patch.object(preparation.AutoTokenizer, "from_pretrained", return_value=Mock()) as load:
+            destination = preparation.prepare_training_token_lengths(config,
+                tokenizer_directory=tokenizer_directory)
+        self.assertEqual(load.call_args.args, (tokenizer_directory.resolve(),))
+        self.assertEqual(load.call_args.kwargs, {"local_files_only": True, "trust_remote_code": False})
+        provenance = json.loads(destination.read_text())["provenance"]
+        self.assertEqual(provenance["tokenizer_directory"], str(tokenizer_directory.resolve()))
+        self.assertNotEqual(provenance["nvarc_checkpoint"], provenance["tokenizer_directory"])
+
 
 if __name__ == "__main__":
     unittest.main()
